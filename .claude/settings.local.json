@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git config --global user.name)",
+      "Bash(git config --global user.email)",
+      "Bash(brew list gh)",
+      "Bash(/opt/homebrew/bin/brew install gh)"
+    ]
+  }
+}
