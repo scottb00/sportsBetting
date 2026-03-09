@@ -30,6 +30,12 @@ pub struct PolymarketClient {
     client: Client,
 }
 
+impl Default for PolymarketClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PolymarketClient {
     pub fn new() -> Self {
         Self {
@@ -206,7 +212,7 @@ impl PolymarketClient {
         };
 
         let sub_json = serde_json::to_string(&sub)?;
-        write.send(Message::Text(sub_json.into())).await?;
+        write.send(Message::Text(sub_json)).await?;
         tracing::info!(
             "Subscribed to Polymarket updates for {} tokens",
             token_ids.len()

@@ -117,7 +117,7 @@ impl KalshiWsClient {
         };
 
         let cmd_json = serde_json::to_string(&subscribe_cmd)?;
-        write.send(Message::Text(cmd_json.into())).await?;
+        write.send(Message::Text(cmd_json)).await?;
         tracing::info!(
             "Subscribed to Kalshi channels for {} markets",
             market_tickers.len()

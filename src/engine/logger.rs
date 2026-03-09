@@ -52,6 +52,7 @@ impl TradeLogger {
         Ok(Self { conn })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn log_order(
         &self,
         order_id: &str,
@@ -71,6 +72,7 @@ impl TradeLogger {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn log_fill(
         &self,
         trade_id: &str,

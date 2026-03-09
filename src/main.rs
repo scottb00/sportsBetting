@@ -147,7 +147,7 @@ async fn main() -> Result<()> {
                 None => {
                     // No event_date — check game_start_time on markets
                     e.markets.iter().any(|m| {
-                        m.game_start_time.as_ref().map_or(false, |t| {
+                        m.game_start_time.as_ref().is_some_and(|t| {
                             t.starts_with(&today) || t.starts_with(&tomorrow)
                         })
                     })
@@ -230,12 +230,11 @@ async fn main() -> Result<()> {
         for event_id in &mapped_event_ids {
             match espn_poller.fetch_summary(event_id).await {
                 Ok(summary) => {
+                    let win_prob = EspnPoller::latest_win_prob(&summary);
+                    let dk_ml = EspnPoller::extract_dk_moneyline(&summary).map(|(h, _)| h);
                     let mut s = state.lock().await;
                     if let Some(gs) = s.game_state.get_mut(event_id) {
-                        gs.espn_home_win_prob = EspnPoller::latest_win_prob(&summary);
-                        if let Some((home_ml, _away_ml)) = EspnPoller::extract_dk_moneyline(&summary) {
-                            gs.dk_home_implied_prob = Some(EspnPoller::moneyline_to_prob(home_ml));
-                        }
+                        gs.update_from_espn_summary(win_prob, dk_ml);
                         tracing::info!(
                             "Initial {}: {} v {} | espn_hp={:?} dk_hp={:?}",
                             event_id, gs.away_team, gs.home_team,
@@ -320,11 +319,10 @@ async fn main() -> Result<()> {
                         for event_id in &new_breaks {
                             match espn_poller.fetch_summary(event_id).await {
                                 Ok(summary) => {
+                                    let win_prob = EspnPoller::latest_win_prob(&summary);
+                                    let dk_ml = EspnPoller::extract_dk_moneyline(&summary).map(|(h, _)| h);
                                     if let Some(gs) = s.game_state.get_mut(event_id) {
-                                        gs.espn_home_win_prob = EspnPoller::latest_win_prob(&summary);
-                                        if let Some((home_ml, _away_ml)) = EspnPoller::extract_dk_moneyline(&summary) {
-                                            gs.dk_home_implied_prob = Some(EspnPoller::moneyline_to_prob(home_ml));
-                                        }
+                                        gs.update_from_espn_summary(win_prob, dk_ml);
                                         tracing::info!(
                                             "Updated {} win_prob={:?} dk_prob={:?}",
                                             event_id,
@@ -388,20 +386,20 @@ async fn main() -> Result<()> {
                             .entry(market_ticker.clone())
                             .or_insert_with(|| LocalOrderBook::new(market_ticker.clone()));
                         book.apply_snapshot(&snapshot);
-                        let prices = (book.best_yes_bid().map(|l| l.price as f64),
-                                      book.best_yes_ask().map(|l| l.price as f64),
-                                      book.yes_mid());
-                        update_kalshi_prices_from(&mut s.game_state, &market_ticker, prices);
+                        let prices = extract_book_prices(book);
+                        if let Some(gs) = s.game_state.get_mut_by_kalshi_ticker(&market_ticker) {
+                            gs.update_kalshi_prices(prices.0, prices.1, prices.2);
+                        }
                         tracing::debug!("Book snapshot for {}", market_ticker);
                     }
                     KalshiWsEvent::OrderBookDelta(delta) => {
                         let ticker = delta.market_ticker.clone();
                         if let Some(book) = s.order_books.get_mut(&ticker) {
                             book.apply_delta(&delta);
-                            let prices = (book.best_yes_bid().map(|l| l.price as f64),
-                                          book.best_yes_ask().map(|l| l.price as f64),
-                                          book.yes_mid());
-                            update_kalshi_prices_from(&mut s.game_state, &ticker, prices);
+                            let prices = extract_book_prices(book);
+                            if let Some(gs) = s.game_state.get_mut_by_kalshi_ticker(&ticker) {
+                                gs.update_kalshi_prices(prices.0, prices.1, prices.2);
+                            }
                         }
                     }
                     KalshiWsEvent::Fill(fill) => {
@@ -442,25 +440,10 @@ async fn main() -> Result<()> {
             } => {
                 match event {
                     PolymarketEvent::PriceUpdate { asset_id, best_bid, best_ask } => {
-                        let mut s = state.lock().await;
-                        // Find the game with this token and update price
-                        for gs in s.game_state.games.values_mut() {
-                            if gs.polymarket_token_id.as_deref() == Some(&asset_id) {
-                                if let (Some(bid), Some(ask)) = (best_bid, best_ask) {
-                                    let yes_mid = (bid + ask) / 2.0;
-                                    // Convert to home prob: flip if YES token is for away team
-                                    if gs.polymarket_is_home {
-                                        gs.polymarket_home_prob = Some(yes_mid);
-                                        gs.polymarket_home_bid = Some(bid);
-                                        gs.polymarket_home_ask = Some(ask);
-                                    } else {
-                                        gs.polymarket_home_prob = Some(1.0 - yes_mid);
-                                        // Flip: home_bid = 1 - yes_ask, home_ask = 1 - yes_bid
-                                        gs.polymarket_home_bid = Some(1.0 - ask);
-                                        gs.polymarket_home_ask = Some(1.0 - bid);
-                                    }
-                                }
-                                break;
+                        if let (Some(bid), Some(ask)) = (best_bid, best_ask) {
+                            let mut s = state.lock().await;
+                            if let Some(gs) = s.game_state.get_mut_by_polymarket_token(&asset_id) {
+                                gs.update_polymarket_prices(bid, ask);
                             }
                         }
                     }
@@ -477,20 +460,13 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Update Kalshi bid/ask/mid in game state from pre-extracted prices.
-fn update_kalshi_prices_from(
-    game_state: &mut GameStateManager,
-    kalshi_ticker: &str,
-    prices: (Option<f64>, Option<f64>, Option<f64>),
-) {
-    for gs in game_state.games.values_mut() {
-        if gs.kalshi_ticker.as_deref() == Some(kalshi_ticker) {
-            gs.kalshi_yes_bid = prices.0;
-            gs.kalshi_yes_ask = prices.1;
-            gs.kalshi_yes_mid = prices.2;
-            break;
-        }
-    }
+/// Extract bid/ask/mid from a local order book.
+fn extract_book_prices(book: &LocalOrderBook) -> (Option<f64>, Option<f64>, Option<f64>) {
+    (
+        book.best_yes_bid().map(|l| l.price as f64),
+        book.best_yes_ask().map(|l| l.price as f64),
+        book.yes_mid(),
+    )
 }
 
 /// Run all strategies and collect order signals.
@@ -519,38 +495,36 @@ fn evaluate_strategies(
         }
 
         // Skip extreme prices (< 10c or > 90c)
-        if let Some(mid) = game.kalshi_yes_mid {
-            if mid < 10.0 || mid > 90.0 {
-                continue;
-            }
+        if let Some(mid) = game.kalshi_yes_mid
+            && !(10.0..=90.0).contains(&mid)
+        {
+            continue;
         }
 
         let current_exposure = state.order_manager.market_exposure(ticker);
         let mut best_signal: Option<OrderSignal> = None;
 
         // Break EV — only during breaks
-        if game.phase.is_break() {
-            if let Some(signal) = break_ev.evaluate(game, &state.risk, current_exposure) {
-                best_signal = Some(signal);
-            }
+        if game.phase.is_break()
+            && let Some(signal) = break_ev.evaluate(game, &state.risk, current_exposure)
+        {
+            best_signal = Some(signal);
         }
 
         // Arb Scanner — during live games (prefer over break_ev if better size)
-        if matches!(game.phase, GamePhase::Live | GamePhase::Halftime | GamePhase::Break) {
-            if let Some(signal) = arb_scanner.evaluate(game, &state.risk, current_exposure) {
-                if best_signal.as_ref().map_or(true, |b| signal.size_dollars > b.size_dollars) {
-                    best_signal = Some(signal);
-                }
-            }
+        if matches!(game.phase, GamePhase::Live | GamePhase::Halftime | GamePhase::Break)
+            && let Some(signal) = arb_scanner.evaluate(game, &state.risk, current_exposure)
+            && best_signal.as_ref().is_none_or(|b| signal.size_dollars > b.size_dollars)
+        {
+            best_signal = Some(signal);
         }
 
         // CLV Hunter — pre-game only
-        if game.phase == GamePhase::PreGame {
-            if let Some(signal) = clv_hunter.evaluate(game, &state.risk, current_exposure) {
-                if best_signal.as_ref().map_or(true, |b| signal.size_dollars > b.size_dollars) {
-                    best_signal = Some(signal);
-                }
-            }
+        if game.phase == GamePhase::PreGame
+            && let Some(signal) = clv_hunter.evaluate(game, &state.risk, current_exposure)
+            && best_signal.as_ref().is_none_or(|b| signal.size_dollars > b.size_dollars)
+        {
+            best_signal = Some(signal);
         }
 
         if let Some(signal) = best_signal {

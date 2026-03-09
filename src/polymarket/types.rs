@@ -152,10 +152,3 @@ pub struct WsSubscription {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_feature_enabled: Option<bool>,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WsEvent {
-    pub event_type: Option<String>, // "book", "price_change", "last_trade_price"
-    #[serde(flatten)]
-    pub data: serde_json::Value,
-}

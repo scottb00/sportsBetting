@@ -16,6 +16,12 @@ pub struct EspnPoller {
     client: Client,
 }
 
+impl Default for EspnPoller {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EspnPoller {
     pub fn new() -> Self {
         Self {
@@ -121,10 +127,9 @@ impl EspnPoller {
                 // Try homeTeamOdds/awayTeamOdds first (clean numeric values)
                 if let (Some(home_odds), Some(away_odds)) =
                     (&entry.home_team_odds, &entry.away_team_odds)
+                    && let (Some(h), Some(a)) = (home_odds.money_line, away_odds.money_line)
                 {
-                    if let (Some(h), Some(a)) = (home_odds.money_line, away_odds.money_line) {
-                        return Some((h, a));
-                    }
+                    return Some((h, a));
                 }
 
                 // Fall back to moneyline JSON (home/away with live/close/open string odds)
@@ -197,6 +202,12 @@ impl EspnPoller {
 /// Tracks game states and detects phase transitions (e.g., Live -> Halftime).
 pub struct GameTracker {
     previous_phases: HashMap<String, GamePhase>,
+}
+
+impl Default for GameTracker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GameTracker {

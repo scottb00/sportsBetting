@@ -150,6 +150,35 @@ impl GameState {
         let kalshi = self.kalshi_yes_mid?;
         Some(fair - kalshi / 100.0) // kalshi is in cents, fair is 0-1
     }
+
+    /// Update Kalshi book prices.
+    pub fn update_kalshi_prices(&mut self, bid: Option<f64>, ask: Option<f64>, mid: Option<f64>) {
+        self.kalshi_yes_bid = bid;
+        self.kalshi_yes_ask = ask;
+        self.kalshi_yes_mid = mid;
+    }
+
+    /// Update ESPN win probability and DK implied probability from a summary response.
+    pub fn update_from_espn_summary(&mut self, win_prob: Option<f64>, dk_home_moneyline: Option<f64>) {
+        self.espn_home_win_prob = win_prob;
+        if let Some(ml) = dk_home_moneyline {
+            self.dk_home_implied_prob = Some(crate::espn::poller::EspnPoller::moneyline_to_prob(ml));
+        }
+    }
+
+    /// Update Polymarket prices from a YES-token bid/ask websocket update.
+    pub fn update_polymarket_prices(&mut self, yes_bid: f64, yes_ask: f64) {
+        let yes_mid = (yes_bid + yes_ask) / 2.0;
+        if self.polymarket_is_home {
+            self.polymarket_home_prob = Some(yes_mid);
+            self.polymarket_home_bid = Some(yes_bid);
+            self.polymarket_home_ask = Some(yes_ask);
+        } else {
+            self.polymarket_home_prob = Some(1.0 - yes_mid);
+            self.polymarket_home_bid = Some(1.0 - yes_ask);
+            self.polymarket_home_ask = Some(1.0 - yes_bid);
+        }
+    }
 }
 
 /// Manages all active game states.
@@ -182,6 +211,16 @@ impl GameStateManager {
         self.games
             .entry(event_id.clone())
             .or_insert_with(|| GameState::new(event_id, home_team, away_team))
+    }
+
+    /// Find game by Kalshi ticker.
+    pub fn get_mut_by_kalshi_ticker(&mut self, ticker: &str) -> Option<&mut GameState> {
+        self.games.values_mut().find(|g| g.kalshi_ticker.as_deref() == Some(ticker))
+    }
+
+    /// Find game by Polymarket token ID.
+    pub fn get_mut_by_polymarket_token(&mut self, token_id: &str) -> Option<&mut GameState> {
+        self.games.values_mut().find(|g| g.polymarket_token_id.as_deref() == Some(token_id))
     }
 
     /// Get all games currently in a break state.
