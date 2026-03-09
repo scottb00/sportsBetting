@@ -1,10 +1,26 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git config --global user.name)",
-      "Bash(git config --global user.email)",
-      "Bash(brew list gh)",
-      "Bash(/opt/homebrew/bin/brew install gh)"
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "Bash(*)",
+      "WebSearch",
+      "WebFetch",
+      "Agent"
+    ],
+    "deny": [
+      "Bash(rm *)",
+      "Bash(rm -rf *)",
+      "Bash(rmdir *)",
+      "Bash(git push --force*)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean*)",
+      "Bash(git checkout -- *)",
+      "Bash(git restore *)",
+      "Bash(> *)"
     ]
   }
 }

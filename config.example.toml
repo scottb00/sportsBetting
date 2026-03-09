@@ -1,0 +1,31 @@
+# Sports Betting Bot Configuration
+# Copy this to config.toml and fill in your keys.
+# NEVER commit config.toml — it contains secrets.
+
+[kalshi]
+api_key_id = "your-kalshi-key-id"
+private_key_path = "kalshi_private_key.pem"
+demo = true  # Set to false for live trading
+
+[anthropic]
+api_key = "sk-ant-..."
+
+[risk]
+max_position_per_game = 50.0   # dollars
+max_total_exposure = 500.0     # dollars
+daily_loss_limit = 200.0       # dollars
+kelly_fraction = 0.5           # half Kelly
+min_edge_threshold = 0.01      # 1% minimum edge after fees
+
+[strategy]
+break_ev_min_edge = 0.015      # 1.5% for break-based quoting
+arb_scanner_min_edge = 0.02    # 2% for cross-market arb
+clv_hunter_min_edge = 0.015    # 1.5% for pre-game CLV
+
+[polling]
+scoreboard_interval_secs = 30
+summary_on_break_only = true
+
+[logging]
+db_path = "trades.db"
+cache_path = "market_mappings.json"
