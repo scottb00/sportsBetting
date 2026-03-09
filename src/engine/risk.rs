@@ -93,18 +93,20 @@ impl RiskManager {
         raw_size.min(game_remaining).min(total_remaining)
     }
 
-    /// Calculate Kalshi maker fee in cents.
-    /// Fee = ceil(0.0175 * contracts * price * (1 - price))
+    /// Calculate Kalshi maker fee in cents (1.75% rate).
     pub fn maker_fee(contracts: i64, price_cents: i64) -> f64 {
-        let p = price_cents as f64 / 100.0;
-        (0.0175 * contracts as f64 * p * (1.0 - p)).ceil()
+        Self::kalshi_fee(0.0175, contracts, price_cents)
     }
 
-    /// Calculate Kalshi taker fee in cents.
-    /// Fee = ceil(0.07 * contracts * price * (1 - price))
+    /// Calculate Kalshi taker fee in cents (7% rate).
     pub fn taker_fee(contracts: i64, price_cents: i64) -> f64 {
+        Self::kalshi_fee(0.07, contracts, price_cents)
+    }
+
+    /// Kalshi fee formula: ceil(rate * contracts * price * (1 - price))
+    fn kalshi_fee(rate: f64, contracts: i64, price_cents: i64) -> f64 {
         let p = price_cents as f64 / 100.0;
-        (0.07 * contracts as f64 * p * (1.0 - p)).ceil()
+        (rate * contracts as f64 * p * (1.0 - p)).ceil()
     }
 
     /// Record a fill — update exposure and P&L.

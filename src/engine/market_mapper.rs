@@ -339,3 +339,129 @@ impl MarketMapper {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- fuzzy_game_match ---
+
+    #[test]
+    fn exact_match_kalshi_format() {
+        assert!(MarketMapper::fuzzy_game_match(
+            "Duke Blue Devils @ UNC Tar Heels",
+            "Duke Blue Devils at UNC Tar Heels Winner?",
+            " at ", " Winner?"
+        ));
+    }
+
+    #[test]
+    fn abbreviation_st_to_state() {
+        assert!(MarketMapper::fuzzy_game_match(
+            "Appalachian St. Mountaineers @ Georgia Bulldogs",
+            "Appalachian State at Georgia Winner?",
+            " at ", " Winner?"
+        ));
+    }
+
+    #[test]
+    fn mascot_filtering() {
+        // "Tigers" should be filtered out, matching on "Auburn" alone
+        assert!(MarketMapper::fuzzy_game_match(
+            "Auburn Tigers @ Alabama Crimson Tide",
+            "Auburn at Alabama Winner?",
+            " at ", " Winner?"
+        ));
+    }
+
+    #[test]
+    fn wrong_game_does_not_match() {
+        assert!(!MarketMapper::fuzzy_game_match(
+            "Duke Blue Devils @ UNC Tar Heels",
+            "Kentucky at Tennessee Winner?",
+            " at ", " Winner?"
+        ));
+    }
+
+    #[test]
+    fn polymarket_format_vs_separator() {
+        assert!(MarketMapper::fuzzy_game_match(
+            "Duke Blue Devils @ UNC Tar Heels",
+            "Duke vs. UNC",
+            " vs. ", ""
+        ));
+    }
+
+    #[test]
+    fn reversed_order_still_matches() {
+        // ESPN has Away @ Home, but title may have them reversed
+        assert!(MarketMapper::fuzzy_game_match(
+            "UNC Tar Heels @ Duke Blue Devils",
+            "Duke Blue Devils at UNC Tar Heels Winner?",
+            " at ", " Winner?"
+        ));
+    }
+
+    #[test]
+    fn conference_tournament_synthetic_title() {
+        // Synthetic title from normalize_conference_tournament_event uses "at"
+        assert!(MarketMapper::fuzzy_game_match(
+            "East Tennessee St. Buccaneers @ Furman Paladins",
+            "East Tennessee St. at Furman",
+            " at ", ""
+        ));
+    }
+
+    #[test]
+    fn no_separator_returns_false() {
+        assert!(!MarketMapper::fuzzy_game_match(
+            "Duke @ UNC",
+            "Duke UNC Winner?",
+            " at ", " Winner?"
+        ));
+    }
+
+    // --- team_name_matches ---
+
+    #[test]
+    fn team_name_exact() {
+        assert!(MarketMapper::team_name_matches("duke", "duke"));
+    }
+
+    #[test]
+    fn team_name_contains() {
+        assert!(MarketMapper::team_name_matches("north carolina tar heels", "north carolina"));
+    }
+
+    #[test]
+    fn team_name_abbreviation() {
+        assert!(MarketMapper::team_name_matches(
+            "appalachian state mountaineers",
+            "appalachian st."
+        ));
+    }
+
+    #[test]
+    fn team_name_no_match() {
+        assert!(!MarketMapper::team_name_matches("duke blue devils", "kentucky wildcats"));
+    }
+
+    // --- market_is_home_team ---
+
+    #[test]
+    fn market_is_home_team_yes_is_home() {
+        // Title: "Away at Home Winner?", YES = Home
+        assert!(MarketMapper::market_is_home_team(
+            "Duke at UNC Winner?",
+            "UNC"
+        ));
+    }
+
+    #[test]
+    fn market_is_home_team_yes_is_away() {
+        assert!(!MarketMapper::market_is_home_team(
+            "Duke at UNC Winner?",
+            "Duke"
+        ));
+    }
+}

@@ -16,6 +16,8 @@ pub struct OrderSignal {
     pub post_only: bool,
     /// Optional expiration timestamp (unix seconds) — Kalshi API takes milliseconds.
     pub expiration_ts: Option<i64>,
+    /// Edge after fees (used for comparing signals across markets).
+    pub edge_after_fees: f64,
 }
 
 /// An order together with metadata for lifecycle tracking.
@@ -319,5 +321,145 @@ impl OrderManager {
         self.order_intents.retain(|key, _| {
             !tickers.iter().any(|t| t == &key.0)
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_order(id: &str, ticker: &str) -> Order {
+        Order {
+            order_id: id.to_string(),
+            ticker: ticker.to_string(),
+            action: OrderAction::Buy,
+            side: OrderSide::Yes,
+            order_type: "limit".to_string(),
+            status: "resting".to_string(),
+            yes_price: Some(55),
+            no_price: Some(45),
+            remaining_count: 10,
+            created_time: "2026-03-09T18:00:00Z".to_string(),
+        }
+    }
+
+    fn make_signal(ticker: &str, strategy: &str) -> OrderSignal {
+        OrderSignal {
+            strategy: strategy.to_string(),
+            kalshi_ticker: ticker.to_string(),
+            side: OrderSide::Yes,
+            action: OrderAction::Buy,
+            price_cents: 55,
+            size_dollars: 10.0,
+            post_only: true,
+            expiration_ts: None,
+            edge_after_fees: 0.05,
+        }
+    }
+
+    #[test]
+    fn prune_expired_orders() {
+        let mut om = OrderManager::new();
+        let past_ts = chrono::Utc::now().timestamp() - 10;
+        om.track_order(
+            make_order("o1", "TICKER-A"),
+            "clv_hunter".to_string(),
+            GamePhase::PreGame,
+            Some(past_ts),
+        );
+        assert_eq!(om.open_order_count(), 1);
+
+        om.prune_expired();
+        assert_eq!(om.open_order_count(), 0);
+    }
+
+    #[test]
+    fn non_expired_orders_survive_prune() {
+        let mut om = OrderManager::new();
+        let future_ts = chrono::Utc::now().timestamp() + 3600;
+        om.track_order(
+            make_order("o1", "TICKER-A"),
+            "clv_hunter".to_string(),
+            GamePhase::PreGame,
+            Some(future_ts),
+        );
+
+        om.prune_expired();
+        assert_eq!(om.open_order_count(), 1);
+    }
+
+    #[test]
+    fn intent_blocks_has_strategy_order() {
+        let mut om = OrderManager::new();
+        let signal = make_signal("TICKER-A", "break_ev");
+        om.record_intent(&signal, false);
+
+        assert!(om.has_strategy_order("TICKER-A", "break_ev"));
+        assert!(!om.has_strategy_order("TICKER-A", "clv_hunter"));
+        assert!(!om.has_strategy_order("TICKER-B", "break_ev"));
+    }
+
+    #[test]
+    fn expired_intent_pruned() {
+        let mut om = OrderManager::new();
+        // Create a signal with expiration in the past
+        let mut signal = make_signal("TICKER-A", "break_ev");
+        signal.expiration_ts = Some(chrono::Utc::now().timestamp() - 1);
+        om.record_intent(&signal, false);
+
+        // Intent has 0 TTL remaining, but Instant math might keep it for a moment
+        // Sleep briefly to ensure expiration
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        om.prune_expired();
+        assert!(!om.has_strategy_order("TICKER-A", "break_ev"));
+    }
+
+    #[test]
+    fn clear_intents_for_tickers() {
+        let mut om = OrderManager::new();
+        om.record_intent(&make_signal("TICKER-A", "break_ev"), false);
+        om.record_intent(&make_signal("TICKER-B", "clv_hunter"), false);
+        om.record_intent(&make_signal("TICKER-C", "arb_scanner"), false);
+
+        assert_eq!(om.intent_count(), 3);
+
+        om.clear_intents_for_tickers(&["TICKER-A".to_string(), "TICKER-C".to_string()]);
+        assert_eq!(om.intent_count(), 1);
+        assert!(om.has_strategy_order("TICKER-B", "clv_hunter"));
+        assert!(!om.has_strategy_order("TICKER-A", "break_ev"));
+    }
+
+    #[test]
+    fn cancel_clears_intent() {
+        let mut om = OrderManager::new();
+        let signal = make_signal("TICKER-A", "clv_hunter");
+        om.record_intent(&signal, true);
+        om.track_order(
+            make_order("o1", "TICKER-A"),
+            "clv_hunter".to_string(),
+            GamePhase::PreGame,
+            None,
+        );
+
+        assert!(om.has_strategy_order("TICKER-A", "clv_hunter"));
+        om.handle_cancel("o1");
+        assert!(!om.has_strategy_order("TICKER-A", "clv_hunter"));
+    }
+
+    #[test]
+    fn stale_orders_detected() {
+        let mut om = OrderManager::new();
+        om.track_order(
+            make_order("o1", "TICKER-A"),
+            "clv_hunter".to_string(),
+            GamePhase::PreGame,
+            None,
+        );
+
+        // No stale orders with a generous TTL
+        assert!(om.stale_orders(Duration::from_secs(3600)).is_empty());
+        // All orders are stale with a zero TTL
+        assert_eq!(om.stale_orders(Duration::from_secs(0)).len(), 1);
     }
 }

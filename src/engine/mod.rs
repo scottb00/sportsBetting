@@ -4,6 +4,7 @@ pub mod game_state;
 pub mod handlers;
 pub mod logger;
 pub mod market_mapper;
+pub mod market_prep;
 pub mod notifier;
 pub mod order_manager;
 pub mod risk;

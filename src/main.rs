@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -7,10 +6,14 @@ use tracing_subscriber::EnvFilter;
 
 use sports_betting::config::Config;
 use sports_betting::engine::bot::{
-    self, SharedState, create_bot_state, create_strategies, kalshi_date_tag,
+    self, SharedState, create_bot_state, create_strategies,
     populate_game_states, fetch_summaries_for_games,
 };
 use sports_betting::engine::handlers;
+use sports_betting::engine::market_prep::{
+    self, kalshi_date_tag, build_espn_for_matching, build_kalshi_for_matching,
+    build_kalshi_volume, filter_events_for_today,
+};
 use sports_betting::engine::notifier::Notifier;
 use sports_betting::espn::poller::{EspnPoller, GameTracker};
 use sports_betting::kalshi::auth::KalshiAuth;
@@ -56,7 +59,7 @@ async fn main() -> Result<()> {
     }
 
     // --- Initial market discovery & mapping ---
-    let (_espn_games, _kalshi_volume) = fetch_initial_markets(
+    fetch_initial_markets(
         &espn_poller, &poly_client, &kalshi_rest, &today, &mut bot_state,
     ).await?;
 
@@ -128,14 +131,13 @@ async fn main() -> Result<()> {
 }
 
 /// Fetch ESPN, Kalshi, and Polymarket events; run market mapping; populate game states.
-/// Returns ESPN games and Kalshi volume map for later use.
 async fn fetch_initial_markets(
     espn_poller: &EspnPoller,
     poly_client: &PolymarketClient,
     kalshi_rest: &Arc<KalshiRestClient>,
     today: &str,
     bot_state: &mut bot::BotState,
-) -> Result<(Vec<sports_betting::espn::types::GameInfo>, HashMap<String, i64>)> {
+) -> Result<()> {
     tracing::info!("Fetching initial market data...");
     let espn_games = espn_poller.fetch_scoreboard().await?;
     tracing::info!("Found {} ESPN games", espn_games.len());
@@ -147,57 +149,17 @@ async fn fetch_initial_markets(
     tracing::info!("Found {} Polymarket events", poly_events.len());
 
     let date_tag = kalshi_date_tag(today);
-    let kalshi_events = bot::fetch_all_kalshi_cbb_events(kalshi_rest).await;
-    let kalshi_events = {
-        let mut filtered = kalshi_events;
-        let before = filtered.events.len();
-        // Keep KXNCAAMBGAME events matching today's date tag,
-        // plus all conference tournament events (already filtered to status=open)
-        filtered.events.retain(|e| {
-            e.event_ticker.contains(&date_tag)
-                || !e.event_ticker.starts_with("KXNCAAMBGAME")
-        });
-        tracing::info!(
-            "Found {} Kalshi CBB events ({} total, filtered to {} + conference tournaments)",
-            filtered.events.len(), before, date_tag,
-        );
-        filtered
-    };
+    let mut kalshi_events = market_prep::fetch_all_kalshi_cbb_events(kalshi_rest).await;
+    let before = kalshi_events.events.len();
+    filter_events_for_today(&mut kalshi_events, &date_tag);
+    tracing::info!(
+        "Found {} Kalshi CBB events ({} total, filtered to {} + conference tournaments)",
+        kalshi_events.events.len(), before, date_tag,
+    );
 
-    // Build matching data
-    let espn_for_matching: Vec<(String, String)> = espn_games
-        .iter()
-        .map(|g| (g.event_id.clone(), format!("{} @ {}", g.away_team, g.home_team)))
-        .collect();
-
-    #[allow(clippy::type_complexity)]
-    let kalshi_for_matching: Vec<(String, String, Vec<(String, String)>)> = kalshi_events
-        .events
-        .iter()
-        .filter_map(|e| {
-            // Conference tournament events need special handling
-            if !e.event_ticker.starts_with("KXNCAAMBGAME") {
-                return bot::normalize_conference_tournament_event(e);
-            }
-            let markets: Vec<(String, String)> = e.markets.as_ref()
-                .unwrap_or(&vec![])
-                .iter()
-                .filter_map(|m| {
-                    let yes_sub = m.yes_sub_title.as_ref()?;
-                    Some((m.ticker.clone(), yes_sub.clone()))
-                })
-                .collect();
-            Some((e.event_ticker.clone(), e.title.clone(), markets))
-        })
-        .collect();
-
-    let empty_markets = vec![];
-    let kalshi_volume: HashMap<String, i64> = kalshi_events
-        .events
-        .iter()
-        .flat_map(|e| e.markets.as_ref().unwrap_or(&empty_markets).iter())
-        .filter_map(|m| m.volume.map(|v| (m.ticker.clone(), v)))
-        .collect();
+    let espn_for_matching = build_espn_for_matching(&espn_games);
+    let kalshi_for_matching = build_kalshi_for_matching(&kalshi_events);
+    let kalshi_volume = build_kalshi_volume(&kalshi_events);
 
     let tomorrow = (chrono::Local::now() + chrono::Duration::days(1))
         .format("%Y-%m-%d")
@@ -240,7 +202,7 @@ async fn fetch_initial_markets(
 
     populate_game_states(bot_state, &espn_games, Some(&kalshi_volume));
 
-    Ok((espn_games, kalshi_volume))
+    Ok(())
 }
 
 /// Connect to Kalshi WebSocket for all mapped market tickers.

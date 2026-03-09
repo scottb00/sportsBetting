@@ -102,6 +102,7 @@ fn evaluate_market(
         size_dollars: size,
         post_only: true,
         expiration_ts: None,
+        edge_after_fees,
     })
 }
 
@@ -113,25 +114,15 @@ pub fn evaluate_edge(
     min_edge: f64,
     strategy_name: &str,
 ) -> Option<OrderSignal> {
-    let mut best: Option<(OrderSignal, f64)> = None; // (signal, edge_after_fees)
+    let mut best: Option<OrderSignal> = None;
 
     for market in &game.kalshi_markets {
-        if let Some(signal) = evaluate_market(game, market, risk, current_game_exposure, min_edge, strategy_name) {
-            // Compute edge for comparison (reconstruct from signal)
-            let order_prob = signal.price_cents as f64 / 100.0;
-            let fair = game.fair_value_for_market(market).unwrap_or(0.5);
-            let edge = match signal.side {
-                OrderSide::Yes => fair - order_prob,
-                OrderSide::No => (1.0 - fair) - order_prob,
-            };
-            let fee = RiskManager::maker_fee(1, signal.price_cents) / 100.0;
-            let edge_after_fees = edge - fee;
-
-            if best.as_ref().is_none_or(|(_, best_edge)| edge_after_fees > *best_edge) {
-                best = Some((signal, edge_after_fees));
-            }
+        if let Some(signal) = evaluate_market(game, market, risk, current_game_exposure, min_edge, strategy_name)
+            && best.as_ref().is_none_or(|b| signal.edge_after_fees > b.edge_after_fees)
+        {
+            best = Some(signal);
         }
     }
 
-    best.map(|(signal, _)| signal)
+    best
 }

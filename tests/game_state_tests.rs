@@ -399,6 +399,7 @@ fn signal_to_order_passes_expiration_in_seconds() {
         size_dollars: 10.0,
         post_only: true,
         expiration_ts: Some(1772996400),
+        edge_after_fees: 0.05,
     };
 
     let order = OrderManager::signal_to_order(&signal);
@@ -420,6 +421,7 @@ fn signal_to_order_none_expiration() {
         size_dollars: 10.0,
         post_only: true,
         expiration_ts: None,
+        edge_after_fees: 0.05,
     };
 
     let order = OrderManager::signal_to_order(&signal);
