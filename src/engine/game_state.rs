@@ -74,7 +74,7 @@ impl GameState {
             count += 1;
         }
 
-        if count > 0 {
+        if count >= 2 {
             Some(sum / count as f64)
         } else {
             None

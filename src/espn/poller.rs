@@ -88,8 +88,20 @@ impl EspnPoller {
     }
 
     /// Get the latest win probability from a summary response.
+    /// During live games, uses the real-time winprobability array.
+    /// Pre-game, falls back to ESPN's BPI predictor (gameProjection).
     pub fn latest_win_prob(summary: &SummaryResponse) -> Option<f64> {
-        summary.winprobability.last().map(|wp| wp.home_win_percentage)
+        // Prefer live win probability if available
+        if let Some(wp) = summary.winprobability.last() {
+            return Some(wp.home_win_percentage);
+        }
+
+        // Fall back to ESPN predictor (BPI) for pre-game
+        summary
+            .predictor
+            .as_ref()
+            .and_then(|p| p.home_team.as_ref())
+            .map(|t| t.game_projection / 100.0)
     }
 
     /// Extract DK moneyline from pickcenter data.

@@ -69,11 +69,36 @@ pub struct SummaryResponse {
     #[serde(default)]
     pub pickcenter: Option<Vec<PickcenterEntry>>,
     #[serde(default)]
+    pub predictor: Option<Predictor>,
+    #[serde(default)]
     pub header: Option<serde_json::Value>,
     #[serde(default)]
     pub boxscore: Option<serde_json::Value>,
     #[serde(default)]
     pub plays: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Predictor {
+    #[serde(rename = "homeTeam")]
+    pub home_team: Option<PredictorTeam>,
+    #[serde(rename = "awayTeam")]
+    pub away_team: Option<PredictorTeam>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PredictorTeam {
+    pub id: String,
+    #[serde(rename = "gameProjection", deserialize_with = "string_to_f64")]
+    pub game_projection: f64,
+}
+
+fn string_to_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s: String = Deserialize::deserialize(deserializer)?;
+    s.parse().map_err(serde::de::Error::custom)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
