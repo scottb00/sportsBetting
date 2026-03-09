@@ -211,6 +211,34 @@ async fn main() -> Result<()> {
         }
     }
 
+    // --- Fetch initial DK odds + win probs for all mapped games ---
+    {
+        let mapped_event_ids: Vec<String> = {
+            let s = state.lock().await;
+            s.game_state.games.keys().cloned().collect()
+        };
+        tracing::info!("Fetching initial summaries for {} games", mapped_event_ids.len());
+        for event_id in &mapped_event_ids {
+            match espn_poller.fetch_summary(event_id).await {
+                Ok(summary) => {
+                    let mut s = state.lock().await;
+                    if let Some(gs) = s.game_state.get_mut(event_id) {
+                        gs.espn_home_win_prob = EspnPoller::latest_win_prob(&summary);
+                        if let Some((home_ml, _away_ml)) = EspnPoller::extract_dk_moneyline(&summary) {
+                            gs.dk_home_implied_prob = Some(EspnPoller::moneyline_to_prob(home_ml));
+                        }
+                        tracing::info!(
+                            "Initial {}: {} v {} | espn_hp={:?} dk_hp={:?}",
+                            event_id, gs.away_team, gs.home_team,
+                            gs.espn_home_win_prob, gs.dk_home_implied_prob,
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!("Failed initial summary for {}: {:?}", event_id, e),
+            }
+        }
+    }
+
     // --- Connect to Kalshi WebSocket ---
     let kalshi_tickers: Vec<String> = {
         let s = state.lock().await;
@@ -286,8 +314,6 @@ async fn main() -> Result<()> {
                                     if let Some(gs) = s.game_state.get_mut(event_id) {
                                         gs.espn_home_win_prob = EspnPoller::latest_win_prob(&summary);
                                         if let Some((home_ml, _away_ml)) = EspnPoller::extract_dk_moneyline(&summary) {
-                                            // Convert moneyline to implied prob
-                                            // Assuming favorite is home (simplification — would need to check)
                                             gs.dk_home_implied_prob = Some(EspnPoller::moneyline_to_prob(home_ml));
                                         }
                                         tracing::info!(
