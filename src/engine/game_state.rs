@@ -26,6 +26,7 @@ pub struct GameState {
     pub kalshi_yes_bid: Option<f64>,
     pub kalshi_yes_ask: Option<f64>,
     pub kalshi_yes_mid: Option<f64>,
+    pub kalshi_volume: Option<i64>,
 
     pub last_updated: std::time::Instant,
 }
@@ -49,6 +50,7 @@ impl GameState {
             kalshi_yes_bid: None,
             kalshi_yes_ask: None,
             kalshi_yes_mid: None,
+            kalshi_volume: None,
             last_updated: std::time::Instant::now(),
         }
     }

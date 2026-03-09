@@ -183,6 +183,14 @@ async fn main() -> Result<()> {
             tracing::error!("Market mapping failed: {:?}", e);
         }
 
+        // Build volume lookup from Kalshi markets
+        let kalshi_volume: HashMap<String, i64> = kalshi_events
+            .events
+            .iter()
+            .flat_map(|e| e.markets.as_ref().unwrap_or(&empty_markets).iter())
+            .filter_map(|m| m.volume.map(|v| (m.ticker.clone(), v)))
+            .collect();
+
         // Populate game state from ESPN
         for game in &espn_games {
             let kalshi_ticker = s
@@ -204,6 +212,7 @@ async fn main() -> Result<()> {
             gs.phase = game.game_phase.clone();
             gs.home_score = game.home_score;
             gs.away_score = game.away_score;
+            gs.kalshi_volume = kalshi_ticker.as_ref().and_then(|t| kalshi_volume.get(t).copied());
             gs.kalshi_ticker = kalshi_ticker;
             gs.kalshi_is_home = kalshi_is_home;
             gs.polymarket_token_id = poly_token;
@@ -498,6 +507,18 @@ fn evaluate_strategies(
             Some(t) => t,
             None => continue,
         };
+
+        // Skip low-volume markets (< 20k contracts)
+        if game.kalshi_volume.unwrap_or(0) < 20_000 {
+            continue;
+        }
+
+        // Skip extreme prices (< 10c or > 90c)
+        if let Some(mid) = game.kalshi_yes_mid {
+            if mid < 10.0 || mid > 90.0 {
+                continue;
+            }
+        }
 
         let current_exposure = state.order_manager.market_exposure(ticker);
         let mut best_signal: Option<OrderSignal> = None;
