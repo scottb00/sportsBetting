@@ -19,6 +19,10 @@ min_edge_threshold = 0.01      # 1% minimum edge after fees
 break_ev_min_edge = 0.015      # 1.5% for break-based quoting
 arb_scanner_min_edge = 0.02    # 2% for cross-market arb
 clv_hunter_min_edge = 0.015    # 1.5% for pre-game CLV
+order_ttl_secs = 120           # Cancel resting orders after 2 minutes
+min_volume = 20000             # minimum total Kalshi volume to consider a game
+min_price_cents = 10.0         # skip markets with mid below this (cents)
+max_price_cents = 90.0         # skip markets with mid above this (cents)
 
 [polling]
 scoreboard_interval_secs = 30

@@ -2,12 +2,43 @@ use std::collections::HashMap;
 
 use crate::espn::types::GamePhase;
 
+/// Book state for a single Kalshi market ticker.
+#[derive(Debug, Clone)]
+pub struct KalshiMarketState {
+    pub ticker: String,
+    pub yes_bid: Option<f64>,
+    pub yes_ask: Option<f64>,
+    pub yes_mid: Option<f64>,
+    pub volume: Option<i64>,
+    /// true if YES on this ticker = home team wins
+    pub is_home: bool,
+}
+
+impl KalshiMarketState {
+    pub fn new(ticker: String, is_home: bool) -> Self {
+        Self {
+            ticker,
+            yes_bid: None,
+            yes_ask: None,
+            yes_mid: None,
+            volume: None,
+            is_home,
+        }
+    }
+
+    pub fn update_prices(&mut self, bid: Option<f64>, ask: Option<f64>, mid: Option<f64>) {
+        self.yes_bid = bid;
+        self.yes_ask = ask;
+        self.yes_mid = mid;
+    }
+}
+
 /// Unified game state combining data from all sources.
 #[derive(Debug, Clone)]
 pub struct GameState {
     pub espn_event_id: String,
-    pub kalshi_ticker: Option<String>,
-    pub kalshi_is_home: bool, // true if kalshi ticker is for the home team
+    /// All Kalshi markets for this game (typically 2: one per team)
+    pub kalshi_markets: Vec<KalshiMarketState>,
     pub polymarket_token_id: Option<String>,
     pub polymarket_is_home: bool, // true if polymarket YES token is for the home team
 
@@ -17,18 +48,8 @@ pub struct GameState {
     pub away_score: Option<i32>,
     pub phase: GamePhase,
 
-    // Reference prices
+    // Reference price — ESPN only
     pub espn_home_win_prob: Option<f64>,
-    pub dk_home_implied_prob: Option<f64>,
-    pub polymarket_home_prob: Option<f64>, // mid (for logging / initial direction)
-    pub polymarket_home_bid: Option<f64>,  // best bid converted to home-team prob
-    pub polymarket_home_ask: Option<f64>,  // best ask converted to home-team prob
-
-    // Kalshi book state
-    pub kalshi_yes_bid: Option<f64>,
-    pub kalshi_yes_ask: Option<f64>,
-    pub kalshi_yes_mid: Option<f64>,
-    pub kalshi_volume: Option<i64>,
 
     pub last_updated: std::time::Instant,
 }
@@ -37,147 +58,54 @@ impl GameState {
     pub fn new(espn_event_id: String, home_team: String, away_team: String) -> Self {
         Self {
             espn_event_id,
-            kalshi_ticker: None,
-            kalshi_is_home: true,
+            kalshi_markets: Vec::new(),
             polymarket_token_id: None,
-            polymarket_is_home: false, // default: Poly YES = first listed = away
+            polymarket_is_home: false,
             home_team,
             away_team,
             home_score: None,
             away_score: None,
             phase: GamePhase::Unknown,
             espn_home_win_prob: None,
-            dk_home_implied_prob: None,
-            polymarket_home_prob: None,
-            polymarket_home_bid: None,
-            polymarket_home_ask: None,
-            kalshi_yes_bid: None,
-            kalshi_yes_ask: None,
-            kalshi_yes_mid: None,
-            kalshi_volume: None,
             last_updated: std::time::Instant::now(),
         }
     }
 
-    /// Maximum Polymarket spread (in probability) to include in consensus.
-    /// Markets wider than this are too illiquid to be reliable references.
-    const POLY_MAX_SPREAD: f64 = 0.15;
-
-    /// Compute consensus fair value from available reference prices.
-    /// Uses polymarket mid. Requires 2+ sources.
-    pub fn consensus_fair_value(&self) -> Option<f64> {
-        self.consensus_fair_value_inner(None)
-    }
-
-    /// Compute conservative consensus fair value for a given trade direction.
-    /// `buying_kalshi_yes`: true if we'd buy YES on Kalshi, false for NO.
-    /// Uses the adverse Polymarket side to ensure edge is real.
-    pub fn consensus_fair_value_conservative(&self, buying_kalshi_yes: bool) -> Option<f64> {
-        self.consensus_fair_value_inner(Some(buying_kalshi_yes))
-    }
-
-    fn consensus_fair_value_inner(&self, buying_kalshi_yes: Option<bool>) -> Option<f64> {
-        let mut sum = 0.0;
-        let mut count = 0;
-
-        if let Some(p) = self.espn_home_win_prob {
-            sum += p;
-            count += 1;
-        }
-        if let Some(p) = self.dk_home_implied_prob {
-            sum += p;
-            count += 1;
-        }
-
-        // Polymarket: use conservative side based on trade direction, skip wide markets
-        if let (Some(bid), Some(ask)) = (self.polymarket_home_bid, self.polymarket_home_ask) {
-            let spread = ask - bid;
-            if (0.0..=Self::POLY_MAX_SPREAD).contains(&spread) {
-                let poly_val = match buying_kalshi_yes {
-                    Some(true) => {
-                        // Buying YES on Kalshi → want LOWER fair value (conservative)
-                        // If kalshi=home, lower home prob = poly home bid
-                        // If kalshi=away, higher home prob → lower away prob = poly home ask
-                        if self.kalshi_is_home { bid } else { ask }
-                    }
-                    Some(false) => {
-                        // Buying NO on Kalshi → want HIGHER fair value (conservative)
-                        // If kalshi=home, higher home prob = poly home ask
-                        // If kalshi=away, lower home prob → higher away prob = poly home bid
-                        if self.kalshi_is_home { ask } else { bid }
-                    }
-                    None => {
-                        // No direction specified, use mid
-                        (bid + ask) / 2.0
-                    }
-                };
-                sum += poly_val;
-                count += 1;
-            }
-        }
-
-        if count >= 2 {
-            Some(sum / count as f64)
-        } else {
-            None
-        }
-    }
-
-    /// Get the fair value aligned with the Kalshi ticker's team (mid-based, for direction check).
-    pub fn kalshi_aligned_fair_value(&self) -> Option<f64> {
-        let home_fair = self.consensus_fair_value()?;
-        if self.kalshi_is_home {
+    /// Get fair value aligned with a specific Kalshi market's YES side.
+    /// If the market's YES = home team, return home prob directly.
+    /// If YES = away team, return 1 - home prob.
+    pub fn fair_value_for_market(&self, market: &KalshiMarketState) -> Option<f64> {
+        let home_fair = self.espn_home_win_prob?;
+        if market.is_home {
             Some(home_fair)
         } else {
             Some(1.0 - home_fair)
         }
     }
 
-    /// Get conservative fair value aligned with Kalshi ticker's team.
-    /// Uses the adverse Polymarket side to confirm edge is real.
-    pub fn kalshi_aligned_fair_value_conservative(&self, buying_kalshi_yes: bool) -> Option<f64> {
-        let home_fair = self.consensus_fair_value_conservative(buying_kalshi_yes)?;
-        if self.kalshi_is_home {
-            Some(home_fair)
-        } else {
-            Some(1.0 - home_fair)
-        }
+    /// Get mutable Kalshi market state for a given ticker.
+    pub fn kalshi_market_mut(&mut self, ticker: &str) -> Option<&mut KalshiMarketState> {
+        self.kalshi_markets.iter_mut().find(|m| m.ticker == ticker)
     }
 
-    /// Compute edge: fair_value - kalshi_price. Positive means Kalshi is cheap (buy YES).
-    pub fn edge_vs_kalshi(&self) -> Option<f64> {
-        let fair = self.kalshi_aligned_fair_value()?;
-        let kalshi = self.kalshi_yes_mid?;
-        Some(fair - kalshi / 100.0) // kalshi is in cents, fair is 0-1
+    /// Get all Kalshi tickers for this game.
+    pub fn kalshi_tickers(&self) -> Vec<&str> {
+        self.kalshi_markets.iter().map(|m| m.ticker.as_str()).collect()
     }
 
-    /// Update Kalshi book prices.
-    pub fn update_kalshi_prices(&mut self, bid: Option<f64>, ask: Option<f64>, mid: Option<f64>) {
-        self.kalshi_yes_bid = bid;
-        self.kalshi_yes_ask = ask;
-        self.kalshi_yes_mid = mid;
+    /// Check if any Kalshi market is mapped.
+    pub fn has_kalshi(&self) -> bool {
+        !self.kalshi_markets.is_empty()
     }
 
-    /// Update ESPN win probability and DK implied probability from a summary response.
-    pub fn update_from_espn_summary(&mut self, win_prob: Option<f64>, dk_home_moneyline: Option<f64>) {
+    /// Get total volume across all Kalshi markets for this game.
+    pub fn kalshi_total_volume(&self) -> i64 {
+        self.kalshi_markets.iter().filter_map(|m| m.volume).sum()
+    }
+
+    /// Update ESPN win probability from a summary response.
+    pub fn update_from_espn_summary(&mut self, win_prob: Option<f64>, _dk_home_moneyline: Option<f64>) {
         self.espn_home_win_prob = win_prob;
-        if let Some(ml) = dk_home_moneyline {
-            self.dk_home_implied_prob = Some(crate::espn::poller::EspnPoller::moneyline_to_prob(ml));
-        }
-    }
-
-    /// Update Polymarket prices from a YES-token bid/ask websocket update.
-    pub fn update_polymarket_prices(&mut self, yes_bid: f64, yes_ask: f64) {
-        let yes_mid = (yes_bid + yes_ask) / 2.0;
-        if self.polymarket_is_home {
-            self.polymarket_home_prob = Some(yes_mid);
-            self.polymarket_home_bid = Some(yes_bid);
-            self.polymarket_home_ask = Some(yes_ask);
-        } else {
-            self.polymarket_home_prob = Some(1.0 - yes_mid);
-            self.polymarket_home_bid = Some(1.0 - yes_ask);
-            self.polymarket_home_ask = Some(1.0 - yes_bid);
-        }
     }
 }
 
@@ -213,9 +141,11 @@ impl GameStateManager {
             .or_insert_with(|| GameState::new(event_id, home_team, away_team))
     }
 
-    /// Find game by Kalshi ticker.
+    /// Find game by any Kalshi ticker (searches across all markets per game).
     pub fn get_mut_by_kalshi_ticker(&mut self, ticker: &str) -> Option<&mut GameState> {
-        self.games.values_mut().find(|g| g.kalshi_ticker.as_deref() == Some(ticker))
+        self.games.values_mut().find(|g| {
+            g.kalshi_markets.iter().any(|m| m.ticker == ticker)
+        })
     }
 
     /// Find game by Polymarket token ID.

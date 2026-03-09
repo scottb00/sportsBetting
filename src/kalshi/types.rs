@@ -130,6 +130,10 @@ pub struct Market {
     pub no_ask: Option<i64>,
     pub volume: Option<i64>,
     pub open_interest: Option<i64>,
+    #[serde(default)]
+    pub yes_sub_title: Option<String>,
+    #[serde(default)]
+    pub no_sub_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

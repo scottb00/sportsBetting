@@ -45,6 +45,18 @@ impl TradeLogger {
                 total_exposure REAL,
                 snapshot_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS clv_checks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                side TEXT NOT NULL,
+                order_price_cents INTEGER NOT NULL,
+                closing_mid_cents INTEGER NOT NULL,
+                clv_cents INTEGER NOT NULL,
+                captured INTEGER NOT NULL DEFAULT 0,
+                checked_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
             ",
         )
         .context("Failed to create trade log tables")?;
@@ -103,6 +115,27 @@ impl TradeLogger {
             "INSERT INTO pnl_snapshots (strategy, unrealized_pnl, realized_pnl, total_exposure)
              VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![strategy, unrealized, realized, exposure],
+        )?;
+        Ok(())
+    }
+
+    /// Log a CLV (closing line value) check for a pre-game order.
+    /// `clv_cents` is positive when the order captured value (bought below / sold above closing mid).
+    #[allow(clippy::too_many_arguments)]
+    pub fn log_clv_check(
+        &self,
+        order_id: &str,
+        ticker: &str,
+        side: &str,
+        order_price_cents: i64,
+        closing_mid_cents: i64,
+        clv_cents: i64,
+    ) -> Result<()> {
+        let captured = if clv_cents > 0 { 1 } else { 0 };
+        self.conn.execute(
+            "INSERT INTO clv_checks (order_id, ticker, side, order_price_cents, closing_mid_cents, clv_cents, captured)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![order_id, ticker, side, order_price_cents, closing_mid_cents, clv_cents, captured],
         )?;
         Ok(())
     }

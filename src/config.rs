@@ -35,11 +35,26 @@ pub struct RiskConfig {
     pub min_edge_threshold: f64,
 }
 
+fn default_min_volume() -> i64 { 20_000 }
+fn default_min_price_cents() -> f64 { 10.0 }
+fn default_max_price_cents() -> f64 { 90.0 }
+fn default_order_ttl_secs() -> u64 { 120 }
+
 #[derive(Debug, Deserialize)]
 pub struct StrategyConfig {
     pub break_ev_min_edge: f64,
     pub arb_scanner_min_edge: f64,
     pub clv_hunter_min_edge: f64,
+    #[serde(default = "default_min_volume")]
+    pub min_volume: i64,
+    #[serde(default = "default_min_price_cents")]
+    pub min_price_cents: f64,
+    #[serde(default = "default_max_price_cents")]
+    pub max_price_cents: f64,
+    /// TTL for resting orders in seconds. Orders older than this are cancelled.
+    /// Defaults to 120 seconds (2 minutes).
+    #[serde(default = "default_order_ttl_secs")]
+    pub order_ttl_secs: u64,
 }
 
 #[derive(Debug, Deserialize)]

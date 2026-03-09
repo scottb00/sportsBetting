@@ -6,8 +6,8 @@ pub struct RiskManager {
     pub kelly_fraction: f64,         // 0.5 = half Kelly
     pub min_edge_threshold: f64,     // minimum edge after fees to trade
 
-    current_total_exposure: f64,
-    daily_pnl: f64,
+    pub current_total_exposure: f64,
+    pub daily_pnl: f64,
     halted: bool,
 }
 

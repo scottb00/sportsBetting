@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
+use crate::espn::types::GamePhase;
 use crate::kalshi::types::*;
 
 /// Signal emitted by a strategy to request an order.
@@ -14,10 +16,29 @@ pub struct OrderSignal {
     pub post_only: bool,
 }
 
+/// An order together with metadata for lifecycle tracking.
+struct TrackedOrder {
+    order: Order,
+    placed_at: Instant,
+    /// Which strategy placed this order (e.g. "clv_hunter").
+    strategy: String,
+    /// The game phase when the order was placed.
+    placed_phase: GamePhase,
+}
+
+/// Summary of a CLV-eligible resting order, returned for closing-line comparison.
+#[derive(Debug)]
+pub struct ClvOrderInfo {
+    pub order_id: String,
+    pub ticker: String,
+    pub side: String,
+    pub price_cents: i64,
+}
+
 /// Tracks our open orders and manages the order lifecycle.
 pub struct OrderManager {
-    /// Order ID -> order details
-    open_orders: HashMap<String, Order>,
+    /// Order ID -> tracked order (order + placement time)
+    open_orders: HashMap<String, TrackedOrder>,
 }
 
 impl Default for OrderManager {
@@ -57,25 +78,33 @@ impl OrderManager {
         }
     }
 
-    /// Track a new open order.
-    pub fn track_order(&mut self, order: Order) {
+    /// Track a new open order with strategy and phase metadata.
+    pub fn track_order(&mut self, order: Order, strategy: String, placed_phase: GamePhase) {
         tracing::info!(
-            "Tracking order {}: {:?} {:?} {} @ {:?}/{:?}",
+            "Tracking order {}: {:?} {:?} {} @ {:?}/{:?} (strategy={}, phase={:?})",
             order.order_id,
             order.action,
             order.side,
             order.remaining_count,
             order.yes_price,
-            order.no_price
+            order.no_price,
+            strategy,
+            placed_phase,
         );
-        self.open_orders.insert(order.order_id.clone(), order);
+        let order_id = order.order_id.clone();
+        self.open_orders.insert(order_id, TrackedOrder {
+            order,
+            placed_at: Instant::now(),
+            strategy,
+            placed_phase,
+        });
     }
 
     /// Handle a fill — update or remove the order.
     pub fn handle_fill(&mut self, fill: &Fill) {
-        if let Some(order) = self.open_orders.get_mut(&fill.order_id) {
-            order.remaining_count -= fill.count;
-            if order.remaining_count <= 0 {
+        if let Some(tracked) = self.open_orders.get_mut(&fill.order_id) {
+            tracked.order.remaining_count -= fill.count;
+            if tracked.order.remaining_count <= 0 {
                 self.open_orders.remove(&fill.order_id);
                 tracing::info!("Order {} fully filled", fill.order_id);
             }
@@ -93,7 +122,8 @@ impl OrderManager {
     pub fn orders_for_market(&self, ticker: &str) -> Vec<&Order> {
         self.open_orders
             .values()
-            .filter(|o| o.ticker == ticker)
+            .filter(|t| t.order.ticker == ticker)
+            .map(|t| &t.order)
             .collect()
     }
 
@@ -101,10 +131,10 @@ impl OrderManager {
     pub fn market_exposure(&self, ticker: &str) -> f64 {
         self.open_orders
             .values()
-            .filter(|o| o.ticker == ticker)
-            .map(|o| {
-                let price = o.yes_price.or(o.no_price).unwrap_or(50) as f64 / 100.0;
-                o.remaining_count as f64 * price
+            .filter(|t| t.order.ticker == ticker)
+            .map(|t| {
+                let price = t.order.yes_price.or(t.order.no_price).unwrap_or(50) as f64 / 100.0;
+                t.order.remaining_count as f64 * price
             })
             .sum()
     }
@@ -117,8 +147,48 @@ impl OrderManager {
     pub fn order_ids_for_market(&self, ticker: &str) -> Vec<String> {
         self.open_orders
             .values()
-            .filter(|o| o.ticker == ticker)
-            .map(|o| o.order_id.clone())
+            .filter(|t| t.order.ticker == ticker)
+            .map(|t| t.order.order_id.clone())
+            .collect()
+    }
+
+    /// Return order IDs that have been resting longer than `ttl`.
+    pub fn stale_orders(&self, ttl: Duration) -> Vec<String> {
+        let now = Instant::now();
+        self.open_orders
+            .values()
+            .filter(|t| now.duration_since(t.placed_at) > ttl)
+            .map(|t| t.order.order_id.clone())
+            .collect()
+    }
+
+    /// Return order IDs for orders on any of the given tickers.
+    pub fn order_ids_for_tickers(&self, tickers: &[String]) -> Vec<String> {
+        self.open_orders
+            .values()
+            .filter(|t| tickers.iter().any(|tk| tk == &t.order.ticker))
+            .map(|t| t.order.order_id.clone())
+            .collect()
+    }
+
+    /// Return CLV-eligible orders: placed by "clv_hunter" during PreGame, still resting.
+    pub fn clv_orders_for_tickers(&self, tickers: &[&str]) -> Vec<ClvOrderInfo> {
+        self.open_orders
+            .values()
+            .filter(|t| {
+                t.strategy == "clv_hunter"
+                    && t.placed_phase == GamePhase::PreGame
+                    && tickers.contains(&t.order.ticker.as_str())
+            })
+            .map(|t| {
+                let price_cents = t.order.yes_price.or(t.order.no_price).unwrap_or(0);
+                ClvOrderInfo {
+                    order_id: t.order.order_id.clone(),
+                    ticker: t.order.ticker.clone(),
+                    side: format!("{:?}", t.order.side),
+                    price_cents,
+                }
+            })
             .collect()
     }
 }

@@ -238,6 +238,54 @@ impl GameTracker {
 
         new_breaks
     }
+
+    /// Return event IDs for games that just transitioned OUT of a break
+    /// (i.e., were on break last tick but are now Live or another non-break phase).
+    pub fn breaks_ended(&self, games: &[GameInfo]) -> Vec<String> {
+        let mut ended = Vec::new();
+
+        for game in games {
+            if let Some(prev) = self.previous_phases.get(&game.event_id) {
+                if prev.is_break() && !game.game_phase.is_break() {
+                    tracing::info!(
+                        "Break ended: {} vs {} (event {}) — {:?} -> {:?}",
+                        game.away_team,
+                        game.home_team,
+                        game.event_id,
+                        prev,
+                        game.game_phase,
+                    );
+                    ended.push(game.event_id.clone());
+                }
+            }
+        }
+
+        ended
+    }
+
+    /// Return event IDs for games that just transitioned from PreGame to a live phase
+    /// (Live, Halftime, Break). Must be called BEFORE `update()` so previous phases are intact.
+    pub fn pregame_to_live(&self, games: &[GameInfo]) -> Vec<String> {
+        let mut transitioned = Vec::new();
+
+        for game in games {
+            if let Some(prev) = self.previous_phases.get(&game.event_id) {
+                if *prev == GamePhase::PreGame && game.game_phase != GamePhase::PreGame && game.game_phase != GamePhase::Final {
+                    tracing::info!(
+                        "PreGame -> Live: {} vs {} (event {}) — {:?} -> {:?}",
+                        game.away_team,
+                        game.home_team,
+                        game.event_id,
+                        prev,
+                        game.game_phase,
+                    );
+                    transitioned.push(game.event_id.clone());
+                }
+            }
+        }
+
+        transitioned
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -23,6 +24,32 @@ pub enum KalshiWsEvent {
     Error(String),
 }
 
+/// Handle for sending additional subscribe commands to an active WS connection.
+#[derive(Clone)]
+pub struct KalshiWsHandle {
+    cmd_tx: mpsc::UnboundedSender<Vec<String>>,
+    /// All tickers currently subscribed (for reconnect).
+    all_tickers: Arc<StdMutex<Vec<String>>>,
+}
+
+impl KalshiWsHandle {
+    /// Subscribe to additional market tickers on the live connection.
+    /// Returns the number of new tickers added (skips already-subscribed ones).
+    pub fn subscribe_additional(&self, new_tickers: Vec<String>) -> usize {
+        let mut all = self.all_tickers.lock().unwrap();
+        let truly_new: Vec<String> = new_tickers
+            .into_iter()
+            .filter(|t| !all.contains(t))
+            .collect();
+        let count = truly_new.len();
+        if count > 0 {
+            all.extend(truly_new.clone());
+            let _ = self.cmd_tx.send(truly_new);
+        }
+        count
+    }
+}
+
 pub struct KalshiWsClient {
     auth: KalshiAuth,
     demo: bool,
@@ -33,21 +60,25 @@ impl KalshiWsClient {
         Self { auth, demo }
     }
 
-    /// Start the WebSocket connection and return a receiver for events.
-    /// Subscribes to orderbook_delta, trade, fill, and user_orders channels
-    /// for the given market tickers.
+    /// Start the WebSocket connection and return a receiver for events
+    /// plus a handle for subscribing to additional tickers mid-session.
     pub async fn connect(
         &self,
         market_tickers: Vec<String>,
-    ) -> Result<mpsc::UnboundedReceiver<KalshiWsEvent>> {
+    ) -> Result<(mpsc::UnboundedReceiver<KalshiWsEvent>, KalshiWsHandle)> {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let all_tickers = Arc::new(StdMutex::new(market_tickers.clone()));
         let auth = self.auth.clone();
         let demo = self.demo;
-        let tickers = market_tickers.clone();
+        let tickers_for_task = all_tickers.clone();
 
         tokio::spawn(async move {
+            let mut cmd_rx = cmd_rx;
             loop {
-                match Self::run_connection(&auth, demo, &tickers, &tx).await {
+                // Get full ticker list for this connection attempt
+                let current_tickers = tickers_for_task.lock().unwrap().clone();
+                match Self::run_connection(&auth, demo, &current_tickers, &tx, &mut cmd_rx).await {
                     Ok(()) => {
                         tracing::info!("Kalshi WS connection closed normally, reconnecting...");
                     }
@@ -61,7 +92,8 @@ impl KalshiWsClient {
             }
         });
 
-        Ok(rx)
+        let handle = KalshiWsHandle { cmd_tx, all_tickers };
+        Ok((rx, handle))
     }
 
     async fn run_connection(
@@ -69,6 +101,7 @@ impl KalshiWsClient {
         demo: bool,
         market_tickers: &[String],
         tx: &mpsc::UnboundedSender<KalshiWsEvent>,
+        cmd_rx: &mut mpsc::UnboundedReceiver<Vec<String>>,
     ) -> Result<()> {
         let base_url = if demo { DEMO_WS_URL } else { WS_URL };
         let headers = auth.sign_websocket()?;
@@ -99,49 +132,75 @@ impl KalshiWsClient {
         let (mut write, mut read) = ws_stream.split();
 
         // Subscribe to channels
-        let subscribe_cmd = WsCommand {
-            id: 1,
-            cmd: "subscribe".to_string(),
-            params: WsParams {
-                channels: vec![
-                    "orderbook_delta".to_string(),
-                    "trade".to_string(),
-                    "fill".to_string(),
-                ],
-                market_tickers: if market_tickers.is_empty() {
-                    None
-                } else {
-                    Some(market_tickers.to_vec())
+        let mut cmd_id: i64 = 1;
+        if !market_tickers.is_empty() {
+            let subscribe_cmd = WsCommand {
+                id: cmd_id,
+                cmd: "subscribe".to_string(),
+                params: WsParams {
+                    channels: vec![
+                        "orderbook_delta".to_string(),
+                        "trade".to_string(),
+                        "fill".to_string(),
+                    ],
+                    market_tickers: Some(market_tickers.to_vec()),
                 },
-            },
-        };
+            };
+            cmd_id += 1;
 
-        let cmd_json = serde_json::to_string(&subscribe_cmd)?;
-        write.send(Message::Text(cmd_json)).await?;
-        tracing::info!(
-            "Subscribed to Kalshi channels for {} markets",
-            market_tickers.len()
-        );
+            let cmd_json = serde_json::to_string(&subscribe_cmd)?;
+            write.send(Message::Text(cmd_json)).await?;
+            tracing::info!(
+                "Subscribed to Kalshi channels for {} markets",
+                market_tickers.len()
+            );
+        }
 
-        // Process incoming messages
-        while let Some(msg) = read.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    if let Err(e) = Self::handle_message(&text, tx) {
-                        tracing::warn!("Failed to handle WS message: {:?}", e);
+        // Process incoming messages AND command channel
+        loop {
+            tokio::select! {
+                msg = read.next() => {
+                    match msg {
+                        Some(Ok(Message::Text(text))) => {
+                            if let Err(e) = Self::handle_message(&text, tx) {
+                                tracing::warn!("Failed to handle WS message: {:?}", e);
+                            }
+                        }
+                        Some(Ok(Message::Ping(data))) => {
+                            write.send(Message::Pong(data)).await?;
+                        }
+                        Some(Ok(Message::Close(_))) => {
+                            tracing::info!("Kalshi WS received close frame");
+                            break;
+                        }
+                        Some(Err(e)) => {
+                            return Err(e.into());
+                        }
+                        None => break,
+                        _ => {}
                     }
                 }
-                Ok(Message::Ping(data)) => {
-                    write.send(Message::Pong(data)).await?;
+                Some(new_tickers) = cmd_rx.recv() => {
+                    // Subscribe to additional tickers on the live connection
+                    let subscribe_cmd = WsCommand {
+                        id: cmd_id,
+                        cmd: "subscribe".to_string(),
+                        params: WsParams {
+                            channels: vec![
+                                "orderbook_delta".to_string(),
+                                "trade".to_string(),
+                            ],
+                            market_tickers: Some(new_tickers.clone()),
+                        },
+                    };
+                    cmd_id += 1;
+                    let cmd_json = serde_json::to_string(&subscribe_cmd)?;
+                    write.send(Message::Text(cmd_json)).await?;
+                    tracing::info!(
+                        "Subscribed to {} additional Kalshi markets mid-session",
+                        new_tickers.len()
+                    );
                 }
-                Ok(Message::Close(_)) => {
-                    tracing::info!("Kalshi WS received close frame");
-                    break;
-                }
-                Err(e) => {
-                    return Err(e.into());
-                }
-                _ => {}
             }
         }
 
