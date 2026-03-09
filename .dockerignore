@@ -1,0 +1,7 @@
+target/
+config.toml
+*.pem
+trades.db
+market_mappings.json
+bot_debug.log
+.git/

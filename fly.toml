@@ -1,0 +1,15 @@
+app = "sportsbetting-bot"
+primary_region = "iad"  # US East (Ashburn) — closest to Kalshi
+
+[build]
+
+[env]
+  RUST_LOG = "sports_betting=info"
+
+# No HTTP service needed — this is a background worker
+[processes]
+  app = ""
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

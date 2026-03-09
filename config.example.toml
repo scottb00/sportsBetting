@@ -6,9 +6,7 @@
 api_key_id = "your-kalshi-key-id"
 private_key_path = "kalshi_private_key.pem"
 demo = true  # Set to false for live trading
-
-[anthropic]
-api_key = "sk-ant-..."
+dry_run = true  # Paper trading mode — logs signals but doesn't place orders
 
 [risk]
 max_position_per_game = 50.0   # dollars
