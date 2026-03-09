@@ -19,41 +19,41 @@ async fn main() -> Result<()> {
     )?;
     let client = KalshiRestClient::new(auth, config.kalshi.demo);
 
-    // Fetch sports events
-    println!("=== Fetching sports events (category=sports, status=open, limit=100) ===");
-    println!();
+    // Try multiple KXNCAAMB* series to discover all CBB conference tournaments
+    let series_list = vec![
+        "KXNCAAMBGAME", "KXNCAAMBSOCON", "KXNCAAMBSBELT", "KXNCAAMBACC",
+        "KXNCAAMBB12", "KXNCAAMBBTEN", "KXNCAAMBSEC", "KXNCAAMBBE",
+        "KXNCAAMBSWAC", "KXNCAAMBWCC", "KXNCAAMBCAA", "KXNCAAMBHL",
+        "KXNCAAMBMWC", "KXNCAAMBAAC", "KXNCAAMBSLAND", "KXNCAAMBBSKY",
+        "KXNCAAMBNEC", "KXNCAAMBAE", "KXNCAAMBOVC", "KXNCAAMBMAAC",
+        "KXNCAAMBASUN", "KXNCAAMBCUSA", "KXNCAAMBMVC", "KXNCAAMBWAC",
+        "KXNCAAMBMEAC", "KXNCAAMBSCON", "KXNCAAMBBSTH", "KXNCAAMBAEAST",
+        "KXNCAAMBIV", "KXNCAAMBPAT", "KXNCAAMBBW",
+    ];
 
-    match client
-        .get_events(Some("sports"), Some("open"), None, Some(100))
-        .await
-    {
-        Ok(resp) => {
-            println!("Got {} events (cursor: {:?})", resp.events.len(), resp.cursor);
-            println!();
-
-            for (i, event) in resp.events.iter().enumerate() {
-                println!("--- Event #{} ---", i + 1);
-                println!("  event_ticker: {}", event.event_ticker);
-                println!("  title:        {}", event.title);
-                println!("  category:     {}", event.category);
-
-                match &event.markets {
-                    Some(markets) => {
-                        println!("  markets ({}):", markets.len());
-                        for m in markets {
-                            println!(
-                                "    [{}] {} | status={} yes_bid={:?} yes_ask={:?} vol={:?} oi={:?}",
-                                m.ticker, m.title, m.status,
-                                m.yes_bid, m.yes_ask, m.volume, m.open_interest,
-                            );
+    for series in &series_list {
+        match client
+            .get_events_with_series(None, Some(series), Some("open"), None, Some(200))
+            .await
+        {
+            Ok(resp) => {
+                if !resp.events.is_empty() {
+                    println!("=== {} — {} events ===", series, resp.events.len());
+                    for event in &resp.events {
+                        let market_count = event.markets.as_ref().map(|m| m.len()).unwrap_or(0);
+                        println!("  {} | {} | markets={}", event.event_ticker, event.title, market_count);
+                        if let Some(markets) = &event.markets {
+                            for m in markets {
+                                println!("    [{}] {} | status={} yes_bid={:?} yes_ask={:?} vol={:?}",
+                                    m.ticker, m.title, m.status, m.yes_bid, m.yes_ask, m.volume);
+                            }
                         }
                     }
-                    None => println!("  markets: (none embedded)"),
+                    println!();
                 }
-                println!();
             }
+            Err(_) => {}
         }
-        Err(e) => println!("ERROR fetching events: {:?}\n", e),
     }
 
     // Search markets for various queries

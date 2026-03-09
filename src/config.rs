@@ -10,6 +10,10 @@ pub struct Config {
     pub strategy: StrategyConfig,
     pub polling: PollingConfig,
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub intervals: IntervalConfig,
+    #[serde(default)]
+    pub notify: Option<NotifyConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +39,31 @@ pub struct RiskConfig {
     pub min_edge_threshold: f64,
 }
 
+fn default_cleanup_secs() -> u64 { 300 }
+fn default_discovery_secs() -> u64 { 300 }
+
+#[derive(Debug, Deserialize)]
+pub struct IntervalConfig {
+    /// How often to cancel orders for finished games (seconds).
+    #[serde(default = "default_cleanup_secs")]
+    pub cleanup_secs: u64,
+    /// How often to discover new Kalshi markets (seconds).
+    #[serde(default = "default_discovery_secs")]
+    pub discovery_secs: u64,
+}
+
+impl Default for IntervalConfig {
+    fn default() -> Self {
+        Self {
+            cleanup_secs: default_cleanup_secs(),
+            discovery_secs: default_discovery_secs(),
+        }
+    }
+}
+
+fn default_live_strategies() -> Vec<String> {
+    vec!["clv_hunter".to_string()]
+}
 fn default_min_volume() -> i64 { 20_000 }
 fn default_min_price_cents() -> f64 { 10.0 }
 fn default_max_price_cents() -> f64 { 90.0 }
@@ -45,6 +74,10 @@ pub struct StrategyConfig {
     pub break_ev_min_edge: f64,
     pub arb_scanner_min_edge: f64,
     pub clv_hunter_min_edge: f64,
+    /// Which strategies are allowed to place real orders (when dry_run = false).
+    /// Others will log as DRY RUN. Default: ["clv_hunter"]
+    #[serde(default = "default_live_strategies")]
+    pub live_strategies: Vec<String>,
     #[serde(default = "default_min_volume")]
     pub min_volume: i64,
     #[serde(default = "default_min_price_cents")]
@@ -67,6 +100,12 @@ pub struct PollingConfig {
 pub struct LoggingConfig {
     pub db_path: String,
     pub cache_path: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct NotifyConfig {
+    /// ntfy.sh topic name (e.g. "my-sports-bot-abc123")
+    pub ntfy_topic: String,
 }
 
 impl Config {

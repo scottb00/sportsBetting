@@ -1,5 +1,6 @@
 use sports_betting::engine::game_state::{GameState, GameStateManager, KalshiMarketState};
 use sports_betting::espn::types::GamePhase;
+use sports_betting::strategies::Strategy;
 
 /// Helper: create a basic GameState for testing
 fn make_game() -> GameState {
@@ -449,7 +450,7 @@ fn has_strategy_order_tracks_correctly() {
         created_time: "2026-03-09T18:00:00Z".to_string(),
     };
 
-    om.track_order(order, "clv_hunter".to_string(), GamePhase::PreGame);
+    om.track_order(order, "clv_hunter".to_string(), GamePhase::PreGame, None);
 
     assert!(om.has_strategy_order("TICKER-A", "clv_hunter"));
     assert!(!om.has_strategy_order("TICKER-A", "break_ev"));
@@ -476,7 +477,7 @@ fn has_strategy_order_cleared_after_fill() {
         created_time: "2026-03-09T18:00:00Z".to_string(),
     };
 
-    om.track_order(order, "clv_hunter".to_string(), GamePhase::PreGame);
+    om.track_order(order, "clv_hunter".to_string(), GamePhase::PreGame, None);
     assert!(om.has_strategy_order("TICKER-A", "clv_hunter"));
 
     // Full fill removes the order
@@ -514,7 +515,7 @@ fn has_strategy_order_persists_after_partial_fill() {
         created_time: "2026-03-09T18:00:00Z".to_string(),
     };
 
-    om.track_order(order, "clv_hunter".to_string(), GamePhase::PreGame);
+    om.track_order(order, "clv_hunter".to_string(), GamePhase::PreGame, None);
 
     // Partial fill — only 3 of 10
     let fill = Fill {

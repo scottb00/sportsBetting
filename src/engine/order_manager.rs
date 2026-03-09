@@ -26,6 +26,9 @@ struct TrackedOrder {
     strategy: String,
     /// The game phase when the order was placed.
     placed_phase: GamePhase,
+    /// Unix timestamp (seconds) when this order expires on Kalshi.
+    /// Used to proactively prune expired orders from local state.
+    expiration_ts: Option<i64>,
 }
 
 /// Summary of a CLV-eligible resting order, returned for closing-line comparison.
@@ -38,9 +41,30 @@ pub struct ClvOrderInfo {
 }
 
 /// Tracks our open orders and manages the order lifecycle.
+///
+/// This is the single source of truth for what we believe is resting on Kalshi.
+/// It guards against duplicate orders by tracking:
+/// - Live orders (placed on Kalshi, confirmed via REST response)
+/// - Pending orders (signal accepted, API call in flight)
+/// - Dry-run orders (not placed, but counted to prevent re-signaling)
+///
+/// On each tick, expired orders are pruned so strategies can re-evaluate.
 pub struct OrderManager {
     /// Order ID -> tracked order (order + placement time)
     open_orders: HashMap<String, TrackedOrder>,
+    /// Tracks (ticker, strategy) pairs that have a pending or dry-run order
+    /// this session. Prevents re-firing the same signal every tick.
+    /// Key: (ticker, strategy_name). Value: when the intent was recorded.
+    order_intents: HashMap<(String, String), OrderIntent>,
+}
+
+/// Records that we intend to have an order on this ticker/strategy.
+struct OrderIntent {
+    /// When this intent expires (order's expiration or a fallback TTL).
+    /// After this, the strategy is free to re-evaluate.
+    expires_at: Instant,
+    /// Whether a real order was placed (vs dry-run).
+    is_live: bool,
 }
 
 impl Default for OrderManager {
@@ -53,6 +77,7 @@ impl OrderManager {
     pub fn new() -> Self {
         Self {
             open_orders: HashMap::new(),
+            order_intents: HashMap::new(),
         }
     }
 
@@ -81,10 +106,36 @@ impl OrderManager {
         }
     }
 
+    /// Record that we intend to place (or have placed as dry-run) an order.
+    /// This prevents the same strategy from re-firing on the same ticker
+    /// until the intent expires.
+    pub fn record_intent(&mut self, signal: &OrderSignal, is_live: bool) {
+        let ttl = if let Some(exp_ts) = signal.expiration_ts {
+            let now_ts = chrono::Utc::now().timestamp();
+            let secs_remaining = (exp_ts - now_ts).max(0) as u64;
+            Duration::from_secs(secs_remaining)
+        } else {
+            // Fallback: intents without expiration last 5 minutes
+            Duration::from_secs(300)
+        };
+
+        let key = (signal.kalshi_ticker.clone(), signal.strategy.clone());
+        self.order_intents.insert(key, OrderIntent {
+            expires_at: Instant::now() + ttl,
+            is_live,
+        });
+    }
+
     /// Track a new open order with strategy and phase metadata.
-    pub fn track_order(&mut self, order: Order, strategy: String, placed_phase: GamePhase) {
+    pub fn track_order(
+        &mut self,
+        order: Order,
+        strategy: String,
+        placed_phase: GamePhase,
+        expiration_ts: Option<i64>,
+    ) {
         tracing::info!(
-            "Tracking order {}: {:?} {:?} {} @ {:?}/{:?} (strategy={}, phase={:?})",
+            "Tracking order {}: {:?} {:?} {} @ {:?}/{:?} (strategy={}, phase={:?}, expires={:?})",
             order.order_id,
             order.action,
             order.side,
@@ -93,6 +144,7 @@ impl OrderManager {
             order.no_price,
             strategy,
             placed_phase,
+            expiration_ts,
         );
         let order_id = order.order_id.clone();
         self.open_orders.insert(order_id, TrackedOrder {
@@ -100,6 +152,7 @@ impl OrderManager {
             placed_at: Instant::now(),
             strategy,
             placed_phase,
+            expiration_ts,
         });
     }
 
@@ -108,17 +161,79 @@ impl OrderManager {
         if let Some(tracked) = self.open_orders.get_mut(&fill.order_id) {
             tracked.order.remaining_count -= fill.count;
             if tracked.order.remaining_count <= 0 {
+                let ticker = tracked.order.ticker.clone();
+                let strategy = tracked.strategy.clone();
                 self.open_orders.remove(&fill.order_id);
+                // Clear intent so strategy can re-evaluate after full fill
+                self.order_intents.remove(&(ticker, strategy));
                 tracing::info!("Order {} fully filled", fill.order_id);
             }
         }
     }
 
-    /// Remove a cancelled order.
+    /// Remove a cancelled order and clear its intent.
     pub fn handle_cancel(&mut self, order_id: &str) {
-        if self.open_orders.remove(order_id).is_some() {
+        if let Some(tracked) = self.open_orders.remove(order_id) {
+            let key = (tracked.order.ticker.clone(), tracked.strategy.clone());
+            self.order_intents.remove(&key);
             tracing::info!("Order {} cancelled", order_id);
         }
+    }
+
+    /// Prune orders that have expired based on their expiration_ts.
+    /// Kalshi auto-cancels these, but we never get a WS notification,
+    /// so we must clean them up locally.
+    /// Also prunes expired intents so strategies can re-fire.
+    pub fn prune_expired(&mut self) {
+        let now_ts = chrono::Utc::now().timestamp();
+        let now = Instant::now();
+
+        // Prune expired open orders
+        let expired_ids: Vec<String> = self.open_orders
+            .iter()
+            .filter(|(_, t)| {
+                t.expiration_ts.is_some_and(|exp| now_ts >= exp)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for id in &expired_ids {
+            if let Some(tracked) = self.open_orders.remove(id) {
+                tracing::info!(
+                    "Pruned expired order {} on {} (strategy={})",
+                    id, tracked.order.ticker, tracked.strategy,
+                );
+            }
+        }
+
+        // Prune expired intents
+        self.order_intents.retain(|key, intent| {
+            if now >= intent.expires_at {
+                tracing::debug!(
+                    "Intent expired: {} / {} (was_live={})",
+                    key.0, key.1, intent.is_live
+                );
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    /// Check if there's already a resting order OR active intent from a given
+    /// strategy on a ticker. This is the main dedup guard.
+    pub fn has_strategy_order(&self, ticker: &str, strategy: &str) -> bool {
+        // Check live orders
+        let has_open = self.open_orders.values().any(|t| {
+            t.order.ticker == ticker && t.strategy == strategy
+        });
+        if has_open {
+            return true;
+        }
+
+        // Check intents (includes dry-run orders and in-flight orders)
+        let key = (ticker.to_string(), strategy.to_string());
+        self.order_intents.contains_key(&key)
     }
 
     /// Get all open orders for a market ticker.
@@ -146,6 +261,10 @@ impl OrderManager {
         self.open_orders.len()
     }
 
+    pub fn intent_count(&self) -> usize {
+        self.order_intents.len()
+    }
+
     /// Get order IDs for a market ticker (for bulk cancellation).
     pub fn order_ids_for_market(&self, ticker: &str) -> Vec<String> {
         self.open_orders
@@ -153,11 +272,6 @@ impl OrderManager {
             .filter(|t| t.order.ticker == ticker)
             .map(|t| t.order.order_id.clone())
             .collect()
-    }
-
-    /// Check if there's already a resting order from a given strategy on a ticker.
-    pub fn has_strategy_order(&self, ticker: &str, strategy: &str) -> bool {
-        self.open_orders.values().any(|t| t.order.ticker == ticker && t.strategy == strategy)
     }
 
     /// Return order IDs that have been resting longer than `ttl`.
@@ -198,5 +312,12 @@ impl OrderManager {
                 }
             })
             .collect()
+    }
+
+    /// Clear all intents for tickers belonging to finished games.
+    pub fn clear_intents_for_tickers(&mut self, tickers: &[String]) {
+        self.order_intents.retain(|key, _| {
+            !tickers.iter().any(|t| t == &key.0)
+        });
     }
 }
