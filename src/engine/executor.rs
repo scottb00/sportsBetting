@@ -3,7 +3,6 @@ use std::sync::Arc;
 use crate::engine::bot::{BotState, SharedState, StrategyRegistry};
 use crate::engine::notifier::Notifier;
 use crate::engine::order_manager::{OrderManager, OrderSignal};
-use crate::espn::types::GamePhase;
 use crate::kalshi::rest::KalshiRestClient;
 
 /// Run all strategies and collect order signals.
@@ -69,10 +68,9 @@ pub fn evaluate_strategies(
                 continue;
             }
 
-            // Skip if this strategy already has a resting order OR active intent
-            // on any market in this game
+            // Skip if any market in this game already has a resting order or in-flight
             let has_resting = game.kalshi_markets.iter().any(|m| {
-                state.order_manager.has_strategy_order(&m.ticker, strategy.name())
+                state.order_manager.has_resting_order(&m.ticker)
             });
             if has_resting {
                 continue;
@@ -137,10 +135,9 @@ pub async fn execute_signal(
             signal.size_dollars,
             signal.strategy,
         );
-        // Record intent so this strategy won't re-fire on the same ticker
-        // until the expiration passes
+        // Mark in-flight so we don't double-fire on the same ticker this tick
         let mut s = state.lock().await;
-        s.order_manager.record_intent(&signal, false);
+        s.order_manager.mark_in_flight(&signal.kalshi_ticker);
         return;
     }
 
@@ -155,11 +152,10 @@ pub async fn execute_signal(
         signal.strategy,
     );
 
-    // Record intent before the API call to prevent duplicate signals
-    // during the time the request is in flight
+    // Mark in-flight before the API call to prevent duplicate signals
     {
         let mut s = state.lock().await;
-        s.order_manager.record_intent(&signal, true);
+        s.order_manager.mark_in_flight(&signal.kalshi_ticker);
     }
 
     match kalshi_rest.create_order(&order_req).await {
@@ -175,16 +171,19 @@ pub async fn execute_signal(
                 order_req.count,
                 &resp.order.status,
             );
-            let placed_phase = s.game_state
-                .get_mut_by_kalshi_ticker(&signal.kalshi_ticker)
-                .map(|gs| gs.phase.clone())
-                .unwrap_or(GamePhase::Unknown);
-            s.order_manager.track_order(
-                resp.order,
-                signal.strategy.clone(),
-                placed_phase,
-                signal.expiration_ts,
-            );
+
+            // Track CLV orders for closing-line validation
+            if signal.strategy == "clv_hunter" {
+                let price = order_req.yes_price.or(order_req.no_price).unwrap_or(0);
+                s.order_manager.record_clv_order(
+                    &resp.order.order_id,
+                    &signal.kalshi_ticker,
+                    &format!("{:?}", order_req.side),
+                    price,
+                );
+            }
+
+            s.order_manager.record_placed_order(resp.order);
             tracing::info!("Order placed successfully");
 
             // Send push notification
@@ -203,8 +202,9 @@ pub async fn execute_signal(
         }
         Err(e) => {
             tracing::error!("Failed to place order: {:?}", e);
-            // Intent stays so we don't immediately retry a failing order.
-            // It will naturally expire and the strategy can try again.
+            // Clear in-flight so the strategy can retry next tick
+            let mut s = state.lock().await;
+            s.order_manager.clear_in_flight(&signal.kalshi_ticker);
         }
     }
 }

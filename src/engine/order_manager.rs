@@ -1,7 +1,10 @@
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Instant;
 
-use crate::espn::types::GamePhase;
+use anyhow::Result;
+
+use crate::kalshi::rest::KalshiRestClient;
 use crate::kalshi::types::*;
 
 /// Signal emitted by a strategy to request an order.
@@ -20,19 +23,6 @@ pub struct OrderSignal {
     pub edge_after_fees: f64,
 }
 
-/// An order together with metadata for lifecycle tracking.
-struct TrackedOrder {
-    order: Order,
-    placed_at: Instant,
-    /// Which strategy placed this order (e.g. "clv_hunter").
-    strategy: String,
-    /// The game phase when the order was placed.
-    placed_phase: GamePhase,
-    /// Unix timestamp (seconds) when this order expires on Kalshi.
-    /// Used to proactively prune expired orders from local state.
-    expiration_ts: Option<i64>,
-}
-
 /// Summary of a CLV-eligible resting order, returned for closing-line comparison.
 #[derive(Debug)]
 pub struct ClvOrderInfo {
@@ -42,31 +32,25 @@ pub struct ClvOrderInfo {
     pub price_cents: i64,
 }
 
-/// Tracks our open orders and manages the order lifecycle.
+/// Thin order manager that uses Kalshi's API as the source of truth.
 ///
-/// This is the single source of truth for what we believe is resting on Kalshi.
-/// It guards against duplicate orders by tracking:
-/// - Live orders (placed on Kalshi, confirmed via REST response)
-/// - Pending orders (signal accepted, API call in flight)
-/// - Dry-run orders (not placed, but counted to prevent re-signaling)
-///
-/// On each tick, expired orders are pruned so strategies can re-evaluate.
+/// Instead of tracking the full order lifecycle locally, we periodically
+/// fetch resting orders from Kalshi and cache them. The only local state
+/// is:
+/// - Cached resting orders (refreshed via `sync_from_kalshi`)
+/// - In-flight tickers (short-lived guard against double-sends)
+/// - CLV order metadata (which orders were placed by clv_hunter pre-game)
 pub struct OrderManager {
-    /// Order ID -> tracked order (order + placement time)
-    open_orders: HashMap<String, TrackedOrder>,
-    /// Tracks (ticker, strategy) pairs that have a pending or dry-run order
-    /// this session. Prevents re-firing the same signal every tick.
-    /// Key: (ticker, strategy_name). Value: when the intent was recorded.
-    order_intents: HashMap<(String, String), OrderIntent>,
-}
-
-/// Records that we intend to have an order on this ticker/strategy.
-struct OrderIntent {
-    /// When this intent expires (order's expiration or a fallback TTL).
-    /// After this, the strategy is free to re-evaluate.
-    expires_at: Instant,
-    /// Whether a real order was placed (vs dry-run).
-    is_live: bool,
+    /// Cached resting orders from Kalshi, keyed by order_id.
+    resting_orders: HashMap<String, Order>,
+    /// Tickers with an API call currently in flight (prevents double-sends).
+    /// Cleared on next sync.
+    in_flight: HashSet<String>,
+    /// CLV order metadata: order_id -> info. Populated when we place CLV orders.
+    /// Used for closing-line validation when games go live.
+    clv_orders: HashMap<String, ClvOrderInfo>,
+    /// When we last synced with Kalshi.
+    pub last_sync: Option<Instant>,
 }
 
 impl Default for OrderManager {
@@ -78,9 +62,69 @@ impl Default for OrderManager {
 impl OrderManager {
     pub fn new() -> Self {
         Self {
-            open_orders: HashMap::new(),
-            order_intents: HashMap::new(),
+            resting_orders: HashMap::new(),
+            in_flight: HashSet::new(),
+            clv_orders: HashMap::new(),
+            last_sync: None,
         }
+    }
+
+    /// Fetch all resting orders from Kalshi and replace our cache.
+    pub async fn sync_from_kalshi(&mut self, kalshi_rest: &Arc<KalshiRestClient>) -> Result<()> {
+        let resp = kalshi_rest.get_orders(None).await?;
+        let old_count = self.resting_orders.len();
+        self.resting_orders.clear();
+        for order in resp.orders {
+            self.resting_orders.insert(order.order_id.clone(), order);
+        }
+        self.in_flight.clear();
+        self.last_sync = Some(Instant::now());
+
+        // Clean up CLV entries for orders no longer resting
+        self.clv_orders.retain(|oid, _| self.resting_orders.contains_key(oid));
+
+        let new_count = self.resting_orders.len();
+        if old_count != new_count || old_count > 0 || new_count > 0 {
+            tracing::info!(
+                "Order sync: {} resting orders (was {}), {} CLV tracked",
+                new_count, old_count, self.clv_orders.len(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Check if there's already a resting order on a given ticker.
+    pub fn has_resting_order(&self, ticker: &str) -> bool {
+        if self.in_flight.contains(ticker) {
+            return true;
+        }
+        self.resting_orders.values().any(|o| o.ticker == ticker)
+    }
+
+    /// Mark a ticker as in-flight (API call about to be sent).
+    pub fn mark_in_flight(&mut self, ticker: &str) {
+        self.in_flight.insert(ticker.to_string());
+    }
+
+    /// Clear in-flight status for a ticker (e.g. after API call completes).
+    pub fn clear_in_flight(&mut self, ticker: &str) {
+        self.in_flight.remove(ticker);
+    }
+
+    /// Record a newly placed order into the cache (avoids waiting for next sync).
+    pub fn record_placed_order(&mut self, order: Order) {
+        self.in_flight.remove(&order.ticker);
+        self.resting_orders.insert(order.order_id.clone(), order);
+    }
+
+    /// Record CLV metadata for a newly placed CLV order.
+    pub fn record_clv_order(&mut self, order_id: &str, ticker: &str, side: &str, price_cents: i64) {
+        self.clv_orders.insert(order_id.to_string(), ClvOrderInfo {
+            order_id: order_id.to_string(),
+            ticker: ticker.to_string(),
+            side: side.to_string(),
+            price_cents,
+        });
     }
 
     /// Convert a signal to a CreateOrderRequest.
@@ -104,223 +148,54 @@ impl OrderManager {
             no_price,
             time_in_force: Some(TimeInForce::GoodTillCanceled),
             post_only: Some(signal.post_only),
-            expiration_ts: signal.expiration_ts, // Kalshi expects unix seconds
+            expiration_ts: signal.expiration_ts,
         }
-    }
-
-    /// Record that we intend to place (or have placed as dry-run) an order.
-    /// This prevents the same strategy from re-firing on the same ticker
-    /// until the intent expires.
-    pub fn record_intent(&mut self, signal: &OrderSignal, is_live: bool) {
-        let ttl = if let Some(exp_ts) = signal.expiration_ts {
-            let now_ts = chrono::Utc::now().timestamp();
-            let secs_remaining = (exp_ts - now_ts).max(0) as u64;
-            Duration::from_secs(secs_remaining)
-        } else {
-            // Fallback: intents without expiration last 5 minutes
-            Duration::from_secs(300)
-        };
-
-        let key = (signal.kalshi_ticker.clone(), signal.strategy.clone());
-        self.order_intents.insert(key, OrderIntent {
-            expires_at: Instant::now() + ttl,
-            is_live,
-        });
-    }
-
-    /// Track a new open order with strategy and phase metadata.
-    pub fn track_order(
-        &mut self,
-        order: Order,
-        strategy: String,
-        placed_phase: GamePhase,
-        expiration_ts: Option<i64>,
-    ) {
-        tracing::info!(
-            "Tracking order {}: {:?} {:?} {} @ {:?}/{:?} (strategy={}, phase={:?}, expires={:?})",
-            order.order_id,
-            order.action,
-            order.side,
-            order.remaining_count,
-            order.yes_price,
-            order.no_price,
-            strategy,
-            placed_phase,
-            expiration_ts,
-        );
-        let order_id = order.order_id.clone();
-        self.open_orders.insert(order_id, TrackedOrder {
-            order,
-            placed_at: Instant::now(),
-            strategy,
-            placed_phase,
-            expiration_ts,
-        });
-    }
-
-    /// Handle a fill — update or remove the order.
-    pub fn handle_fill(&mut self, fill: &Fill) {
-        if let Some(tracked) = self.open_orders.get_mut(&fill.order_id) {
-            tracked.order.remaining_count -= fill.count;
-            if tracked.order.remaining_count <= 0 {
-                let ticker = tracked.order.ticker.clone();
-                let strategy = tracked.strategy.clone();
-                self.open_orders.remove(&fill.order_id);
-                // Clear intent so strategy can re-evaluate after full fill
-                self.order_intents.remove(&(ticker, strategy));
-                tracing::info!("Order {} fully filled", fill.order_id);
-            }
-        }
-    }
-
-    /// Remove a cancelled order and clear its intent.
-    pub fn handle_cancel(&mut self, order_id: &str) {
-        if let Some(tracked) = self.open_orders.remove(order_id) {
-            let key = (tracked.order.ticker.clone(), tracked.strategy.clone());
-            self.order_intents.remove(&key);
-            tracing::info!("Order {} cancelled", order_id);
-        }
-    }
-
-    /// Prune orders that have expired based on their expiration_ts.
-    /// Kalshi auto-cancels these, but we never get a WS notification,
-    /// so we must clean them up locally.
-    /// Also prunes expired intents so strategies can re-fire.
-    pub fn prune_expired(&mut self) {
-        let now_ts = chrono::Utc::now().timestamp();
-        let now = Instant::now();
-
-        // Prune expired open orders
-        let expired_ids: Vec<String> = self.open_orders
-            .iter()
-            .filter(|(_, t)| {
-                t.expiration_ts.is_some_and(|exp| now_ts >= exp)
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-
-        for id in &expired_ids {
-            if let Some(tracked) = self.open_orders.remove(id) {
-                tracing::info!(
-                    "Pruned expired order {} on {} (strategy={})",
-                    id, tracked.order.ticker, tracked.strategy,
-                );
-            }
-        }
-
-        // Prune expired intents
-        self.order_intents.retain(|key, intent| {
-            if now >= intent.expires_at {
-                tracing::debug!(
-                    "Intent expired: {} / {} (was_live={})",
-                    key.0, key.1, intent.is_live
-                );
-                false
-            } else {
-                true
-            }
-        });
-    }
-
-    /// Check if there's already a resting order OR active intent from a given
-    /// strategy on a ticker. This is the main dedup guard.
-    pub fn has_strategy_order(&self, ticker: &str, strategy: &str) -> bool {
-        // Check live orders
-        let has_open = self.open_orders.values().any(|t| {
-            t.order.ticker == ticker && t.strategy == strategy
-        });
-        if has_open {
-            return true;
-        }
-
-        // Check intents (includes dry-run orders and in-flight orders)
-        let key = (ticker.to_string(), strategy.to_string());
-        self.order_intents.contains_key(&key)
-    }
-
-    /// Get all open orders for a market ticker.
-    pub fn orders_for_market(&self, ticker: &str) -> Vec<&Order> {
-        self.open_orders
-            .values()
-            .filter(|t| t.order.ticker == ticker)
-            .map(|t| &t.order)
-            .collect()
     }
 
     /// Get total resting exposure in dollars for a market.
     pub fn market_exposure(&self, ticker: &str) -> f64 {
-        self.open_orders
+        self.resting_orders
             .values()
-            .filter(|t| t.order.ticker == ticker)
-            .map(|t| {
-                let price = t.order.yes_price.or(t.order.no_price).unwrap_or(50) as f64 / 100.0;
-                t.order.remaining_count as f64 * price
+            .filter(|o| o.ticker == ticker)
+            .map(|o| {
+                let price = o.yes_price.or(o.no_price).unwrap_or(50) as f64 / 100.0;
+                o.remaining_count as f64 * price
             })
             .sum()
     }
 
-    pub fn open_order_count(&self) -> usize {
-        self.open_orders.len()
-    }
-
-    pub fn intent_count(&self) -> usize {
-        self.order_intents.len()
-    }
-
-    /// Get order IDs for a market ticker (for bulk cancellation).
+    /// Get order IDs for a market ticker (for cancellation).
     pub fn order_ids_for_market(&self, ticker: &str) -> Vec<String> {
-        self.open_orders
+        self.resting_orders
             .values()
-            .filter(|t| t.order.ticker == ticker)
-            .map(|t| t.order.order_id.clone())
+            .filter(|o| o.ticker == ticker)
+            .map(|o| o.order_id.clone())
             .collect()
     }
 
-    /// Return order IDs that have been resting longer than `ttl`.
-    pub fn stale_orders(&self, ttl: Duration) -> Vec<String> {
-        let now = Instant::now();
-        self.open_orders
+    /// Return CLV-eligible orders for the given tickers.
+    pub fn clv_orders_for_tickers(&self, tickers: &[&str]) -> Vec<&ClvOrderInfo> {
+        self.clv_orders
             .values()
-            .filter(|t| now.duration_since(t.placed_at) > ttl)
-            .map(|t| t.order.order_id.clone())
-            .collect()
-    }
-
-    /// Return order IDs for orders on any of the given tickers.
-    pub fn order_ids_for_tickers(&self, tickers: &[String]) -> Vec<String> {
-        self.open_orders
-            .values()
-            .filter(|t| tickers.iter().any(|tk| tk == &t.order.ticker))
-            .map(|t| t.order.order_id.clone())
-            .collect()
-    }
-
-    /// Return CLV-eligible orders: placed by "clv_hunter" during PreGame, still resting.
-    pub fn clv_orders_for_tickers(&self, tickers: &[&str]) -> Vec<ClvOrderInfo> {
-        self.open_orders
-            .values()
-            .filter(|t| {
-                t.strategy == "clv_hunter"
-                    && t.placed_phase == GamePhase::PreGame
-                    && tickers.contains(&t.order.ticker.as_str())
-            })
-            .map(|t| {
-                let price_cents = t.order.yes_price.or(t.order.no_price).unwrap_or(0);
-                ClvOrderInfo {
-                    order_id: t.order.order_id.clone(),
-                    ticker: t.order.ticker.clone(),
-                    side: format!("{:?}", t.order.side),
-                    price_cents,
-                }
+            .filter(|info| {
+                tickers.contains(&info.ticker.as_str())
+                    && self.resting_orders.contains_key(&info.order_id)
             })
             .collect()
     }
 
-    /// Clear all intents for tickers belonging to finished games.
-    pub fn clear_intents_for_tickers(&mut self, tickers: &[String]) {
-        self.order_intents.retain(|key, _| {
-            !tickers.iter().any(|t| t == &key.0)
-        });
+    pub fn open_order_count(&self) -> usize {
+        self.resting_orders.len()
+    }
+
+    pub fn in_flight_count(&self) -> usize {
+        self.in_flight.len()
+    }
+
+    /// Remove an order from local cache (e.g. after cancel or fill).
+    pub fn remove_order(&mut self, order_id: &str) {
+        self.resting_orders.remove(order_id);
+        self.clv_orders.remove(order_id);
     }
 }
 
@@ -343,123 +218,67 @@ mod tests {
         }
     }
 
-    fn make_signal(ticker: &str, strategy: &str) -> OrderSignal {
-        OrderSignal {
-            strategy: strategy.to_string(),
-            kalshi_ticker: ticker.to_string(),
-            side: OrderSide::Yes,
-            action: OrderAction::Buy,
-            price_cents: 55,
-            size_dollars: 10.0,
-            post_only: true,
-            expiration_ts: None,
-            edge_after_fees: 0.05,
-        }
+    #[test]
+    fn has_resting_order_from_cache() {
+        let mut om = OrderManager::new();
+        om.record_placed_order(make_order("o1", "TICKER-A"));
+
+        assert!(om.has_resting_order("TICKER-A"));
+        assert!(!om.has_resting_order("TICKER-B"));
     }
 
     #[test]
-    fn prune_expired_orders() {
+    fn in_flight_blocks_duplicate() {
         let mut om = OrderManager::new();
-        let past_ts = chrono::Utc::now().timestamp() - 10;
-        om.track_order(
-            make_order("o1", "TICKER-A"),
-            "clv_hunter".to_string(),
-            GamePhase::PreGame,
-            Some(past_ts),
-        );
-        assert_eq!(om.open_order_count(), 1);
+        om.mark_in_flight("TICKER-A");
 
-        om.prune_expired();
-        assert_eq!(om.open_order_count(), 0);
+        assert!(om.has_resting_order("TICKER-A"));
+        assert!(!om.has_resting_order("TICKER-B"));
     }
 
     #[test]
-    fn non_expired_orders_survive_prune() {
+    fn record_placed_clears_in_flight() {
         let mut om = OrderManager::new();
-        let future_ts = chrono::Utc::now().timestamp() + 3600;
-        om.track_order(
-            make_order("o1", "TICKER-A"),
-            "clv_hunter".to_string(),
-            GamePhase::PreGame,
-            Some(future_ts),
-        );
+        om.mark_in_flight("TICKER-A");
+        om.record_placed_order(make_order("o1", "TICKER-A"));
 
-        om.prune_expired();
-        assert_eq!(om.open_order_count(), 1);
+        assert!(om.has_resting_order("TICKER-A"));
+        assert_eq!(om.in_flight_count(), 0);
     }
 
     #[test]
-    fn intent_blocks_has_strategy_order() {
+    fn market_exposure() {
         let mut om = OrderManager::new();
-        let signal = make_signal("TICKER-A", "break_ev");
-        om.record_intent(&signal, false);
-
-        assert!(om.has_strategy_order("TICKER-A", "break_ev"));
-        assert!(!om.has_strategy_order("TICKER-A", "clv_hunter"));
-        assert!(!om.has_strategy_order("TICKER-B", "break_ev"));
+        om.record_placed_order(make_order("o1", "TICKER-A"));
+        // 10 contracts at 55 cents = $5.50
+        let exp = om.market_exposure("TICKER-A");
+        assert!((exp - 5.5).abs() < 0.01);
     }
 
     #[test]
-    fn expired_intent_pruned() {
+    fn clv_orders_tracked() {
         let mut om = OrderManager::new();
-        // Create a signal with expiration in the past
-        let mut signal = make_signal("TICKER-A", "break_ev");
-        signal.expiration_ts = Some(chrono::Utc::now().timestamp() - 1);
-        om.record_intent(&signal, false);
+        om.record_placed_order(make_order("o1", "TICKER-A"));
+        om.record_clv_order("o1", "TICKER-A", "Yes", 55);
 
-        // Intent has 0 TTL remaining, but Instant math might keep it for a moment
-        // Sleep briefly to ensure expiration
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        let clv = om.clv_orders_for_tickers(&["TICKER-A"]);
+        assert_eq!(clv.len(), 1);
+        assert_eq!(clv[0].price_cents, 55);
 
-        om.prune_expired();
-        assert!(!om.has_strategy_order("TICKER-A", "break_ev"));
+        // Remove order -> CLV entry gone on next query
+        om.remove_order("o1");
+        let clv = om.clv_orders_for_tickers(&["TICKER-A"]);
+        assert_eq!(clv.len(), 0);
     }
 
     #[test]
-    fn clear_intents_for_tickers() {
+    fn remove_order_clears_all() {
         let mut om = OrderManager::new();
-        om.record_intent(&make_signal("TICKER-A", "break_ev"), false);
-        om.record_intent(&make_signal("TICKER-B", "clv_hunter"), false);
-        om.record_intent(&make_signal("TICKER-C", "arb_scanner"), false);
+        om.record_placed_order(make_order("o1", "TICKER-A"));
+        om.record_clv_order("o1", "TICKER-A", "Yes", 55);
 
-        assert_eq!(om.intent_count(), 3);
-
-        om.clear_intents_for_tickers(&["TICKER-A".to_string(), "TICKER-C".to_string()]);
-        assert_eq!(om.intent_count(), 1);
-        assert!(om.has_strategy_order("TICKER-B", "clv_hunter"));
-        assert!(!om.has_strategy_order("TICKER-A", "break_ev"));
-    }
-
-    #[test]
-    fn cancel_clears_intent() {
-        let mut om = OrderManager::new();
-        let signal = make_signal("TICKER-A", "clv_hunter");
-        om.record_intent(&signal, true);
-        om.track_order(
-            make_order("o1", "TICKER-A"),
-            "clv_hunter".to_string(),
-            GamePhase::PreGame,
-            None,
-        );
-
-        assert!(om.has_strategy_order("TICKER-A", "clv_hunter"));
-        om.handle_cancel("o1");
-        assert!(!om.has_strategy_order("TICKER-A", "clv_hunter"));
-    }
-
-    #[test]
-    fn stale_orders_detected() {
-        let mut om = OrderManager::new();
-        om.track_order(
-            make_order("o1", "TICKER-A"),
-            "clv_hunter".to_string(),
-            GamePhase::PreGame,
-            None,
-        );
-
-        // No stale orders with a generous TTL
-        assert!(om.stale_orders(Duration::from_secs(3600)).is_empty());
-        // All orders are stale with a zero TTL
-        assert_eq!(om.stale_orders(Duration::from_secs(0)).len(), 1);
+        assert!(om.has_resting_order("TICKER-A"));
+        om.remove_order("o1");
+        assert!(!om.has_resting_order("TICKER-A"));
     }
 }

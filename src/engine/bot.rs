@@ -64,13 +64,11 @@ pub fn create_bot_state(config: &Config) -> Result<BotState> {
 
 /// Build the strategy registry from config.
 pub fn create_strategies(config: &Config) -> StrategyRegistry {
-    use crate::strategies::arb_scanner::ArbScanner;
     use crate::strategies::break_ev::BreakEvQuoter;
     use crate::strategies::clv_hunter::ClvHunter;
 
     let strategies: Vec<Box<dyn Strategy>> = vec![
         Box::new(BreakEvQuoter::new(config.strategy.break_ev_min_edge)),
-        Box::new(ArbScanner::new(config.strategy.arb_scanner_min_edge)),
         Box::new(ClvHunter::new(config.strategy.clv_hunter_min_edge)),
     ];
 

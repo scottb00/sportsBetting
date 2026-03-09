@@ -88,9 +88,10 @@ fn evaluate_market(
         return None;
     }
 
+    let mid_for_side = if buying_yes { mid } else { 1.0 - mid };
     tracing::info!(
         "{} signal: {} {:?} {:?} at {}c, size ${:.2}, edge {:.4} (after fees), fair {:.4}, mid {:.4}",
-        strategy_name, market.ticker, action, side, price_cents, size, edge_after_fees, fair_value, mid
+        strategy_name, market.ticker, action, side, price_cents, size, edge_after_fees, fair_for_side, mid_for_side
     );
 
     Some(OrderSignal {

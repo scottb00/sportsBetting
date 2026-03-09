@@ -68,6 +68,9 @@ async fn main() -> Result<()> {
     // Fetch initial ESPN win probs
     fetch_summaries_for_games(&espn_poller, &state).await;
 
+    // --- Sync resting orders from Kalshi on startup ---
+    handlers::sync_orders(&state, &kalshi_rest).await;
+
     // --- Connect WebSockets ---
     let (mut kalshi_rx, kalshi_ws_handle) = connect_kalshi_ws(&auth, &config, &state).await?;
     let mut poly_rx = connect_poly_ws(&state).await?;
@@ -80,6 +83,8 @@ async fn main() -> Result<()> {
         tokio::time::interval(tokio::time::Duration::from_secs(config.intervals.cleanup_secs));
     let mut discovery_interval =
         tokio::time::interval(tokio::time::Duration::from_secs(config.intervals.discovery_secs));
+    let mut order_sync_interval =
+        tokio::time::interval(tokio::time::Duration::from_secs(config.intervals.order_sync_secs));
     let mut current_day = today;
     let dry_run = config.kalshi.dry_run;
 
@@ -109,6 +114,9 @@ async fn main() -> Result<()> {
                     &kalshi_rest, &espn_poller, &state,
                     kalshi_ws_handle.as_ref(),
                 ).await;
+            }
+            _ = order_sync_interval.tick() => {
+                handlers::sync_orders(&state, &kalshi_rest).await;
             }
             Some(event) = async {
                 match &mut kalshi_rx {

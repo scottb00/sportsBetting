@@ -41,6 +41,7 @@ pub struct RiskConfig {
 
 fn default_cleanup_secs() -> u64 { 300 }
 fn default_discovery_secs() -> u64 { 300 }
+fn default_order_sync_secs() -> u64 { 30 }
 
 #[derive(Debug, Deserialize)]
 pub struct IntervalConfig {
@@ -50,6 +51,9 @@ pub struct IntervalConfig {
     /// How often to discover new Kalshi markets (seconds).
     #[serde(default = "default_discovery_secs")]
     pub discovery_secs: u64,
+    /// How often to sync resting orders from Kalshi (seconds).
+    #[serde(default = "default_order_sync_secs")]
+    pub order_sync_secs: u64,
 }
 
 impl Default for IntervalConfig {
@@ -57,6 +61,7 @@ impl Default for IntervalConfig {
         Self {
             cleanup_secs: default_cleanup_secs(),
             discovery_secs: default_discovery_secs(),
+            order_sync_secs: default_order_sync_secs(),
         }
     }
 }
@@ -72,7 +77,6 @@ fn default_order_ttl_secs() -> u64 { 120 }
 #[derive(Debug, Deserialize)]
 pub struct StrategyConfig {
     pub break_ev_min_edge: f64,
-    pub arb_scanner_min_edge: f64,
     pub clv_hunter_min_edge: f64,
     /// Which strategies are allowed to place real orders (when dry_run = false).
     /// Others will log as DRY RUN. Default: ["clv_hunter"]

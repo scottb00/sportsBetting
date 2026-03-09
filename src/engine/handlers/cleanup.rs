@@ -43,16 +43,14 @@ pub async fn cleanup_finished_games(
 
         let mut s = state.lock().await;
         for (order_id, _) in &orders_to_cancel {
-            s.order_manager.handle_cancel(order_id);
+            s.order_manager.remove_order(order_id);
         }
-        s.order_manager.clear_intents_for_tickers(&finished_tickers);
         s.game_state.cleanup_finished();
         for ticker in &finished_tickers {
             s.order_books.remove(ticker);
         }
     } else {
         let count_before = s.game_state.games.len();
-        s.order_manager.clear_intents_for_tickers(&finished_tickers);
         s.game_state.cleanup_finished();
         let removed = count_before - s.game_state.games.len();
         if removed > 0 {

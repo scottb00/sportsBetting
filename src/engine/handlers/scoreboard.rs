@@ -30,9 +30,6 @@ pub async fn handle_scoreboard_tick(
     let new_breaks = game_tracker.update(&games);
     let mut s = state.lock().await;
 
-    // Prune orders/intents that have expired since last tick
-    s.order_manager.prune_expired();
-
     // Update game states (no volume update on polls — volume is set at startup)
     for game in &games {
         let gs = s.game_state.upsert(
@@ -116,7 +113,7 @@ fn validate_clv_orders(s: &mut BotState, pregame_to_live: &[String]) {
         if let Some(gs) = s.game_state.get(event_id) {
             let tickers: Vec<&str> = gs.kalshi_tickers();
             let clv_orders = s.order_manager.clv_orders_for_tickers(&tickers);
-            for clv_order in &clv_orders {
+            for clv_order in clv_orders {
                 let closing_mid = s.order_books
                     .get(&clv_order.ticker)
                     .and_then(|book| book.yes_mid())
@@ -161,9 +158,9 @@ fn log_game_summary(s: &BotState) {
     let with_kalshi = s.game_state.games.values().filter(|g| g.has_kalshi()).count();
     let with_fair = s.game_state.games.values().filter(|g| g.espn_home_win_prob.is_some()).count();
     tracing::info!(
-        "Games: {} live, {} break, {} pre | {} w/Kalshi, {} w/fair_value | orders={} intents={}",
+        "Games: {} live, {} break, {} pre | {} w/Kalshi, {} w/fair_value | orders={} in_flight={}",
         live_count, break_count, pre_count, with_kalshi, with_fair,
-        s.order_manager.open_order_count(), s.order_manager.intent_count(),
+        s.order_manager.open_order_count(), s.order_manager.in_flight_count(),
     );
 
     for gs in s.game_state.games.values() {

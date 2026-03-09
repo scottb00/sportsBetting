@@ -429,11 +429,11 @@ fn signal_to_order_none_expiration() {
 }
 
 // ============================================================
-// Order dedup — has_strategy_order
+// Order dedup — has_resting_order (simplified: dedup by ticker)
 // ============================================================
 
 #[test]
-fn has_strategy_order_tracks_correctly() {
+fn has_resting_order_tracks_correctly() {
     use sports_betting::engine::order_manager::OrderManager;
     use sports_betting::kalshi::types::{Order, OrderSide, OrderAction};
 
@@ -452,17 +452,16 @@ fn has_strategy_order_tracks_correctly() {
         created_time: "2026-03-09T18:00:00Z".to_string(),
     };
 
-    om.track_order(order, "clv_hunter".to_string(), GamePhase::PreGame, None);
+    om.record_placed_order(order);
 
-    assert!(om.has_strategy_order("TICKER-A", "clv_hunter"));
-    assert!(!om.has_strategy_order("TICKER-A", "break_ev"));
-    assert!(!om.has_strategy_order("TICKER-B", "clv_hunter"));
+    assert!(om.has_resting_order("TICKER-A"));
+    assert!(!om.has_resting_order("TICKER-B"));
 }
 
 #[test]
-fn has_strategy_order_cleared_after_fill() {
+fn resting_order_cleared_after_remove() {
     use sports_betting::engine::order_manager::OrderManager;
-    use sports_betting::kalshi::types::{Order, OrderSide, OrderAction, Fill};
+    use sports_betting::kalshi::types::{Order, OrderSide, OrderAction};
 
     let mut om = OrderManager::new();
 
@@ -479,59 +478,25 @@ fn has_strategy_order_cleared_after_fill() {
         created_time: "2026-03-09T18:00:00Z".to_string(),
     };
 
-    om.track_order(order, "clv_hunter".to_string(), GamePhase::PreGame, None);
-    assert!(om.has_strategy_order("TICKER-A", "clv_hunter"));
+    om.record_placed_order(order);
+    assert!(om.has_resting_order("TICKER-A"));
 
-    // Full fill removes the order
-    let fill = Fill {
-        trade_id: "trade-1".to_string(),
-        order_id: "order-1".to_string(),
-        market_ticker: "TICKER-A".to_string(),
-        side: "yes".to_string(),
-        action: "buy".to_string(),
-        yes_price: 55,
-        no_price: 45,
-        count: 5,
-    };
-    om.handle_fill(&fill);
-    assert!(!om.has_strategy_order("TICKER-A", "clv_hunter"), "Should be cleared after full fill");
+    om.remove_order("order-1");
+    assert!(!om.has_resting_order("TICKER-A"), "Should be cleared after remove");
 }
 
 #[test]
-fn has_strategy_order_persists_after_partial_fill() {
+fn in_flight_blocks_resting_check() {
     use sports_betting::engine::order_manager::OrderManager;
-    use sports_betting::kalshi::types::{Order, OrderSide, OrderAction, Fill};
 
     let mut om = OrderManager::new();
+    assert!(!om.has_resting_order("TICKER-A"));
 
-    let order = Order {
-        order_id: "order-1".to_string(),
-        ticker: "TICKER-A".to_string(),
-        action: OrderAction::Buy,
-        side: OrderSide::Yes,
-        order_type: "limit".to_string(),
-        status: "resting".to_string(),
-        yes_price: Some(55),
-        no_price: Some(45),
-        remaining_count: 10,
-        created_time: "2026-03-09T18:00:00Z".to_string(),
-    };
+    om.mark_in_flight("TICKER-A");
+    assert!(om.has_resting_order("TICKER-A"), "In-flight should block duplicate");
 
-    om.track_order(order, "clv_hunter".to_string(), GamePhase::PreGame, None);
-
-    // Partial fill — only 3 of 10
-    let fill = Fill {
-        trade_id: "trade-1".to_string(),
-        order_id: "order-1".to_string(),
-        market_ticker: "TICKER-A".to_string(),
-        side: "yes".to_string(),
-        action: "buy".to_string(),
-        yes_price: 55,
-        no_price: 45,
-        count: 3,
-    };
-    om.handle_fill(&fill);
-    assert!(om.has_strategy_order("TICKER-A", "clv_hunter"), "Should still be tracked after partial fill");
+    om.clear_in_flight("TICKER-A");
+    assert!(!om.has_resting_order("TICKER-A"), "Should be clear after in-flight removed");
 }
 
 // ============================================================

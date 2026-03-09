@@ -44,7 +44,8 @@ pub async fn handle_kalshi_event(
             let price = fill.yes_price.max(fill.no_price) as f64 / 100.0;
             let exposure_change = fill.count as f64 * price;
             s.risk.record_fill(exposure_change, 0.0);
-            s.order_manager.handle_fill(&fill);
+            // Remove from local cache; next sync will reconcile with Kalshi
+            s.order_manager.remove_order(&fill.order_id);
             let _ = s.logger.log_fill(
                 &fill.trade_id, &fill.order_id, &fill.market_ticker,
                 &fill.side, &fill.action, fill.yes_price, fill.count, 0.0,
