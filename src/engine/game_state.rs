@@ -92,7 +92,7 @@ impl GameState {
         // Polymarket: use conservative side based on trade direction, skip wide markets
         if let (Some(bid), Some(ask)) = (self.polymarket_home_bid, self.polymarket_home_ask) {
             let spread = ask - bid;
-            if spread <= Self::POLY_MAX_SPREAD && spread >= 0.0 {
+            if (0.0..=Self::POLY_MAX_SPREAD).contains(&spread) {
                 let poly_val = match buying_kalshi_yes {
                     Some(true) => {
                         // Buying YES on Kalshi → want LOWER fair value (conservative)
@@ -155,6 +155,12 @@ impl GameState {
 /// Manages all active game states.
 pub struct GameStateManager {
     pub games: HashMap<String, GameState>, // keyed by ESPN event ID
+}
+
+impl Default for GameStateManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GameStateManager {

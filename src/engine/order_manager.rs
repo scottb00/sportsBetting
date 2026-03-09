@@ -20,6 +20,12 @@ pub struct OrderManager {
     open_orders: HashMap<String, Order>,
 }
 
+impl Default for OrderManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OrderManager {
     pub fn new() -> Self {
         Self {
