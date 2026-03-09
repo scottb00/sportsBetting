@@ -43,6 +43,8 @@ pub struct ClvOrderInfo {
 pub struct OrderManager {
     /// Cached resting orders from Kalshi, keyed by order_id.
     resting_orders: HashMap<String, Order>,
+    /// Reverse index: ticker -> set of order_ids (for O(1) ticker lookups).
+    orders_by_ticker: HashMap<String, HashSet<String>>,
     /// Tickers with an API call currently in flight (prevents double-sends).
     /// Cleared on next sync.
     in_flight: HashSet<String>,
@@ -63,6 +65,7 @@ impl OrderManager {
     pub fn new() -> Self {
         Self {
             resting_orders: HashMap::new(),
+            orders_by_ticker: HashMap::new(),
             in_flight: HashSet::new(),
             clv_orders: HashMap::new(),
             last_sync: None,
@@ -74,7 +77,12 @@ impl OrderManager {
         let resp = kalshi_rest.get_orders(None).await?;
         let old_count = self.resting_orders.len();
         self.resting_orders.clear();
+        self.orders_by_ticker.clear();
         for order in resp.orders {
+            self.orders_by_ticker
+                .entry(order.ticker.clone())
+                .or_default()
+                .insert(order.order_id.clone());
             self.resting_orders.insert(order.order_id.clone(), order);
         }
         self.in_flight.clear();
@@ -98,7 +106,9 @@ impl OrderManager {
         if self.in_flight.contains(ticker) {
             return true;
         }
-        self.resting_orders.values().any(|o| o.ticker == ticker)
+        self.orders_by_ticker
+            .get(ticker)
+            .is_some_and(|ids| !ids.is_empty())
     }
 
     /// Mark a ticker as in-flight (API call about to be sent).
@@ -114,6 +124,10 @@ impl OrderManager {
     /// Record a newly placed order into the cache (avoids waiting for next sync).
     pub fn record_placed_order(&mut self, order: Order) {
         self.in_flight.remove(&order.ticker);
+        self.orders_by_ticker
+            .entry(order.ticker.clone())
+            .or_default()
+            .insert(order.order_id.clone());
         self.resting_orders.insert(order.order_id.clone(), order);
     }
 
@@ -154,9 +168,11 @@ impl OrderManager {
 
     /// Get total resting exposure in dollars for a market.
     pub fn market_exposure(&self, ticker: &str) -> f64 {
-        self.resting_orders
-            .values()
-            .filter(|o| o.ticker == ticker)
+        let Some(ids) = self.orders_by_ticker.get(ticker) else {
+            return 0.0;
+        };
+        ids.iter()
+            .filter_map(|oid| self.resting_orders.get(oid))
             .map(|o| {
                 let price = o.yes_price.or(o.no_price).unwrap_or(50) as f64 / 100.0;
                 o.remaining_count as f64 * price
@@ -166,11 +182,10 @@ impl OrderManager {
 
     /// Get order IDs for a market ticker (for cancellation).
     pub fn order_ids_for_market(&self, ticker: &str) -> Vec<String> {
-        self.resting_orders
-            .values()
-            .filter(|o| o.ticker == ticker)
-            .map(|o| o.order_id.clone())
-            .collect()
+        self.orders_by_ticker
+            .get(ticker)
+            .map(|ids| ids.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Return CLV-eligible orders for the given tickers.
@@ -194,7 +209,14 @@ impl OrderManager {
 
     /// Remove an order from local cache (e.g. after cancel or fill).
     pub fn remove_order(&mut self, order_id: &str) {
-        self.resting_orders.remove(order_id);
+        if let Some(order) = self.resting_orders.remove(order_id) {
+            if let Some(ids) = self.orders_by_ticker.get_mut(&order.ticker) {
+                ids.remove(order_id);
+                if ids.is_empty() {
+                    self.orders_by_ticker.remove(&order.ticker);
+                }
+            }
+        }
         self.clv_orders.remove(order_id);
     }
 }

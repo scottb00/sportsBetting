@@ -117,7 +117,7 @@ impl GameState {
     }
 
     /// Update ESPN win probability from a summary response.
-    pub fn update_from_espn_summary(&mut self, win_prob: Option<f64>, _dk_home_moneyline: Option<f64>) {
+    pub fn update_from_espn_summary(&mut self, win_prob: Option<f64>) {
         self.espn_home_win_prob = win_prob;
     }
 }
@@ -125,6 +125,8 @@ impl GameState {
 /// Manages all active game states.
 pub struct GameStateManager {
     pub games: HashMap<String, GameState>, // keyed by ESPN event ID
+    /// Reverse index: Kalshi ticker -> ESPN event ID (for O(1) ticker lookups).
+    ticker_to_event: HashMap<String, String>,
 }
 
 impl Default for GameStateManager {
@@ -137,6 +139,7 @@ impl GameStateManager {
     pub fn new() -> Self {
         Self {
             games: HashMap::new(),
+            ticker_to_event: HashMap::new(),
         }
     }
 
@@ -154,11 +157,15 @@ impl GameStateManager {
             .or_insert_with(|| GameState::new(event_id, home_team, away_team))
     }
 
-    /// Find game by any Kalshi ticker (searches across all markets per game).
+    /// Register a Kalshi ticker in the reverse index.
+    pub fn register_ticker(&mut self, ticker: &str, event_id: &str) {
+        self.ticker_to_event.insert(ticker.to_string(), event_id.to_string());
+    }
+
+    /// Find game by any Kalshi ticker (O(1) via reverse index).
     pub fn get_mut_by_kalshi_ticker(&mut self, ticker: &str) -> Option<&mut GameState> {
-        self.games.values_mut().find(|g| {
-            g.kalshi_markets.iter().any(|m| m.ticker == ticker)
-        })
+        let event_id = self.ticker_to_event.get(ticker)?.clone();
+        self.games.get_mut(&event_id)
     }
 
     /// Find game by Polymarket token ID.
@@ -189,6 +196,14 @@ impl GameStateManager {
 
     /// Remove finished games.
     pub fn cleanup_finished(&mut self) {
+        // Remove ticker index entries for finished games
+        let finished_tickers: Vec<String> = self.games.values()
+            .filter(|g| g.phase == GamePhase::Final)
+            .flat_map(|g| g.kalshi_markets.iter().map(|m| m.ticker.clone()))
+            .collect();
+        for ticker in &finished_tickers {
+            self.ticker_to_event.remove(ticker);
+        }
         self.games.retain(|_, g| g.phase != GamePhase::Final);
     }
 }

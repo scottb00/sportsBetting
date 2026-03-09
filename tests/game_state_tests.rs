@@ -182,6 +182,8 @@ fn manager_find_by_kalshi_ticker() {
     let gs = mgr.upsert("e1".into(), "Duke".into(), "UNC".into());
     gs.kalshi_markets.push(KalshiMarketState::new("TICKER-A".into(), true));
     gs.kalshi_markets.push(KalshiMarketState::new("TICKER-B".into(), false));
+    mgr.register_ticker("TICKER-A", "e1");
+    mgr.register_ticker("TICKER-B", "e1");
 
     assert!(mgr.get_mut_by_kalshi_ticker("TICKER-A").is_some());
     assert!(mgr.get_mut_by_kalshi_ticker("TICKER-B").is_some());

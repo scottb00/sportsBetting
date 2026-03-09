@@ -124,6 +124,37 @@ pub fn populate_game_states(
 
         gs.polymarket_token_id = poly_token;
         gs.polymarket_is_home = poly_is_home;
+
+        // Register tickers in reverse index for O(1) lookups
+        for info in &kalshi_market_infos {
+            s.game_state.register_ticker(&info.ticker, &game.event_id);
+        }
+    }
+}
+
+/// Fetch an ESPN summary and update the game state's win probability.
+/// Acquires and releases the state lock around the update (not during the HTTP call).
+pub async fn fetch_and_apply_summary(
+    espn_poller: &EspnPoller,
+    state: &SharedState,
+    event_id: &str,
+    log_prefix: &str,
+) {
+    match espn_poller.fetch_summary(event_id).await {
+        Ok(summary) => {
+            let win_prob = EspnPoller::latest_win_prob(&summary);
+            let mut s = state.lock().await;
+            if let Some(gs) = s.game_state.get_mut(event_id) {
+                let old_prob = gs.espn_home_win_prob;
+                gs.update_from_espn_summary(win_prob);
+                tracing::info!(
+                    "{}{}: {} v {} | espn_hp={:?} (was {:?})",
+                    log_prefix, event_id, gs.away_team, gs.home_team,
+                    gs.espn_home_win_prob, old_prob,
+                );
+            }
+        }
+        Err(e) => tracing::warn!("{}Failed summary for {}: {:?}", log_prefix, event_id, e),
     }
 }
 
@@ -136,21 +167,6 @@ pub async fn fetch_summaries_for_games(espn_poller: &EspnPoller, state: &SharedS
     tracing::info!("Fetching summaries for {} games", event_ids.len());
 
     for event_id in &event_ids {
-        match espn_poller.fetch_summary(event_id).await {
-            Ok(summary) => {
-                let win_prob = EspnPoller::latest_win_prob(&summary);
-                let dk_ml = EspnPoller::extract_dk_moneyline(&summary).map(|(h, _)| h);
-                let mut s = state.lock().await;
-                if let Some(gs) = s.game_state.get_mut(event_id) {
-                    gs.update_from_espn_summary(win_prob, dk_ml);
-                    tracing::info!(
-                        "{}: {} v {} | espn_hp={:?}",
-                        event_id, gs.away_team, gs.home_team,
-                        gs.espn_home_win_prob,
-                    );
-                }
-            }
-            Err(e) => tracing::warn!("Failed summary for {}: {:?}", event_id, e),
-        }
+        fetch_and_apply_summary(espn_poller, state, event_id, "").await;
     }
 }

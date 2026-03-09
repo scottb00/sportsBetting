@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::engine::bot::{SharedState, populate_game_states};
+use crate::engine::bot::{SharedState, populate_game_states, fetch_and_apply_summary};
 use crate::engine::market_prep::{
     kalshi_date_tag, build_espn_for_matching, build_kalshi_for_matching,
     build_kalshi_volume, filter_events_for_today, fetch_all_kalshi_cbb_events,
@@ -100,21 +100,7 @@ pub async fn discover_new_markets(
         drop(s);
 
         for event_id in &new_event_ids {
-            match espn_poller.fetch_summary(event_id).await {
-                Ok(summary) => {
-                    let win_prob = EspnPoller::latest_win_prob(&summary);
-                    let dk_ml = EspnPoller::extract_dk_moneyline(&summary).map(|(h, _)| h);
-                    let mut s = state.lock().await;
-                    if let Some(gs) = s.game_state.get_mut(event_id) {
-                        gs.update_from_espn_summary(win_prob, dk_ml);
-                        tracing::info!(
-                            "Discovery: {} {} v {} | espn_hp={:?}",
-                            event_id, gs.away_team, gs.home_team, gs.espn_home_win_prob,
-                        );
-                    }
-                }
-                Err(e) => tracing::warn!("Discovery: summary fetch failed for {}: {:?}", event_id, e),
-            }
+            fetch_and_apply_summary(espn_poller, state, event_id, "Discovery: ").await;
         }
     }
 

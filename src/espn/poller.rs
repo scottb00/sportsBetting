@@ -183,15 +183,12 @@ impl EspnPoller {
         );
 
         // Extract lastPlay from situation
-        let last_play_text = comp.situation.as_ref()
-            .and_then(|s| s.last_play.as_ref())
-            .and_then(|lp| lp.text.clone());
-        let last_play_type = comp.situation.as_ref()
-            .and_then(|s| s.last_play.as_ref())
+        let last_play = comp.situation.as_ref().and_then(|s| s.last_play.as_ref());
+        let last_play_text = last_play.and_then(|lp| lp.text.clone());
+        let last_play_type = last_play
             .and_then(|lp| lp.play_type.as_ref())
             .map(|pt| pt.text.clone());
-        let last_play_home_win_prob = comp.situation.as_ref()
-            .and_then(|s| s.last_play.as_ref())
+        let last_play_home_win_prob = last_play
             .and_then(|lp| lp.probability.as_ref())
             .map(|p| p.home_win_percentage);
 
@@ -371,6 +368,7 @@ mod tests {
                     },
                 ],
                 odds: None,
+                situation: None,
             }],
             status: EventStatus {
                 status_type: StatusType {

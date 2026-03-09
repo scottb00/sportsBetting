@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::engine::bot::{SharedState, StrategyRegistry, BotState};
+use crate::engine::bot::{SharedState, StrategyRegistry, BotState, fetch_and_apply_summary};
 use crate::engine::executor::{evaluate_strategies, execute_signal};
 use crate::engine::notifier::Notifier;
 use crate::espn::poller::{EspnPoller, GameTracker};
@@ -75,25 +75,17 @@ pub async fn handle_scoreboard_tick(
         }
     }
 
-    // Fetch summary on new breaks (for updated win probs)
-    for event_id in &new_breaks {
-        match espn_poller.fetch_summary(event_id).await {
-            Ok(summary) => {
-                let win_prob = EspnPoller::latest_win_prob(&summary);
-                let dk_ml = EspnPoller::extract_dk_moneyline(&summary).map(|(h, _)| h);
-                if let Some(gs) = s.game_state.get_mut(event_id) {
-                    let old_prob = gs.espn_home_win_prob;
-                    gs.update_from_espn_summary(win_prob, dk_ml);
-                    tracing::info!(
-                        "Break summary: {} | win_prob {:?} -> {:?}",
-                        event_id, old_prob, gs.espn_home_win_prob,
-                    );
-                }
-            }
-            Err(e) => tracing::warn!("Failed to fetch summary for {}: {:?}", event_id, e),
-        }
+    // Release lock before async ESPN summary fetches to avoid blocking event loop
+    let break_ids = new_breaks.clone();
+    drop(s);
+
+    // Fetch summary on new breaks (for updated win probs) — lock released
+    for event_id in &break_ids {
+        fetch_and_apply_summary(espn_poller, state, event_id, "Break ").await;
     }
 
+    // Re-acquire lock for strategy evaluation and logging
+    let s = state.lock().await;
     log_game_summary(&s);
 
     let signals = evaluate_strategies(&s, registry);
@@ -150,20 +142,27 @@ fn validate_clv_orders(s: &mut BotState, pregame_to_live: &[String]) {
     }
 }
 
-/// Log a summary of current game states.
+/// Log a summary of current game states (single pass).
 fn log_game_summary(s: &BotState) {
-    let live_count = s.game_state.live_games().len();
-    let break_count = s.game_state.games_on_break().len();
-    let pre_count = s.game_state.pre_game_games().len();
-    let with_kalshi = s.game_state.games.values().filter(|g| g.has_kalshi()).count();
-    let with_fair = s.game_state.games.values().filter(|g| g.espn_home_win_prob.is_some()).count();
-    tracing::info!(
-        "Games: {} live, {} break, {} pre | {} w/Kalshi, {} w/fair_value | orders={} in_flight={}",
-        live_count, break_count, pre_count, with_kalshi, with_fair,
-        s.order_manager.open_order_count(), s.order_manager.in_flight_count(),
-    );
+    use crate::espn::types::GamePhase;
+
+    let mut live_count = 0usize;
+    let mut break_count = 0usize;
+    let mut pre_count = 0usize;
+    let mut with_kalshi = 0usize;
+    let mut with_fair = 0usize;
 
     for gs in s.game_state.games.values() {
+        match gs.phase {
+            GamePhase::Live => live_count += 1,
+            GamePhase::Halftime | GamePhase::Break => break_count += 1,
+            GamePhase::PreGame => pre_count += 1,
+            _ => {}
+        }
+        if gs.has_kalshi() { with_kalshi += 1; }
+        if gs.espn_home_win_prob.is_some() { with_fair += 1; }
+
+        // Per-game detail logging
         if gs.has_kalshi() && gs.espn_home_win_prob.is_some() {
             let tickers: Vec<&str> = gs.kalshi_tickers();
             if gs.phase.is_live_or_break() {
@@ -183,4 +182,10 @@ fn log_game_summary(s: &BotState) {
             }
         }
     }
+
+    tracing::info!(
+        "Games: {} live, {} break, {} pre | {} w/Kalshi, {} w/fair_value | orders={} in_flight={}",
+        live_count, break_count, pre_count, with_kalshi, with_fair,
+        s.order_manager.open_order_count(), s.order_manager.in_flight_count(),
+    );
 }

@@ -51,28 +51,33 @@ pub fn kalshi_date_tag(date_str: &str) -> String {
     dt.format("%y%b%d").to_string().to_uppercase()
 }
 
-/// Fetch all CBB events from Kalshi across multiple series.
+/// Fetch all CBB events from Kalshi across multiple series (concurrent).
 pub async fn fetch_all_kalshi_cbb_events(
     kalshi_rest: &KalshiRestClient,
 ) -> GetEventsResponse {
-    let mut all_events = Vec::new();
-
-    for series in CBB_SERIES {
-        match kalshi_rest
-            .get_events_with_series(None, Some(series), Some("open"), None, Some(200))
-            .await
-        {
-            Ok(resp) => {
-                if !resp.events.is_empty() {
-                    tracing::debug!("Fetched {} events from series {}", resp.events.len(), series);
-                    all_events.extend(resp.events);
+    let futs: Vec<_> = CBB_SERIES
+        .iter()
+        .map(|series| async move {
+            match kalshi_rest
+                .get_events_with_series(None, Some(series), Some("open"), None, Some(200))
+                .await
+            {
+                Ok(resp) => {
+                    if !resp.events.is_empty() {
+                        tracing::debug!("Fetched {} events from series {}", resp.events.len(), series);
+                    }
+                    resp.events
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to fetch series {}: {:?}", series, e);
+                    vec![]
                 }
             }
-            Err(e) => {
-                tracing::debug!("Failed to fetch series {}: {:?}", series, e);
-            }
-        }
-    }
+        })
+        .collect();
+
+    let results = futures_util::future::join_all(futs).await;
+    let all_events = results.into_iter().flatten().collect();
 
     GetEventsResponse {
         events: all_events,
