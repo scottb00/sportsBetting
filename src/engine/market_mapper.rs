@@ -223,9 +223,10 @@ impl MarketMapper {
             }
 
             if kalshi_match.is_some() || poly_match.is_some() {
-                let kalshi_markets = if let Some((_, ref title, ref markets)) = kalshi_match {
+                let espn_home = espn_name.split(" @ ").nth(1).unwrap_or("");
+                let kalshi_markets = if let Some((_, ref _title, ref markets)) = kalshi_match {
                     markets.iter().map(|(ticker, yes_sub)| {
-                        let is_home = Self::market_is_home_team(title, yes_sub);
+                        let is_home = Self::yes_is_home_team(espn_home, yes_sub);
                         tracing::info!(
                             "  Kalshi market {} | YES={} | is_home={}",
                             ticker, yes_sub, is_home
@@ -297,6 +298,16 @@ impl MarketMapper {
             .replace("n.c.", "north carolina")
             .replace("s.c.", "south carolina")
             .replace(" state state", " state")
+    }
+
+    /// Check if a market's YES side is for the home team by comparing
+    /// the yes_sub_title against the ESPN home team name directly.
+    /// More reliable than title parsing for conference tournament markets.
+    pub fn yes_is_home_team(espn_home_team: &str, yes_sub_title: &str) -> bool {
+        let home = espn_home_team.to_lowercase();
+        let yes = yes_sub_title.to_lowercase();
+        Self::team_name_matches(&home, &yes)
+            || Self::team_name_matches(&yes, &home)
     }
 
     /// Check if two team name strings refer to the same team.

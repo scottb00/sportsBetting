@@ -24,6 +24,36 @@ pub struct Competition {
     pub competitors: Vec<Competitor>,
     #[serde(default)]
     pub odds: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    pub situation: Option<Situation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Situation {
+    #[serde(rename = "lastPlay", default)]
+    pub last_play: Option<LastPlay>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LastPlay {
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(rename = "type", default)]
+    pub play_type: Option<PlayType>,
+    #[serde(default)]
+    pub probability: Option<PlayProbability>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayType {
+    pub id: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayProbability {
+    #[serde(rename = "homeWinPercentage")]
+    pub home_win_percentage: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +190,12 @@ pub struct GameInfo {
     pub start_time_ts: Option<i64>,
     /// Status description, e.g. "Halftime", "8:42 - 2nd Half"
     pub status_detail: String,
+    /// Last play text from situation (e.g. "Official TV Timeout")
+    pub last_play: Option<String>,
+    /// Last play type id (e.g. "580" for OfficialTVTimeOut)
+    pub last_play_type: Option<String>,
+    /// Live win probability from the last play's probability field
+    pub last_play_home_win_prob: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -198,5 +234,9 @@ impl GamePhase {
 
     pub fn is_break(&self) -> bool {
         matches!(self, GamePhase::Halftime | GamePhase::Break)
+    }
+
+    pub fn is_live_or_break(&self) -> bool {
+        matches!(self, GamePhase::Live | GamePhase::Halftime | GamePhase::Break)
     }
 }

@@ -94,7 +94,7 @@ pub fn populate_game_states(
 ) {
     for game in games {
         let kalshi_market_infos: Vec<_> = s.market_mapper.kalshi_markets_for_game(&game.event_id).to_vec();
-        let kalshi_title = s.market_mapper.kalshi_title(&game.event_id).map(|t| t.to_string());
+        let _kalshi_title = s.market_mapper.kalshi_title(&game.event_id).map(|t| t.to_string());
         let poly_token = s.market_mapper.polymarket_token(&game.event_id).map(|t| t.to_string());
         let poly_is_home = s.market_mapper.polymarket_is_home_team(&game.event_id);
 
@@ -114,9 +114,8 @@ pub fn populate_game_states(
 
         // Set up Kalshi markets if not already present
         if gs.kalshi_markets.is_empty() && !kalshi_market_infos.is_empty() {
-            let title = kalshi_title.as_deref().unwrap_or("");
             for info in &kalshi_market_infos {
-                let is_home = MarketMapper::market_is_home_team(title, &info.yes_sub_title);
+                let is_home = MarketMapper::yes_is_home_team(&game.home_team, &info.yes_sub_title);
                 let mut market = KalshiMarketState::new(info.ticker.clone(), is_home);
                 if let Some(vol_map) = kalshi_volume {
                     market.volume = vol_map.get(&info.ticker).copied();

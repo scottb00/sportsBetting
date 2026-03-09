@@ -44,11 +44,39 @@ pub async fn handle_scoreboard_tick(
         gs.home_score = game.home_score;
         gs.away_score = game.away_score;
         gs.status_detail = game.status_detail.clone();
+        gs.last_play = game.last_play.clone();
+        gs.last_play_type = game.last_play_type.clone();
+        // Update win prob from play-by-play during live/break (more current than summary)
+        if game.last_play_home_win_prob.is_some() && game.game_phase.is_live_or_break() {
+            gs.espn_home_win_prob = game.last_play_home_win_prob;
+        }
         gs.last_updated = std::time::Instant::now();
+    }
+
+    // Log game-start transitions
+    for event_id in &pregame_to_live {
+        if let Some(gs) = s.game_state.get(event_id) {
+            tracing::info!(
+                "GAME STARTED: {} v {} | espn_hp={:?}",
+                gs.away_team, gs.home_team, gs.espn_home_win_prob,
+            );
+        }
     }
 
     // CLV validation: check pre-game orders when game goes live
     validate_clv_orders(&mut s, &pregame_to_live);
+
+    // Log break detection with context
+    for event_id in &new_breaks {
+        if let Some(gs) = s.game_state.get(event_id) {
+            tracing::info!(
+                "BREAK DETECTED: {} v {} | score: {}-{} | phase={:?} | detail={:?} | last_play={:?} | espn_hp={:?}",
+                gs.away_team, gs.home_team,
+                gs.away_score.unwrap_or(0), gs.home_score.unwrap_or(0),
+                gs.phase, gs.status_detail, gs.last_play, gs.espn_home_win_prob,
+            );
+        }
+    }
 
     // Fetch summary on new breaks (for updated win probs)
     for event_id in &new_breaks {
@@ -57,10 +85,11 @@ pub async fn handle_scoreboard_tick(
                 let win_prob = EspnPoller::latest_win_prob(&summary);
                 let dk_ml = EspnPoller::extract_dk_moneyline(&summary).map(|(h, _)| h);
                 if let Some(gs) = s.game_state.get_mut(event_id) {
+                    let old_prob = gs.espn_home_win_prob;
                     gs.update_from_espn_summary(win_prob, dk_ml);
                     tracing::info!(
-                        "Updated {} win_prob={:?}",
-                        event_id, gs.espn_home_win_prob,
+                        "Break summary: {} | win_prob {:?} -> {:?}",
+                        event_id, old_prob, gs.espn_home_win_prob,
                     );
                 }
             }
@@ -140,11 +169,21 @@ fn log_game_summary(s: &BotState) {
     for gs in s.game_state.games.values() {
         if gs.has_kalshi() && gs.espn_home_win_prob.is_some() {
             let tickers: Vec<&str> = gs.kalshi_tickers();
-            tracing::info!(
-                "  {} v {} | phase={:?} | espn_hp={:?} | kalshi={:?}",
-                gs.away_team, gs.home_team, gs.phase,
-                gs.espn_home_win_prob, tickers,
-            );
+            if gs.phase.is_live_or_break() {
+                tracing::info!(
+                    "  {} v {} | {}-{} | phase={:?} | last_play={:?} | espn_hp={:?} | kalshi={:?}",
+                    gs.away_team, gs.home_team,
+                    gs.away_score.unwrap_or(0), gs.home_score.unwrap_or(0),
+                    gs.phase, gs.last_play,
+                    gs.espn_home_win_prob, tickers,
+                );
+            } else {
+                tracing::info!(
+                    "  {} v {} | phase={:?} | espn_hp={:?} | kalshi={:?}",
+                    gs.away_team, gs.home_team, gs.phase,
+                    gs.espn_home_win_prob, tickers,
+                );
+            }
         }
     }
 }

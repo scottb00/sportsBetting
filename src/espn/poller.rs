@@ -177,10 +177,36 @@ impl EspnPoller {
         let home = comp.competitors.iter().find(|c| c.home_away == "home")?;
         let away = comp.competitors.iter().find(|c| c.home_away == "away")?;
 
-        let phase = GamePhase::from_espn_status(
+        let mut phase = GamePhase::from_espn_status(
             &event.status.status_type.name,
             &event.status.status_type.state,
         );
+
+        // Extract lastPlay from situation
+        let last_play_text = comp.situation.as_ref()
+            .and_then(|s| s.last_play.as_ref())
+            .and_then(|lp| lp.text.clone());
+        let last_play_type = comp.situation.as_ref()
+            .and_then(|s| s.last_play.as_ref())
+            .and_then(|lp| lp.play_type.as_ref())
+            .map(|pt| pt.text.clone());
+        let last_play_home_win_prob = comp.situation.as_ref()
+            .and_then(|s| s.last_play.as_ref())
+            .and_then(|lp| lp.probability.as_ref())
+            .map(|p| p.home_win_percentage);
+
+        // Detect timeouts: upgrade Live to Break when lastPlay is a timeout
+        if phase == GamePhase::Live {
+            let is_timeout = last_play_type.as_deref()
+                .map(|t| t.to_lowercase().contains("timeout"))
+                .unwrap_or(false)
+                || last_play_text.as_deref()
+                    .map(|t| t.to_lowercase().contains("timeout"))
+                    .unwrap_or(false);
+            if is_timeout {
+                phase = GamePhase::Break;
+            }
+        }
 
         // Parse ISO-8601 date to unix timestamp (seconds)
         // ESPN uses truncated format like "2026-03-08T19:00Z" (no seconds),
@@ -208,6 +234,9 @@ impl EspnPoller {
             game_phase: phase,
             start_time_ts,
             status_detail: event.status.status_type.description.clone(),
+            last_play: last_play_text,
+            last_play_type,
+            last_play_home_win_prob,
         })
     }
 }
@@ -509,6 +538,9 @@ mod tests {
             game_phase: phase,
             start_time_ts: None,
             status_detail: String::new(),
+            last_play: None,
+            last_play_type: None,
+            last_play_home_win_prob: None,
         };
 
         // First update: Live game -> no break

@@ -55,6 +55,10 @@ pub struct GameState {
     pub start_time_ts: Option<i64>,
     /// Status detail from ESPN, e.g. "Halftime", "8:42 - 2nd Half"
     pub status_detail: String,
+    /// Last play text, e.g. "Official TV Timeout"
+    pub last_play: Option<String>,
+    /// Last play type, e.g. "OfficialTVTimeOut"
+    pub last_play_type: Option<String>,
 
     pub last_updated: std::time::Instant,
 }
@@ -74,6 +78,8 @@ impl GameState {
             espn_home_win_prob: None,
             start_time_ts: None,
             status_detail: String::new(),
+            last_play: None,
+            last_play_type: None,
             last_updated: std::time::Instant::now(),
         }
     }
