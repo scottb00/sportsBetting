@@ -30,9 +30,14 @@ impl BreakEvQuoter {
         }
 
         let kalshi_ticker = game.kalshi_ticker.as_ref()?;
-        let fair_value = game.kalshi_aligned_fair_value()?;
         let kalshi_mid = game.kalshi_yes_mid? / 100.0; // convert cents to probability
 
+        // Determine direction using mid-based reference
+        let mid_fair = game.kalshi_aligned_fair_value()?;
+        let buying_yes = mid_fair > kalshi_mid;
+
+        // Use conservative reference (adverse Polymarket side) for actual edge
+        let fair_value = game.kalshi_aligned_fair_value_conservative(buying_yes)?;
         let edge = fair_value - kalshi_mid;
         let edge_abs = edge.abs();
 

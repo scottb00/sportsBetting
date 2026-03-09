@@ -33,9 +33,12 @@ impl ClvHunter {
         let kalshi_ticker = game.kalshi_ticker.as_ref()?;
         let kalshi_mid = game.kalshi_yes_mid? / 100.0;
 
-        // Use aligned fair value (accounts for home/away ticker)
-        let reference = game.kalshi_aligned_fair_value()?;
+        // Determine direction using mid-based reference
+        let mid_reference = game.kalshi_aligned_fair_value()?;
+        let buying_yes = mid_reference > kalshi_mid;
 
+        // Use conservative reference (adverse Polymarket side) for actual edge
+        let reference = game.kalshi_aligned_fair_value_conservative(buying_yes)?;
         let edge = reference - kalshi_mid;
         let edge_abs = edge.abs();
 

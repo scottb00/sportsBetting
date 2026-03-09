@@ -20,7 +20,9 @@ pub struct GameState {
     // Reference prices
     pub espn_home_win_prob: Option<f64>,
     pub dk_home_implied_prob: Option<f64>,
-    pub polymarket_home_prob: Option<f64>,
+    pub polymarket_home_prob: Option<f64>, // mid (for logging / initial direction)
+    pub polymarket_home_bid: Option<f64>,  // best bid converted to home-team prob
+    pub polymarket_home_ask: Option<f64>,  // best ask converted to home-team prob
 
     // Kalshi book state
     pub kalshi_yes_bid: Option<f64>,
@@ -47,6 +49,8 @@ impl GameState {
             espn_home_win_prob: None,
             dk_home_implied_prob: None,
             polymarket_home_prob: None,
+            polymarket_home_bid: None,
+            polymarket_home_ask: None,
             kalshi_yes_bid: None,
             kalshi_yes_ask: None,
             kalshi_yes_mid: None,
@@ -55,9 +59,24 @@ impl GameState {
         }
     }
 
+    /// Maximum Polymarket spread (in probability) to include in consensus.
+    /// Markets wider than this are too illiquid to be reliable references.
+    const POLY_MAX_SPREAD: f64 = 0.15;
+
     /// Compute consensus fair value from available reference prices.
-    /// Simple average of all available references.
+    /// Uses polymarket mid. Requires 2+ sources.
     pub fn consensus_fair_value(&self) -> Option<f64> {
+        self.consensus_fair_value_inner(None)
+    }
+
+    /// Compute conservative consensus fair value for a given trade direction.
+    /// `buying_kalshi_yes`: true if we'd buy YES on Kalshi, false for NO.
+    /// Uses the adverse Polymarket side to ensure edge is real.
+    pub fn consensus_fair_value_conservative(&self, buying_kalshi_yes: bool) -> Option<f64> {
+        self.consensus_fair_value_inner(Some(buying_kalshi_yes))
+    }
+
+    fn consensus_fair_value_inner(&self, buying_kalshi_yes: Option<bool>) -> Option<f64> {
         let mut sum = 0.0;
         let mut count = 0;
 
@@ -69,9 +88,32 @@ impl GameState {
             sum += p;
             count += 1;
         }
-        if let Some(p) = self.polymarket_home_prob {
-            sum += p;
-            count += 1;
+
+        // Polymarket: use conservative side based on trade direction, skip wide markets
+        if let (Some(bid), Some(ask)) = (self.polymarket_home_bid, self.polymarket_home_ask) {
+            let spread = ask - bid;
+            if spread <= Self::POLY_MAX_SPREAD && spread >= 0.0 {
+                let poly_val = match buying_kalshi_yes {
+                    Some(true) => {
+                        // Buying YES on Kalshi → want LOWER fair value (conservative)
+                        // If kalshi=home, lower home prob = poly home bid
+                        // If kalshi=away, higher home prob → lower away prob = poly home ask
+                        if self.kalshi_is_home { bid } else { ask }
+                    }
+                    Some(false) => {
+                        // Buying NO on Kalshi → want HIGHER fair value (conservative)
+                        // If kalshi=home, higher home prob = poly home ask
+                        // If kalshi=away, lower home prob → higher away prob = poly home bid
+                        if self.kalshi_is_home { ask } else { bid }
+                    }
+                    None => {
+                        // No direction specified, use mid
+                        (bid + ask) / 2.0
+                    }
+                };
+                sum += poly_val;
+                count += 1;
+            }
         }
 
         if count >= 2 {
@@ -81,10 +123,20 @@ impl GameState {
         }
     }
 
-    /// Get the fair value aligned with the Kalshi ticker's team.
-    /// If Kalshi ticker is for the away team, flips the home-based fair value.
+    /// Get the fair value aligned with the Kalshi ticker's team (mid-based, for direction check).
     pub fn kalshi_aligned_fair_value(&self) -> Option<f64> {
         let home_fair = self.consensus_fair_value()?;
+        if self.kalshi_is_home {
+            Some(home_fair)
+        } else {
+            Some(1.0 - home_fair)
+        }
+    }
+
+    /// Get conservative fair value aligned with Kalshi ticker's team.
+    /// Uses the adverse Polymarket side to confirm edge is real.
+    pub fn kalshi_aligned_fair_value_conservative(&self, buying_kalshi_yes: bool) -> Option<f64> {
+        let home_fair = self.consensus_fair_value_conservative(buying_kalshi_yes)?;
         if self.kalshi_is_home {
             Some(home_fair)
         } else {

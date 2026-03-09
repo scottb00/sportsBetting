@@ -449,11 +449,16 @@ async fn main() -> Result<()> {
                                 if let (Some(bid), Some(ask)) = (best_bid, best_ask) {
                                     let yes_mid = (bid + ask) / 2.0;
                                     // Convert to home prob: flip if YES token is for away team
-                                    gs.polymarket_home_prob = Some(if gs.polymarket_is_home {
-                                        yes_mid
+                                    if gs.polymarket_is_home {
+                                        gs.polymarket_home_prob = Some(yes_mid);
+                                        gs.polymarket_home_bid = Some(bid);
+                                        gs.polymarket_home_ask = Some(ask);
                                     } else {
-                                        1.0 - yes_mid
-                                    });
+                                        gs.polymarket_home_prob = Some(1.0 - yes_mid);
+                                        // Flip: home_bid = 1 - yes_ask, home_ask = 1 - yes_bid
+                                        gs.polymarket_home_bid = Some(1.0 - ask);
+                                        gs.polymarket_home_ask = Some(1.0 - bid);
+                                    }
                                 }
                                 break;
                             }
