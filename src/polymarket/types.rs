@@ -126,22 +126,6 @@ impl GammaMarket {
     }
 }
 
-// --- CLOB API types ---
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClobOrderBook {
-    pub market: Option<String>,
-    pub asset_id: Option<String>,
-    pub bids: Vec<ClobLevel>,
-    pub asks: Vec<ClobLevel>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClobLevel {
-    pub price: String,
-    pub size: String,
-}
-
 // --- WebSocket types ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

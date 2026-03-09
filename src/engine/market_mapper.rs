@@ -98,10 +98,6 @@ impl MarketMapper {
             .insert(mapping.espn_event_id.clone(), mapping);
     }
 
-    pub fn add_mapping(&mut self, mapping: MarketMapping) {
-        self.insert_mapping(mapping);
-    }
-
     pub fn kalshi_ticker(&self, espn_event_id: &str) -> Option<&str> {
         self.by_espn
             .get(espn_event_id)
@@ -306,14 +302,6 @@ impl MarketMapper {
             // Ambiguous or no match — default to false (YES = away)
             false
         }
-    }
-
-    pub fn espn_event_for_kalshi(&self, kalshi_ticker: &str) -> Option<&str> {
-        self.kalshi_to_espn.get(kalshi_ticker).map(|s| s.as_str())
-    }
-
-    pub fn get_mapping(&self, espn_event_id: &str) -> Option<&MarketMapping> {
-        self.by_espn.get(espn_event_id)
     }
 
     pub fn all_mapped_kalshi_tickers(&self) -> Vec<String> {

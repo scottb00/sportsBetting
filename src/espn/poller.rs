@@ -191,10 +191,6 @@ impl EspnPoller {
             home_score: home.score.as_ref().and_then(|s| s.parse().ok()),
             away_score: away.score.as_ref().and_then(|s| s.parse().ok()),
             game_phase: phase,
-            home_win_prob: None,       // Filled from summary endpoint
-            dk_home_moneyline: None,   // Filled from summary endpoint
-            dk_away_moneyline: None,   // Filled from summary endpoint
-            dk_spread: None,           // Filled from summary endpoint
         })
     }
 }
@@ -404,10 +400,6 @@ mod tests {
             home_score: Some(50),
             away_score: Some(48),
             game_phase: phase,
-            home_win_prob: None,
-            dk_home_moneyline: None,
-            dk_away_moneyline: None,
-            dk_spread: None,
         };
 
         // First update: Live game -> no break

@@ -7,7 +7,6 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use super::types::*;
 
 const GAMMA_URL: &str = "https://gamma-api.polymarket.com";
-const CLOB_URL: &str = "https://clob.polymarket.com";
 const WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 
 #[derive(Debug, Clone)]
@@ -96,73 +95,6 @@ impl PolymarketClient {
         all_events.dedup_by(|a, b| a.id == b.id);
 
         Ok(all_events)
-    }
-
-    /// Fetch active CBB futures events (tournament winner, seeds, etc.) from Polymarket.
-    ///
-    /// Uses the original tag_id=101178 (College Basketball) and tag_id=100149 (March Madness)
-    /// which return futures/season-level markets.
-    pub async fn fetch_cbb_futures(&self) -> Result<Vec<GammaEvent>> {
-        let mut all_events = Vec::new();
-
-        for tag_id in &["101178", "100149"] {
-            let url = format!(
-                "{}/events?tag_id={}&active=true&closed=false&limit=100",
-                GAMMA_URL, tag_id
-            );
-            let events: Vec<GammaEvent> = self
-                .client
-                .get(&url)
-                .send()
-                .await
-                .with_context(|| format!("Failed to fetch Polymarket futures for tag {}", tag_id))?
-                .json()
-                .await
-                .with_context(|| format!("Failed to parse Polymarket futures for tag {}", tag_id))?;
-
-            all_events.extend(events);
-        }
-
-        // Deduplicate by event ID
-        all_events.sort_by(|a, b| a.id.cmp(&b.id));
-        all_events.dedup_by(|a, b| a.id == b.id);
-
-        Ok(all_events)
-    }
-
-    // --- CLOB API (pricing) ---
-
-    /// Fetch the order book for a specific token.
-    pub async fn fetch_orderbook(&self, token_id: &str) -> Result<ClobOrderBook> {
-        let url = format!("{}/order-book?token_id={}", CLOB_URL, token_id);
-        self.client
-            .get(&url)
-            .send()
-            .await
-            .context("Failed to fetch Polymarket order book")?
-            .json()
-            .await
-            .context("Failed to parse Polymarket order book")
-    }
-
-    /// Fetch midpoint price for a token.
-    pub async fn fetch_midpoint(&self, token_id: &str) -> Result<f64> {
-        let url = format!("{}/midpoint?token_id={}", CLOB_URL, token_id);
-        let resp: serde_json::Value = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .context("Failed to fetch Polymarket midpoint")?
-            .json()
-            .await
-            .context("Failed to parse Polymarket midpoint")?;
-
-        resp.get("mid")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse().ok())
-            .or_else(|| resp.get("mid").and_then(|v| v.as_f64()))
-            .context("Missing 'mid' field in midpoint response")
     }
 
     // --- WebSocket ---

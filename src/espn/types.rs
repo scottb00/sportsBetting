@@ -147,10 +147,6 @@ pub struct GameInfo {
     pub home_score: Option<i32>,
     pub away_score: Option<i32>,
     pub game_phase: GamePhase,
-    pub home_win_prob: Option<f64>,
-    pub dk_home_moneyline: Option<f64>,
-    pub dk_away_moneyline: Option<f64>,
-    pub dk_spread: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

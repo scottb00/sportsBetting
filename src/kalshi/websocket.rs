@@ -194,18 +194,4 @@ impl KalshiWsClient {
 
         Ok(())
     }
-
-    /// Update subscriptions to add/remove market tickers.
-    /// Returns a command that should be sent over the WebSocket.
-    pub fn subscribe_markets(tickers: &[String]) -> String {
-        let cmd = WsCommand {
-            id: 2,
-            cmd: "subscribe".to_string(),
-            params: WsParams {
-                channels: vec!["orderbook_delta".to_string(), "trade".to_string()],
-                market_tickers: Some(tickers.to_vec()),
-            },
-        };
-        serde_json::to_string(&cmd).unwrap_or_default()
-    }
 }

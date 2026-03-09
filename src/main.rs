@@ -12,7 +12,7 @@ use sports_betting::engine::market_mapper::MarketMapper;
 use sports_betting::engine::order_manager::{OrderManager, OrderSignal};
 use sports_betting::engine::risk::RiskManager;
 use sports_betting::espn::poller::{EspnPoller, GameTracker};
-use sports_betting::espn::types::GamePhase;
+use sports_betting::espn::types::{GameInfo, GamePhase};
 use sports_betting::kalshi::auth::KalshiAuth;
 use sports_betting::kalshi::orderbook::LocalOrderBook;
 use sports_betting::kalshi::rest::KalshiRestClient;
@@ -27,10 +27,16 @@ type SharedState = Arc<Mutex<BotState>>;
 struct BotState {
     game_state: GameStateManager,
     market_mapper: MarketMapper,
-    order_books: HashMap<String, LocalOrderBook>, // kalshi ticker -> book
+    order_books: HashMap<String, LocalOrderBook>,
     risk: RiskManager,
     order_manager: OrderManager,
     logger: TradeLogger,
+}
+
+struct Strategies {
+    break_ev: BreakEvQuoter,
+    arb_scanner: ArbScanner,
+    clv_hunter: ClvHunter,
 }
 
 #[tokio::main]
@@ -43,7 +49,6 @@ async fn main() -> Result<()> {
 
     tracing::info!("Sports betting bot starting...");
 
-    // Load config
     let config_path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "config.toml".to_string());
@@ -53,7 +58,6 @@ async fn main() -> Result<()> {
         tracing::info!("*** DRY RUN MODE — no real orders will be placed ***");
     }
 
-    // Initialize components
     let auth = KalshiAuth::from_file(config.kalshi.api_key_id.clone(), &config.kalshi.private_key_path)?;
     let kalshi_rest = Arc::new(KalshiRestClient::new(auth.clone(), config.kalshi.demo));
     let espn_poller = EspnPoller::new();
@@ -65,12 +69,10 @@ async fn main() -> Result<()> {
     let mut market_mapper = MarketMapper::new(&config.logging.cache_path);
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
 
-    // Try loading cached mappings
     if !market_mapper.load_cache(&today) {
         tracing::info!("No cached mappings for today, will resolve after fetching markets");
     }
 
-    // Initialize shared state
     let state = Arc::new(Mutex::new(BotState {
         game_state: GameStateManager::new(),
         market_mapper,
@@ -86,10 +88,11 @@ async fn main() -> Result<()> {
         logger,
     }));
 
-    // Strategies
-    let break_ev = BreakEvQuoter::new(config.strategy.break_ev_min_edge);
-    let arb_scanner = ArbScanner::new(config.strategy.arb_scanner_min_edge);
-    let clv_hunter = ClvHunter::new(config.strategy.clv_hunter_min_edge);
+    let strategies = Strategies {
+        break_ev: BreakEvQuoter::new(config.strategy.break_ev_min_edge),
+        arb_scanner: ArbScanner::new(config.strategy.arb_scanner_min_edge),
+        clv_hunter: ClvHunter::new(config.strategy.clv_hunter_min_edge),
+    };
 
     // --- Initial market discovery & mapping ---
     tracing::info!("Fetching initial market data...");
@@ -102,7 +105,6 @@ async fn main() -> Result<()> {
     });
     tracing::info!("Found {} Polymarket events", poly_events.len());
 
-    // Fetch Kalshi CBB game moneyline events (series_ticker=KXNCAAMBGAME)
     let kalshi_events = kalshi_rest
         .get_events_with_series(None, Some("KXNCAAMBGAME"), Some("open"), None, Some(100))
         .await
@@ -115,14 +117,14 @@ async fn main() -> Result<()> {
         });
     tracing::info!("Found {} Kalshi CBB events", kalshi_events.events.len());
 
-    // Build lists for LLM matching
-    let espn_for_llm: Vec<(String, String)> = espn_games
+    // Build lists for matching
+    let espn_for_matching: Vec<(String, String)> = espn_games
         .iter()
         .map(|g| (g.event_id.clone(), format!("{} @ {}", g.away_team, g.home_team)))
         .collect();
 
     let empty_markets = vec![];
-    let kalshi_for_llm: Vec<(String, String)> = kalshi_events
+    let kalshi_for_matching: Vec<(String, String)> = kalshi_events
         .events
         .iter()
         .flat_map(|e| {
@@ -134,29 +136,23 @@ async fn main() -> Result<()> {
         })
         .collect();
 
-    // Filter Poly events to today/tomorrow only, then extract moneyline markets
     let tomorrow = (chrono::Local::now() + chrono::Duration::days(1))
         .format("%Y-%m-%d")
         .to_string();
-    let poly_for_llm: Vec<(String, String)> = poly_events
+    let poly_for_matching: Vec<(String, String)> = poly_events
         .iter()
         .filter(|e| {
-            // Keep events whose date matches today or tomorrow
             match &e.event_date {
                 Some(d) => d.starts_with(&today) || d.starts_with(&tomorrow),
-                None => {
-                    // No event_date — check game_start_time on markets
-                    e.markets.iter().any(|m| {
-                        m.game_start_time.as_ref().is_some_and(|t| {
-                            t.starts_with(&today) || t.starts_with(&tomorrow)
-                        })
+                None => e.markets.iter().any(|m| {
+                    m.game_start_time.as_ref().is_some_and(|t| {
+                        t.starts_with(&today) || t.starts_with(&tomorrow)
                     })
-                }
+                }),
             }
         })
         .flat_map(|e| {
             e.markets.iter().filter_map(|m| {
-                // Only include moneyline markets, not spreads/totals
                 if m.sports_market_type.as_deref() != Some("moneyline") {
                     return None;
                 }
@@ -166,24 +162,23 @@ async fn main() -> Result<()> {
         })
         .collect();
     tracing::info!(
-        "LLM input: {} ESPN, {} Kalshi, {} Poly moneylines (filtered to {}/{})",
-        espn_for_llm.len(), kalshi_for_llm.len(), poly_for_llm.len(), today, tomorrow
+        "Matching: {} ESPN, {} Kalshi, {} Poly moneylines (filtered to {}/{})",
+        espn_for_matching.len(), kalshi_for_matching.len(), poly_for_matching.len(), today, tomorrow
     );
 
-    // Resolve market mappings deterministically
+    // Resolve market mappings and populate initial game state
     {
         let mut s = state.lock().await;
 
         if let Err(e) = s.market_mapper.resolve_deterministic(
-            &espn_for_llm,
-            &kalshi_for_llm,
-            &poly_for_llm,
+            &espn_for_matching,
+            &kalshi_for_matching,
+            &poly_for_matching,
             &today,
         ) {
             tracing::error!("Market mapping failed: {:?}", e);
         }
 
-        // Build volume lookup from Kalshi markets
         let kalshi_volume: HashMap<String, i64> = kalshi_events
             .events
             .iter()
@@ -191,63 +186,13 @@ async fn main() -> Result<()> {
             .filter_map(|m| m.volume.map(|v| (m.ticker.clone(), v)))
             .collect();
 
-        // Populate game state from ESPN
-        for game in &espn_games {
-            let kalshi_ticker = s
-                .market_mapper
-                .kalshi_ticker(&game.event_id)
-                .map(|t| t.to_string());
-            let kalshi_is_home = s.market_mapper.kalshi_is_home_team(&game.event_id);
-            let poly_token = s
-                .market_mapper
-                .polymarket_token(&game.event_id)
-                .map(|t| t.to_string());
-            let poly_is_home = s.market_mapper.polymarket_is_home_team(&game.event_id);
-
-            let gs = s.game_state.upsert(
-                game.event_id.clone(),
-                game.home_team.clone(),
-                game.away_team.clone(),
-            );
-            gs.phase = game.game_phase.clone();
-            gs.home_score = game.home_score;
-            gs.away_score = game.away_score;
-            gs.kalshi_volume = kalshi_ticker.as_ref().and_then(|t| kalshi_volume.get(t).copied());
-            gs.kalshi_ticker = kalshi_ticker;
-            gs.kalshi_is_home = kalshi_is_home;
-            gs.polymarket_token_id = poly_token;
-            gs.polymarket_is_home = poly_is_home;
-        }
+        populate_game_states(&mut s, &espn_games, Some(&kalshi_volume));
     }
 
-    // --- Fetch initial DK odds + win probs for all mapped games ---
-    {
-        let mapped_event_ids: Vec<String> = {
-            let s = state.lock().await;
-            s.game_state.games.keys().cloned().collect()
-        };
-        tracing::info!("Fetching initial summaries for {} games", mapped_event_ids.len());
-        for event_id in &mapped_event_ids {
-            match espn_poller.fetch_summary(event_id).await {
-                Ok(summary) => {
-                    let win_prob = EspnPoller::latest_win_prob(&summary);
-                    let dk_ml = EspnPoller::extract_dk_moneyline(&summary).map(|(h, _)| h);
-                    let mut s = state.lock().await;
-                    if let Some(gs) = s.game_state.get_mut(event_id) {
-                        gs.update_from_espn_summary(win_prob, dk_ml);
-                        tracing::info!(
-                            "Initial {}: {} v {} | espn_hp={:?} dk_hp={:?}",
-                            event_id, gs.away_team, gs.home_team,
-                            gs.espn_home_win_prob, gs.dk_home_implied_prob,
-                        );
-                    }
-                }
-                Err(e) => tracing::warn!("Failed initial summary for {}: {:?}", event_id, e),
-            }
-        }
-    }
+    // Fetch initial DK odds + win probs
+    fetch_summaries_for_games(&espn_poller, &state).await;
 
-    // --- Connect to Kalshi WebSocket ---
+    // --- Connect WebSockets ---
     let kalshi_tickers: Vec<String> = {
         let s = state.lock().await;
         s.market_mapper.all_mapped_kalshi_tickers()
@@ -255,31 +200,22 @@ async fn main() -> Result<()> {
 
     let kalshi_ws = KalshiWsClient::new(auth.clone(), config.kalshi.demo);
     let mut kalshi_rx = if !kalshi_tickers.is_empty() {
-        tracing::info!(
-            "Connecting Kalshi WS for {} markets",
-            kalshi_tickers.len()
-        );
+        tracing::info!("Connecting Kalshi WS for {} markets", kalshi_tickers.len());
         Some(kalshi_ws.connect(kalshi_tickers).await?)
     } else {
         tracing::warn!("No Kalshi markets mapped, skipping WS connection");
         None
     };
 
-    // --- Connect to Polymarket WebSocket ---
     let poly_tokens: Vec<String> = {
         let s = state.lock().await;
-        s.game_state
-            .games
-            .values()
+        s.game_state.games.values()
             .filter_map(|g| g.polymarket_token_id.clone())
             .collect()
     };
 
     let mut poly_rx = if !poly_tokens.is_empty() {
-        tracing::info!(
-            "Connecting Polymarket WS for {} tokens",
-            poly_tokens.len()
-        );
+        tracing::info!("Connecting Polymarket WS for {} tokens", poly_tokens.len());
         Some(PolymarketClient::connect_ws(poly_tokens).await?)
     } else {
         tracing::warn!("No Polymarket tokens mapped, skipping WS connection");
@@ -295,168 +231,242 @@ async fn main() -> Result<()> {
 
     loop {
         tokio::select! {
-            // ESPN scoreboard poll
             _ = scoreboard_interval.tick() => {
-                match espn_poller.fetch_scoreboard().await {
-                    Ok(games) => {
-                        let new_breaks = game_tracker.update(&games);
-                        let mut s = state.lock().await;
-
-                        // Update game states
-                        for game in &games {
-                            let gs = s.game_state.upsert(
-                                game.event_id.clone(),
-                                game.home_team.clone(),
-                                game.away_team.clone(),
-                            );
-                            gs.phase = game.game_phase.clone();
-                            gs.home_score = game.home_score;
-                            gs.away_score = game.away_score;
-                            gs.last_updated = std::time::Instant::now();
-                        }
-
-                        // On new breaks, fetch summary for win prob + DK odds
-                        for event_id in &new_breaks {
-                            match espn_poller.fetch_summary(event_id).await {
-                                Ok(summary) => {
-                                    let win_prob = EspnPoller::latest_win_prob(&summary);
-                                    let dk_ml = EspnPoller::extract_dk_moneyline(&summary).map(|(h, _)| h);
-                                    if let Some(gs) = s.game_state.get_mut(event_id) {
-                                        gs.update_from_espn_summary(win_prob, dk_ml);
-                                        tracing::info!(
-                                            "Updated {} win_prob={:?} dk_prob={:?}",
-                                            event_id,
-                                            gs.espn_home_win_prob,
-                                            gs.dk_home_implied_prob,
-                                        );
-                                    }
-                                }
-                                Err(e) => tracing::warn!("Failed to fetch summary for {}: {:?}", event_id, e),
-                            }
-                        }
-
-                        // Log game state summary
-                        let live_count = s.game_state.live_games().len();
-                        let break_count = s.game_state.games_on_break().len();
-                        let pre_count = s.game_state.pre_game_games().len();
-                        let with_kalshi = s.game_state.games.values().filter(|g| g.kalshi_ticker.is_some()).count();
-                        let with_fair = s.game_state.games.values().filter(|g| g.consensus_fair_value().is_some()).count();
-                        tracing::info!(
-                            "Games: {} live, {} break, {} pre | {} w/Kalshi, {} w/fair_value",
-                            live_count, break_count, pre_count, with_kalshi, with_fair
-                        );
-
-                        // Log per-game detail for mapped games with fair values
-                        for gs in s.game_state.games.values() {
-                            if gs.kalshi_ticker.is_some() && gs.consensus_fair_value().is_some() {
-                                tracing::info!(
-                                    "  {} v {} | phase={:?} | espn_hp={:?} dk_hp={:?} poly_hp={:?} | kalshi_mid={:?} is_home={} | aligned_fair={:?}",
-                                    gs.away_team, gs.home_team, gs.phase,
-                                    gs.espn_home_win_prob, gs.dk_home_implied_prob, gs.polymarket_home_prob,
-                                    gs.kalshi_yes_mid, gs.kalshi_is_home,
-                                    gs.kalshi_aligned_fair_value()
-                                );
-                            }
-                        }
-
-                        // --- Run strategies ---
-                        let signals = evaluate_strategies(&s, &break_ev, &arb_scanner, &clv_hunter);
-                        drop(s);
-
-                        // Execute signals
-                        for signal in signals {
-                            execute_signal(signal, &state, &kalshi_rest, config.kalshi.dry_run).await;
-                        }
-                    }
-                    Err(e) => tracing::warn!("ESPN scoreboard fetch failed: {:?}", e),
-                }
+                handle_scoreboard_tick(
+                    &espn_poller, &state, &mut game_tracker,
+                    &strategies, &kalshi_rest, config.kalshi.dry_run,
+                ).await;
             }
 
-            // Kalshi WebSocket events
             Some(event) = async {
                 match &mut kalshi_rx {
                     Some(rx) => rx.recv().await,
                     None => std::future::pending().await,
                 }
             } => {
-                let mut s = state.lock().await;
-                match event {
-                    KalshiWsEvent::OrderBookSnapshot { market_ticker, snapshot } => {
-                        let book = s.order_books
-                            .entry(market_ticker.clone())
-                            .or_insert_with(|| LocalOrderBook::new(market_ticker.clone()));
-                        book.apply_snapshot(&snapshot);
-                        let prices = extract_book_prices(book);
-                        if let Some(gs) = s.game_state.get_mut_by_kalshi_ticker(&market_ticker) {
-                            gs.update_kalshi_prices(prices.0, prices.1, prices.2);
-                        }
-                        tracing::debug!("Book snapshot for {}", market_ticker);
-                    }
-                    KalshiWsEvent::OrderBookDelta(delta) => {
-                        let ticker = delta.market_ticker.clone();
-                        if let Some(book) = s.order_books.get_mut(&ticker) {
-                            book.apply_delta(&delta);
-                            let prices = extract_book_prices(book);
-                            if let Some(gs) = s.game_state.get_mut_by_kalshi_ticker(&ticker) {
-                                gs.update_kalshi_prices(prices.0, prices.1, prices.2);
-                            }
-                        }
-                    }
-                    KalshiWsEvent::Fill(fill) => {
-                        tracing::info!(
-                            "FILL: {} {:?} {} contracts @ {} yes_price",
-                            fill.market_ticker, fill.action, fill.count, fill.yes_price
-                        );
-                        s.order_manager.handle_fill(&fill);
-                        let _ = s.logger.log_fill(
-                            &fill.trade_id, &fill.order_id, &fill.market_ticker,
-                            &fill.side, &fill.action, fill.yes_price, fill.count, 0.0,
-                        );
-                    }
-                    KalshiWsEvent::Trade(trade) => {
-                        tracing::debug!(
-                            "Trade: {} {} contracts @ {} taker={}",
-                            trade.market_ticker, trade.count, trade.yes_price, trade.taker_side
-                        );
-                    }
-                    KalshiWsEvent::Connected => {
-                        tracing::info!("Kalshi WebSocket connected");
-                    }
-                    KalshiWsEvent::Disconnected => {
-                        tracing::warn!("Kalshi WebSocket disconnected");
-                    }
-                    KalshiWsEvent::Error(e) => {
-                        tracing::error!("Kalshi WebSocket error: {}", e);
-                    }
-                }
+                handle_kalshi_event(event, &state).await;
             }
 
-            // Polymarket WebSocket events
             Some(event) = async {
                 match &mut poly_rx {
                     Some(rx) => rx.recv().await,
                     None => std::future::pending().await,
                 }
             } => {
-                match event {
-                    PolymarketEvent::PriceUpdate { asset_id, best_bid, best_ask } => {
-                        if let (Some(bid), Some(ask)) = (best_bid, best_ask) {
-                            let mut s = state.lock().await;
-                            if let Some(gs) = s.game_state.get_mut_by_polymarket_token(&asset_id) {
-                                gs.update_polymarket_prices(bid, ask);
-                            }
-                        }
-                    }
-                    PolymarketEvent::TradeUpdate { .. } => {}
-                    PolymarketEvent::Connected => {
-                        tracing::info!("Polymarket WebSocket connected");
-                    }
-                    PolymarketEvent::Disconnected => {
-                        tracing::warn!("Polymarket WebSocket disconnected");
-                    }
+                handle_polymarket_event(event, &state).await;
+            }
+        }
+    }
+}
+
+/// Populate game states from ESPN data, optionally setting Kalshi volume.
+fn populate_game_states(
+    s: &mut BotState,
+    games: &[GameInfo],
+    kalshi_volume: Option<&HashMap<String, i64>>,
+) {
+    for game in games {
+        let kalshi_ticker = s.market_mapper.kalshi_ticker(&game.event_id).map(|t| t.to_string());
+        let kalshi_is_home = s.market_mapper.kalshi_is_home_team(&game.event_id);
+        let poly_token = s.market_mapper.polymarket_token(&game.event_id).map(|t| t.to_string());
+        let poly_is_home = s.market_mapper.polymarket_is_home_team(&game.event_id);
+
+        let gs = s.game_state.upsert(
+            game.event_id.clone(),
+            game.home_team.clone(),
+            game.away_team.clone(),
+        );
+        gs.phase = game.game_phase.clone();
+        gs.home_score = game.home_score;
+        gs.away_score = game.away_score;
+        gs.last_updated = std::time::Instant::now();
+
+        if let Some(vol_map) = kalshi_volume {
+            gs.kalshi_volume = kalshi_ticker.as_ref().and_then(|t| vol_map.get(t).copied());
+        }
+        gs.kalshi_ticker = kalshi_ticker;
+        gs.kalshi_is_home = kalshi_is_home;
+        gs.polymarket_token_id = poly_token;
+        gs.polymarket_is_home = poly_is_home;
+    }
+}
+
+/// Fetch ESPN summaries (win prob + DK odds) for all games in state.
+async fn fetch_summaries_for_games(espn_poller: &EspnPoller, state: &SharedState) {
+    let event_ids: Vec<String> = {
+        let s = state.lock().await;
+        s.game_state.games.keys().cloned().collect()
+    };
+    tracing::info!("Fetching summaries for {} games", event_ids.len());
+
+    for event_id in &event_ids {
+        match espn_poller.fetch_summary(event_id).await {
+            Ok(summary) => {
+                let win_prob = EspnPoller::latest_win_prob(&summary);
+                let dk_ml = EspnPoller::extract_dk_moneyline(&summary).map(|(h, _)| h);
+                let mut s = state.lock().await;
+                if let Some(gs) = s.game_state.get_mut(event_id) {
+                    gs.update_from_espn_summary(win_prob, dk_ml);
+                    tracing::info!(
+                        "{}: {} v {} | espn_hp={:?} dk_hp={:?}",
+                        event_id, gs.away_team, gs.home_team,
+                        gs.espn_home_win_prob, gs.dk_home_implied_prob,
+                    );
+                }
+            }
+            Err(e) => tracing::warn!("Failed summary for {}: {:?}", event_id, e),
+        }
+    }
+}
+
+/// Handle an ESPN scoreboard poll tick.
+async fn handle_scoreboard_tick(
+    espn_poller: &EspnPoller,
+    state: &SharedState,
+    game_tracker: &mut GameTracker,
+    strategies: &Strategies,
+    kalshi_rest: &Arc<KalshiRestClient>,
+    dry_run: bool,
+) {
+    let games = match espn_poller.fetch_scoreboard().await {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!("ESPN scoreboard fetch failed: {:?}", e);
+            return;
+        }
+    };
+
+    let new_breaks = game_tracker.update(&games);
+    let mut s = state.lock().await;
+
+    // Update game states (no volume update on polls — volume is set at startup)
+    for game in &games {
+        let gs = s.game_state.upsert(
+            game.event_id.clone(),
+            game.home_team.clone(),
+            game.away_team.clone(),
+        );
+        gs.phase = game.game_phase.clone();
+        gs.home_score = game.home_score;
+        gs.away_score = game.away_score;
+        gs.last_updated = std::time::Instant::now();
+    }
+
+    // Fetch summary on new breaks
+    for event_id in &new_breaks {
+        match espn_poller.fetch_summary(event_id).await {
+            Ok(summary) => {
+                let win_prob = EspnPoller::latest_win_prob(&summary);
+                let dk_ml = EspnPoller::extract_dk_moneyline(&summary).map(|(h, _)| h);
+                if let Some(gs) = s.game_state.get_mut(event_id) {
+                    gs.update_from_espn_summary(win_prob, dk_ml);
+                    tracing::info!(
+                        "Updated {} win_prob={:?} dk_prob={:?}",
+                        event_id, gs.espn_home_win_prob, gs.dk_home_implied_prob,
+                    );
+                }
+            }
+            Err(e) => tracing::warn!("Failed to fetch summary for {}: {:?}", event_id, e),
+        }
+    }
+
+    log_game_summary(&s);
+
+    let signals = evaluate_strategies(&s, strategies);
+    drop(s);
+
+    for signal in signals {
+        execute_signal(signal, state, kalshi_rest, dry_run).await;
+    }
+}
+
+/// Log a summary of current game states.
+fn log_game_summary(s: &BotState) {
+    let live_count = s.game_state.live_games().len();
+    let break_count = s.game_state.games_on_break().len();
+    let pre_count = s.game_state.pre_game_games().len();
+    let with_kalshi = s.game_state.games.values().filter(|g| g.kalshi_ticker.is_some()).count();
+    let with_fair = s.game_state.games.values().filter(|g| g.consensus_fair_value().is_some()).count();
+    tracing::info!(
+        "Games: {} live, {} break, {} pre | {} w/Kalshi, {} w/fair_value",
+        live_count, break_count, pre_count, with_kalshi, with_fair
+    );
+
+    for gs in s.game_state.games.values() {
+        if gs.kalshi_ticker.is_some() && gs.consensus_fair_value().is_some() {
+            tracing::info!(
+                "  {} v {} | phase={:?} | espn_hp={:?} dk_hp={:?} poly_hp={:?} | kalshi_mid={:?} is_home={} | aligned_fair={:?}",
+                gs.away_team, gs.home_team, gs.phase,
+                gs.espn_home_win_prob, gs.dk_home_implied_prob, gs.polymarket_home_prob,
+                gs.kalshi_yes_mid, gs.kalshi_is_home,
+                gs.kalshi_aligned_fair_value()
+            );
+        }
+    }
+}
+
+/// Handle a Kalshi WebSocket event.
+async fn handle_kalshi_event(event: KalshiWsEvent, state: &SharedState) {
+    let mut s = state.lock().await;
+    match event {
+        KalshiWsEvent::OrderBookSnapshot { market_ticker, snapshot } => {
+            let book = s.order_books
+                .entry(market_ticker.clone())
+                .or_insert_with(|| LocalOrderBook::new(market_ticker.clone()));
+            book.apply_snapshot(&snapshot);
+            let prices = extract_book_prices(book);
+            if let Some(gs) = s.game_state.get_mut_by_kalshi_ticker(&market_ticker) {
+                gs.update_kalshi_prices(prices.0, prices.1, prices.2);
+            }
+            tracing::debug!("Book snapshot for {}", market_ticker);
+        }
+        KalshiWsEvent::OrderBookDelta(delta) => {
+            let ticker = delta.market_ticker.clone();
+            if let Some(book) = s.order_books.get_mut(&ticker) {
+                book.apply_delta(&delta);
+                let prices = extract_book_prices(book);
+                if let Some(gs) = s.game_state.get_mut_by_kalshi_ticker(&ticker) {
+                    gs.update_kalshi_prices(prices.0, prices.1, prices.2);
                 }
             }
         }
+        KalshiWsEvent::Fill(fill) => {
+            tracing::info!(
+                "FILL: {} {:?} {} contracts @ {} yes_price",
+                fill.market_ticker, fill.action, fill.count, fill.yes_price
+            );
+            s.order_manager.handle_fill(&fill);
+            let _ = s.logger.log_fill(
+                &fill.trade_id, &fill.order_id, &fill.market_ticker,
+                &fill.side, &fill.action, fill.yes_price, fill.count, 0.0,
+            );
+        }
+        KalshiWsEvent::Trade(trade) => {
+            tracing::debug!(
+                "Trade: {} {} contracts @ {} taker={}",
+                trade.market_ticker, trade.count, trade.yes_price, trade.taker_side
+            );
+        }
+        KalshiWsEvent::Connected => tracing::info!("Kalshi WebSocket connected"),
+        KalshiWsEvent::Disconnected => tracing::warn!("Kalshi WebSocket disconnected"),
+        KalshiWsEvent::Error(e) => tracing::error!("Kalshi WebSocket error: {}", e),
+    }
+}
+
+/// Handle a Polymarket WebSocket event.
+async fn handle_polymarket_event(event: PolymarketEvent, state: &SharedState) {
+    match event {
+        PolymarketEvent::PriceUpdate { asset_id, best_bid, best_ask } => {
+            if let (Some(bid), Some(ask)) = (best_bid, best_ask) {
+                let mut s = state.lock().await;
+                if let Some(gs) = s.game_state.get_mut_by_polymarket_token(&asset_id) {
+                    gs.update_polymarket_prices(bid, ask);
+                }
+            }
+        }
+        PolymarketEvent::TradeUpdate { .. } => {}
+        PolymarketEvent::Connected => tracing::info!("Polymarket WebSocket connected"),
+        PolymarketEvent::Disconnected => tracing::warn!("Polymarket WebSocket disconnected"),
     }
 }
 
@@ -473,9 +483,7 @@ fn extract_book_prices(book: &LocalOrderBook) -> (Option<f64>, Option<f64>, Opti
 /// Only keeps the best (highest edge) signal per ticker to avoid doubling up.
 fn evaluate_strategies(
     state: &BotState,
-    break_ev: &BreakEvQuoter,
-    arb_scanner: &ArbScanner,
-    clv_hunter: &ClvHunter,
+    strategies: &Strategies,
 ) -> Vec<OrderSignal> {
     let mut signals = Vec::new();
 
@@ -504,24 +512,21 @@ fn evaluate_strategies(
         let current_exposure = state.order_manager.market_exposure(ticker);
         let mut best_signal: Option<OrderSignal> = None;
 
-        // Break EV — only during breaks
         if game.phase.is_break()
-            && let Some(signal) = break_ev.evaluate(game, &state.risk, current_exposure)
+            && let Some(signal) = strategies.break_ev.evaluate(game, &state.risk, current_exposure)
         {
             best_signal = Some(signal);
         }
 
-        // Arb Scanner — during live games (prefer over break_ev if better size)
         if matches!(game.phase, GamePhase::Live | GamePhase::Halftime | GamePhase::Break)
-            && let Some(signal) = arb_scanner.evaluate(game, &state.risk, current_exposure)
+            && let Some(signal) = strategies.arb_scanner.evaluate(game, &state.risk, current_exposure)
             && best_signal.as_ref().is_none_or(|b| signal.size_dollars > b.size_dollars)
         {
             best_signal = Some(signal);
         }
 
-        // CLV Hunter — pre-game only
         if game.phase == GamePhase::PreGame
-            && let Some(signal) = clv_hunter.evaluate(game, &state.risk, current_exposure)
+            && let Some(signal) = strategies.clv_hunter.evaluate(game, &state.risk, current_exposure)
             && best_signal.as_ref().is_none_or(|b| signal.size_dollars > b.size_dollars)
         {
             best_signal = Some(signal);
