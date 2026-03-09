@@ -54,6 +54,9 @@ pub struct CreateOrderRequest {
     pub time_in_force: Option<TimeInForce>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_only: Option<bool>,
+    /// Unix timestamp (seconds) when the order should auto-expire.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expiration_ts: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,7 +184,9 @@ pub struct OrderBookDelta {
     pub price: i64,
     pub delta: i64,
     pub side: String, // "yes" or "no"
-    pub timestamp: i64,
+    /// Kalshi sends "ts" as ISO-8601 string, not "timestamp" as integer.
+    #[serde(default)]
+    pub ts: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

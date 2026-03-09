@@ -182,6 +182,21 @@ impl EspnPoller {
             &event.status.status_type.state,
         );
 
+        // Parse ISO-8601 date to unix timestamp (seconds)
+        // ESPN uses truncated format like "2026-03-08T19:00Z" (no seconds),
+        // which isn't valid RFC 3339. Normalize by adding ":00" before "Z" if needed.
+        let start_time_ts = event.date.as_deref().and_then(|d| {
+            let normalized = if d.ends_with('Z') && d.matches(':').count() == 1 {
+                // "2026-03-08T19:00Z" -> "2026-03-08T19:00:00Z"
+                format!("{}:00Z", &d[..d.len()-1])
+            } else {
+                d.to_string()
+            };
+            chrono::DateTime::parse_from_rfc3339(&normalized)
+                .ok()
+                .map(|dt| dt.timestamp())
+        });
+
         Some(GameInfo {
             event_id: event.id.clone(),
             home_team: home.team.display_name.clone(),
@@ -191,6 +206,8 @@ impl EspnPoller {
             home_score: home.score.as_ref().and_then(|s| s.parse().ok()),
             away_score: away.score.as_ref().and_then(|s| s.parse().ok()),
             game_phase: phase,
+            start_time_ts,
+            status_detail: event.status.status_type.description.clone(),
         })
     }
 }
@@ -298,6 +315,48 @@ mod tests {
             .join("fixtures")
             .join(name);
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("Failed to load {}: {}", name, e))
+    }
+
+    #[test]
+    fn test_parse_espn_date_truncated() {
+        // ESPN sends "2026-03-08T19:00Z" (no seconds) — must parse correctly
+        let event = EspnEvent {
+            id: "1".to_string(),
+            name: "A at B".to_string(),
+            short_name: "A @ B".to_string(),
+            date: Some("2026-03-08T19:00Z".to_string()),
+            competitions: vec![Competition {
+                id: "1".to_string(),
+                competitors: vec![
+                    Competitor {
+                        id: "1".to_string(),
+                        team: Team { id: "1".to_string(), display_name: "Home".to_string(), abbreviation: "HM".to_string() },
+                        home_away: "home".to_string(),
+                        score: None,
+                    },
+                    Competitor {
+                        id: "2".to_string(),
+                        team: Team { id: "2".to_string(), display_name: "Away".to_string(), abbreviation: "AW".to_string() },
+                        home_away: "away".to_string(),
+                        score: None,
+                    },
+                ],
+                odds: None,
+            }],
+            status: EventStatus {
+                status_type: StatusType {
+                    id: "1".to_string(),
+                    name: "STATUS_SCHEDULED".to_string(),
+                    state: "pre".to_string(),
+                    description: "Scheduled".to_string(),
+                },
+                display_clock: None,
+                period: None,
+            },
+        };
+        let game = EspnPoller::parse_event(&event).unwrap();
+        assert!(game.start_time_ts.is_some(), "Should parse truncated ESPN date");
+        assert_eq!(game.start_time_ts.unwrap(), 1772996400);
     }
 
     #[test]
@@ -448,6 +507,8 @@ mod tests {
             home_score: Some(50),
             away_score: Some(48),
             game_phase: phase,
+            start_time_ts: None,
+            status_detail: String::new(),
         };
 
         // First update: Live game -> no break

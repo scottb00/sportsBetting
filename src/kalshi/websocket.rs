@@ -211,29 +211,47 @@ impl KalshiWsClient {
         text: &str,
         tx: &mpsc::UnboundedSender<KalshiWsEvent>,
     ) -> Result<()> {
-        let msg: WsMessage = serde_json::from_str(text)?;
+        let msg: WsMessage = serde_json::from_str(text)
+            .map_err(|e| {
+                tracing::warn!("WS parse error: {:?}, raw: {:.200}", e, text);
+                e
+            })?;
 
         let msg_type = msg.msg_type.as_deref().unwrap_or("");
         let data = match msg.msg {
             Some(d) => d,
-            None => return Ok(()),
+            None => {
+                tracing::debug!("WS message with no data, type={}, sid={:?}, seq={:?}", msg_type, msg.sid, msg.seq);
+                return Ok(());
+            }
         };
 
         match msg_type {
             "orderbook_snapshot" => {
-                if let (Some(ticker), Some(snapshot)) = (
-                    data.get("market_ticker").and_then(|v| v.as_str()),
-                    serde_json::from_value::<OrderBookSnapshot>(data.clone()).ok(),
-                ) {
-                    let _ = tx.send(KalshiWsEvent::OrderBookSnapshot {
-                        market_ticker: ticker.to_string(),
-                        snapshot,
-                    });
+                let ticker = data.get("market_ticker").and_then(|v| v.as_str()).map(|s| s.to_string());
+                match serde_json::from_value::<OrderBookSnapshot>(data.clone()) {
+                    Ok(snapshot) => {
+                        if let Some(ticker) = ticker {
+                            tracing::debug!("WS snapshot: {} yes_levels={} no_levels={}", ticker, snapshot.yes.len(), snapshot.no.len());
+                            let _ = tx.send(KalshiWsEvent::OrderBookSnapshot {
+                                market_ticker: ticker,
+                                snapshot,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("WS snapshot parse error: {:?}, keys: {:?}", e, data.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+                    }
                 }
             }
             "orderbook_delta" => {
-                if let Ok(delta) = serde_json::from_value::<OrderBookDelta>(data) {
-                    let _ = tx.send(KalshiWsEvent::OrderBookDelta(delta));
+                match serde_json::from_value::<OrderBookDelta>(data.clone()) {
+                    Ok(delta) => {
+                        let _ = tx.send(KalshiWsEvent::OrderBookDelta(delta));
+                    }
+                    Err(e) => {
+                        tracing::warn!("WS delta parse error: {:?}, raw: {:.200}", e, data);
+                    }
                 }
             }
             "trade" => {

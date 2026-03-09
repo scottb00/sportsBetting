@@ -14,6 +14,8 @@ pub struct OrderSignal {
     pub price_cents: i64,
     pub size_dollars: f64, // will be converted to contracts
     pub post_only: bool,
+    /// Optional expiration timestamp (unix seconds) — Kalshi API takes milliseconds.
+    pub expiration_ts: Option<i64>,
 }
 
 /// An order together with metadata for lifecycle tracking.
@@ -75,6 +77,7 @@ impl OrderManager {
             no_price,
             time_in_force: Some(TimeInForce::GoodTillCanceled),
             post_only: Some(signal.post_only),
+            expiration_ts: signal.expiration_ts, // Kalshi expects unix seconds
         }
     }
 
@@ -150,6 +153,11 @@ impl OrderManager {
             .filter(|t| t.order.ticker == ticker)
             .map(|t| t.order.order_id.clone())
             .collect()
+    }
+
+    /// Check if there's already a resting order from a given strategy on a ticker.
+    pub fn has_strategy_order(&self, ticker: &str, strategy: &str) -> bool {
+        self.open_orders.values().any(|t| t.order.ticker == ticker && t.strategy == strategy)
     }
 
     /// Return order IDs that have been resting longer than `ttl`.

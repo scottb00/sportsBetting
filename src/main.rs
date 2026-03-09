@@ -25,6 +25,13 @@ use sports_betting::strategies::clv_hunter::ClvHunter;
 
 type SharedState = Arc<Mutex<BotState>>;
 
+/// Convert "2026-03-09" to Kalshi ticker date format "26MAR09".
+fn kalshi_date_tag(date_str: &str) -> String {
+    let dt = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+        .expect("invalid date format");
+    dt.format("%y%b%d").to_string().to_uppercase()
+}
+
 struct BotState {
     game_state: GameStateManager,
     market_mapper: MarketMapper,
@@ -114,6 +121,7 @@ async fn main() -> Result<()> {
     });
     tracing::info!("Found {} Polymarket events", poly_events.len());
 
+    let kalshi_date_tag = kalshi_date_tag(&today);
     let kalshi_events = kalshi_rest
         .get_events_with_series(None, Some("KXNCAAMBGAME"), Some("open"), None, Some(100))
         .await
@@ -124,7 +132,17 @@ async fn main() -> Result<()> {
                 cursor: None,
             }
         });
-    tracing::info!("Found {} Kalshi CBB events", kalshi_events.events.len());
+    // Filter to today's events only (ticker contains date tag like "26MAR09")
+    let kalshi_events = {
+        let mut filtered = kalshi_events;
+        let before = filtered.events.len();
+        filtered.events.retain(|e| e.event_ticker.contains(&kalshi_date_tag));
+        tracing::info!(
+            "Found {} Kalshi CBB events ({} total, filtered to {})",
+            filtered.events.len(), before, kalshi_date_tag,
+        );
+        filtered
+    };
 
     // Build lists for matching
     let espn_for_matching: Vec<(String, String)> = espn_games
@@ -321,6 +339,10 @@ fn populate_game_states(
         gs.phase = game.game_phase.clone();
         gs.home_score = game.home_score;
         gs.away_score = game.away_score;
+        if game.start_time_ts.is_some() {
+            gs.start_time_ts = game.start_time_ts;
+        }
+        gs.status_detail = game.status_detail.clone();
         gs.last_updated = std::time::Instant::now();
 
         // Set up Kalshi markets if not already present
@@ -387,7 +409,7 @@ async fn handle_scoreboard_tick(
     };
 
     // Detect phase transitions BEFORE updating the tracker (needs previous phases)
-    let breaks_ended = game_tracker.breaks_ended(&games);
+    let _breaks_ended = game_tracker.breaks_ended(&games);
     let pregame_to_live = game_tracker.pregame_to_live(&games);
     let new_breaks = game_tracker.update(&games);
     let mut s = state.lock().await;
@@ -402,26 +424,23 @@ async fn handle_scoreboard_tick(
         gs.phase = game.game_phase.clone();
         gs.home_score = game.home_score;
         gs.away_score = game.away_score;
+        gs.status_detail = game.status_detail.clone();
         gs.last_updated = std::time::Instant::now();
     }
 
     // --- CLV validation: check pre-game orders when game goes live ---
+    // (CLV orders auto-expire via Kalshi expiration_ts — no manual cancellation needed)
     for event_id in &pregame_to_live {
         if let Some(gs) = s.game_state.get(event_id) {
             let tickers: Vec<&str> = gs.kalshi_tickers();
             let clv_orders = s.order_manager.clv_orders_for_tickers(&tickers);
             for clv_order in &clv_orders {
-                // Find the closing mid for this ticker from the order book
                 let closing_mid = s.order_books
                     .get(&clv_order.ticker)
                     .and_then(|book| book.yes_mid())
                     .map(|mid| mid as i64);
 
                 if let Some(mid) = closing_mid {
-                    // CLV = closing_mid - order_price for buy-side YES orders
-                    // (we bought at order_price, closing line is mid — positive means we got a better price)
-                    // For buy orders: CLV = mid - price (bought cheaper than closing)
-                    // For sell orders: CLV = price - mid (sold higher than closing)
                     let clv = if clv_order.side == "Yes" {
                         mid - clv_order.price_cents
                     } else {
@@ -451,108 +470,32 @@ async fn handle_scoreboard_tick(
         }
     }
 
-    // --- Cancel stale orders: break-ended games + TTL-expired orders ---
-    let mut orders_to_cancel: Vec<(String, String)> = Vec::new(); // (order_id, reason)
-
-    // 1) Cancel all orders for games whose break just ended
-    for event_id in &breaks_ended {
-        if let Some(gs) = s.game_state.get(event_id) {
-            let tickers: Vec<String> = gs.kalshi_tickers().into_iter().map(|t| t.to_string()).collect();
-            let order_ids = s.order_manager.order_ids_for_tickers(&tickers);
-            for oid in order_ids {
-                orders_to_cancel.push((oid, format!("break ended for {}", event_id)));
+    // --- Fetch summary on new breaks (for updated win probs) ---
+    for event_id in &new_breaks {
+        match espn_poller.fetch_summary(event_id).await {
+            Ok(summary) => {
+                let win_prob = EspnPoller::latest_win_prob(&summary);
+                let dk_ml = EspnPoller::extract_dk_moneyline(&summary).map(|(h, _)| h);
+                if let Some(gs) = s.game_state.get_mut(event_id) {
+                    gs.update_from_espn_summary(win_prob, dk_ml);
+                    tracing::info!(
+                        "Updated {} win_prob={:?}",
+                        event_id, gs.espn_home_win_prob,
+                    );
+                }
             }
+            Err(e) => tracing::warn!("Failed to fetch summary for {}: {:?}", event_id, e),
         }
     }
 
-    // 2) Cancel orders that exceeded TTL regardless of game phase
-    let stale_ids = s.order_manager.stale_orders(strategies.order_ttl);
-    for oid in stale_ids {
-        // Avoid duplicates (already queued from break-ended)
-        if !orders_to_cancel.iter().any(|(id, _)| id == &oid) {
-            orders_to_cancel.push((oid, format!("TTL expired ({}s)", strategies.order_ttl.as_secs())));
-        }
-    }
+    log_game_summary(&s);
 
-    if !orders_to_cancel.is_empty() {
-        tracing::info!("Cancelling {} stale orders", orders_to_cancel.len());
-        // Must drop lock before async API calls
-        drop(s);
+    // Orders use Kalshi's native expiration_ts — no manual TTL cancellation needed
+    let signals = evaluate_strategies(&s, strategies);
+    drop(s);
 
-        for (order_id, reason) in &orders_to_cancel {
-            if dry_run {
-                tracing::info!("DRY RUN: would cancel order {} ({})", order_id, reason);
-            } else {
-                match kalshi_rest.cancel_order(order_id).await {
-                    Ok(()) => tracing::info!("Cancelled order {} ({})", order_id, reason),
-                    Err(e) => tracing::warn!("Failed to cancel order {}: {:?}", order_id, e),
-                }
-            }
-        }
-
-        // Update local state after cancellations
-        let mut s = state.lock().await;
-        for (order_id, _) in &orders_to_cancel {
-            s.order_manager.handle_cancel(order_id);
-        }
-        drop(s);
-
-        // Re-acquire lock for the rest of the tick
-        let mut s = state.lock().await;
-
-        // Fetch summary on new breaks
-        for event_id in &new_breaks {
-            match espn_poller.fetch_summary(event_id).await {
-                Ok(summary) => {
-                    let win_prob = EspnPoller::latest_win_prob(&summary);
-                    let dk_ml = EspnPoller::extract_dk_moneyline(&summary).map(|(h, _)| h);
-                    if let Some(gs) = s.game_state.get_mut(event_id) {
-                        gs.update_from_espn_summary(win_prob, dk_ml);
-                        tracing::info!(
-                            "Updated {} win_prob={:?}",
-                            event_id, gs.espn_home_win_prob,
-                        );
-                    }
-                }
-                Err(e) => tracing::warn!("Failed to fetch summary for {}: {:?}", event_id, e),
-            }
-        }
-
-        log_game_summary(&s);
-
-        let signals = evaluate_strategies(&s, strategies);
-        drop(s);
-
-        for signal in signals {
-            execute_signal(signal, state, kalshi_rest, dry_run).await;
-        }
-    } else {
-        // Fetch summary on new breaks
-        for event_id in &new_breaks {
-            match espn_poller.fetch_summary(event_id).await {
-                Ok(summary) => {
-                    let win_prob = EspnPoller::latest_win_prob(&summary);
-                    let dk_ml = EspnPoller::extract_dk_moneyline(&summary).map(|(h, _)| h);
-                    if let Some(gs) = s.game_state.get_mut(event_id) {
-                        gs.update_from_espn_summary(win_prob, dk_ml);
-                        tracing::info!(
-                            "Updated {} win_prob={:?}",
-                            event_id, gs.espn_home_win_prob,
-                        );
-                    }
-                }
-                Err(e) => tracing::warn!("Failed to fetch summary for {}: {:?}", event_id, e),
-            }
-        }
-
-        log_game_summary(&s);
-
-        let signals = evaluate_strategies(&s, strategies);
-        drop(s);
-
-        for signal in signals {
-            execute_signal(signal, state, kalshi_rest, dry_run).await;
-        }
+    for signal in signals {
+        execute_signal(signal, state, kalshi_rest, dry_run).await;
     }
 }
 
@@ -720,12 +663,17 @@ async fn discover_new_markets(
     ws_handle: Option<&KalshiWsHandle>,
     _demo: bool,
 ) {
-    // Re-fetch Kalshi events
+    // Re-fetch Kalshi events (filtered to today)
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let date_tag = kalshi_date_tag(&today);
     let kalshi_events = match kalshi_rest
         .get_events_with_series(None, Some("KXNCAAMBGAME"), Some("open"), None, Some(100))
         .await
     {
-        Ok(events) => events,
+        Ok(mut events) => {
+            events.events.retain(|e| e.event_ticker.contains(&date_tag));
+            events
+        }
         Err(e) => {
             tracing::debug!("Discovery: failed to fetch Kalshi events: {:?}", e);
             return;
@@ -919,20 +867,54 @@ fn evaluate_strategies(
 
         let mut best_signal: Option<OrderSignal> = None;
 
+        // Detailed break logging for debugging
+        if game.phase.is_break() && game.has_kalshi() {
+            let home_score = game.home_score.unwrap_or(0);
+            let away_score = game.away_score.unwrap_or(0);
+            for market in &game.kalshi_markets {
+                let fair = game.fair_value_for_market(market);
+                let kalshi_mid = market.yes_mid.map(|m| m / 100.0);
+                tracing::info!(
+                    "BREAK: {} v {} | {} | score {}-{} | {} YES={} bid={:?} ask={:?} mid={:?} | espn_fair={:?} | vol={:?}",
+                    game.away_team, game.home_team, game.status_detail,
+                    away_score, home_score,
+                    market.ticker,
+                    if market.is_home { "home" } else { "away" },
+                    market.yes_bid, market.yes_ask, kalshi_mid,
+                    fair, market.volume,
+                );
+            }
+        }
+
+        // Helper: check if any market in this game already has a resting order from the given strategy
+        let has_resting_order = |strategy: &str| -> bool {
+            game.kalshi_markets.iter().any(|m| {
+                state.order_manager.has_strategy_order(&m.ticker, strategy)
+            })
+        };
+
         if game.phase.is_break()
-            && let Some(signal) = strategies.break_ev.evaluate(game, &state.risk, current_exposure)
+            && !has_resting_order("break_ev")
+            && let Some(mut signal) = strategies.break_ev.evaluate(game, &state.risk, current_exposure)
         {
+            // Set expiration to now + TTL so Kalshi auto-expires when break likely ends
+            let expire_at = chrono::Utc::now().timestamp() + strategies.order_ttl.as_secs() as i64;
+            signal.expiration_ts = Some(expire_at);
             best_signal = Some(signal);
         }
 
         if matches!(game.phase, GamePhase::Live | GamePhase::Halftime | GamePhase::Break)
-            && let Some(signal) = strategies.arb_scanner.evaluate(game, &state.risk, current_exposure)
+            && !has_resting_order("arb_scanner")
+            && let Some(mut signal) = strategies.arb_scanner.evaluate(game, &state.risk, current_exposure)
             && best_signal.as_ref().is_none_or(|b| signal.size_dollars > b.size_dollars)
         {
+            let expire_at = chrono::Utc::now().timestamp() + strategies.order_ttl.as_secs() as i64;
+            signal.expiration_ts = Some(expire_at);
             best_signal = Some(signal);
         }
 
         if game.phase == GamePhase::PreGame
+            && !has_resting_order("clv_hunter")
             && let Some(signal) = strategies.clv_hunter.evaluate(game, &state.risk, current_exposure)
             && best_signal.as_ref().is_none_or(|b| signal.size_dollars > b.size_dollars)
         {
@@ -967,7 +949,10 @@ async fn execute_signal(
 
     let order_req = OrderManager::signal_to_order(&signal);
 
-    if dry_run {
+    // Only CLV orders go live; other strategies stay in dry-run mode for now
+    let effective_dry_run = dry_run || signal.strategy != "clv_hunter";
+
+    if effective_dry_run {
         tracing::info!(
             "DRY RUN: {} {:?} {:?} {} contracts @ {:?}/{:?} | size=${:.2} | strategy={}",
             signal.kalshi_ticker,

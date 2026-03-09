@@ -341,6 +341,197 @@ fn alo_buy_no_prices_correctly() {
 }
 
 // ============================================================
+// CLV expiration_ts tests
+// ============================================================
+
+#[test]
+fn clv_signal_sets_expiration_to_game_start() {
+    use sports_betting::strategies::clv_hunter::ClvHunter;
+    use sports_betting::engine::risk::RiskManager;
+
+    let hunter = ClvHunter::new(0.01);
+    let risk = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01);
+
+    let mut gs = make_game_with_markets(Some(0.65));
+    gs.phase = GamePhase::PreGame;
+    gs.start_time_ts = Some(1772996400); // game start time
+
+    let signal = hunter.evaluate(&gs, &risk, 0.0);
+    assert!(signal.is_some());
+    let sig = signal.unwrap();
+    assert_eq!(sig.expiration_ts, Some(1772996400), "CLV expiration should match game start time");
+}
+
+#[test]
+fn clv_signal_no_expiration_without_start_time() {
+    use sports_betting::strategies::clv_hunter::ClvHunter;
+    use sports_betting::engine::risk::RiskManager;
+
+    let hunter = ClvHunter::new(0.01);
+    let risk = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01);
+
+    let mut gs = make_game_with_markets(Some(0.65));
+    gs.phase = GamePhase::PreGame;
+    gs.start_time_ts = None;
+
+    let signal = hunter.evaluate(&gs, &risk, 0.0);
+    assert!(signal.is_some());
+    let sig = signal.unwrap();
+    assert_eq!(sig.expiration_ts, None, "No expiration if start time unknown");
+}
+
+// ============================================================
+// Order signal_to_order expiration_ts passthrough
+// ============================================================
+
+#[test]
+fn signal_to_order_passes_expiration_in_seconds() {
+    use sports_betting::engine::order_manager::{OrderManager, OrderSignal};
+    use sports_betting::kalshi::types::{OrderSide, OrderAction};
+
+    let signal = OrderSignal {
+        strategy: "clv_hunter".to_string(),
+        kalshi_ticker: "TEST-TICKER".to_string(),
+        side: OrderSide::Yes,
+        action: OrderAction::Buy,
+        price_cents: 55,
+        size_dollars: 10.0,
+        post_only: true,
+        expiration_ts: Some(1772996400),
+    };
+
+    let order = OrderManager::signal_to_order(&signal);
+    // expiration_ts should pass through as-is (seconds, NOT multiplied by 1000)
+    assert_eq!(order.expiration_ts, Some(1772996400));
+}
+
+#[test]
+fn signal_to_order_none_expiration() {
+    use sports_betting::engine::order_manager::{OrderManager, OrderSignal};
+    use sports_betting::kalshi::types::{OrderSide, OrderAction};
+
+    let signal = OrderSignal {
+        strategy: "clv_hunter".to_string(),
+        kalshi_ticker: "TEST-TICKER".to_string(),
+        side: OrderSide::Yes,
+        action: OrderAction::Buy,
+        price_cents: 55,
+        size_dollars: 10.0,
+        post_only: true,
+        expiration_ts: None,
+    };
+
+    let order = OrderManager::signal_to_order(&signal);
+    assert_eq!(order.expiration_ts, None);
+}
+
+// ============================================================
+// Order dedup — has_strategy_order
+// ============================================================
+
+#[test]
+fn has_strategy_order_tracks_correctly() {
+    use sports_betting::engine::order_manager::OrderManager;
+    use sports_betting::kalshi::types::{Order, OrderSide, OrderAction};
+
+    let mut om = OrderManager::new();
+
+    let order = Order {
+        order_id: "order-1".to_string(),
+        ticker: "TICKER-A".to_string(),
+        action: OrderAction::Buy,
+        side: OrderSide::Yes,
+        order_type: "limit".to_string(),
+        status: "resting".to_string(),
+        yes_price: Some(55),
+        no_price: Some(45),
+        remaining_count: 10,
+        created_time: "2026-03-09T18:00:00Z".to_string(),
+    };
+
+    om.track_order(order, "clv_hunter".to_string(), GamePhase::PreGame);
+
+    assert!(om.has_strategy_order("TICKER-A", "clv_hunter"));
+    assert!(!om.has_strategy_order("TICKER-A", "break_ev"));
+    assert!(!om.has_strategy_order("TICKER-B", "clv_hunter"));
+}
+
+#[test]
+fn has_strategy_order_cleared_after_fill() {
+    use sports_betting::engine::order_manager::OrderManager;
+    use sports_betting::kalshi::types::{Order, OrderSide, OrderAction, Fill};
+
+    let mut om = OrderManager::new();
+
+    let order = Order {
+        order_id: "order-1".to_string(),
+        ticker: "TICKER-A".to_string(),
+        action: OrderAction::Buy,
+        side: OrderSide::Yes,
+        order_type: "limit".to_string(),
+        status: "resting".to_string(),
+        yes_price: Some(55),
+        no_price: Some(45),
+        remaining_count: 5,
+        created_time: "2026-03-09T18:00:00Z".to_string(),
+    };
+
+    om.track_order(order, "clv_hunter".to_string(), GamePhase::PreGame);
+    assert!(om.has_strategy_order("TICKER-A", "clv_hunter"));
+
+    // Full fill removes the order
+    let fill = Fill {
+        trade_id: "trade-1".to_string(),
+        order_id: "order-1".to_string(),
+        market_ticker: "TICKER-A".to_string(),
+        side: "yes".to_string(),
+        action: "buy".to_string(),
+        yes_price: 55,
+        no_price: 45,
+        count: 5,
+    };
+    om.handle_fill(&fill);
+    assert!(!om.has_strategy_order("TICKER-A", "clv_hunter"), "Should be cleared after full fill");
+}
+
+#[test]
+fn has_strategy_order_persists_after_partial_fill() {
+    use sports_betting::engine::order_manager::OrderManager;
+    use sports_betting::kalshi::types::{Order, OrderSide, OrderAction, Fill};
+
+    let mut om = OrderManager::new();
+
+    let order = Order {
+        order_id: "order-1".to_string(),
+        ticker: "TICKER-A".to_string(),
+        action: OrderAction::Buy,
+        side: OrderSide::Yes,
+        order_type: "limit".to_string(),
+        status: "resting".to_string(),
+        yes_price: Some(55),
+        no_price: Some(45),
+        remaining_count: 10,
+        created_time: "2026-03-09T18:00:00Z".to_string(),
+    };
+
+    om.track_order(order, "clv_hunter".to_string(), GamePhase::PreGame);
+
+    // Partial fill — only 3 of 10
+    let fill = Fill {
+        trade_id: "trade-1".to_string(),
+        order_id: "order-1".to_string(),
+        market_ticker: "TICKER-A".to_string(),
+        side: "yes".to_string(),
+        action: "buy".to_string(),
+        yes_price: 55,
+        no_price: 45,
+        count: 3,
+    };
+    om.handle_fill(&fill);
+    assert!(om.has_strategy_order("TICKER-A", "clv_hunter"), "Should still be tracked after partial fill");
+}
+
+// ============================================================
 // Edge from order price (not mid)
 // ============================================================
 

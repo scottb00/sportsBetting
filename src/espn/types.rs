@@ -11,6 +11,9 @@ pub struct EspnEvent {
     pub name: String,
     #[serde(rename = "shortName")]
     pub short_name: String,
+    /// ISO-8601 game start time (e.g. "2026-03-09T23:00Z")
+    #[serde(default)]
+    pub date: Option<String>,
     pub competitions: Vec<Competition>,
     pub status: EventStatus,
 }
@@ -44,6 +47,12 @@ pub struct Team {
 pub struct EventStatus {
     #[serde(rename = "type")]
     pub status_type: StatusType,
+    /// Display clock, e.g. "8:42"
+    #[serde(rename = "displayClock", default)]
+    pub display_clock: Option<String>,
+    /// Period number (1 = 1st half, 2 = 2nd half for CBB)
+    #[serde(default)]
+    pub period: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +156,10 @@ pub struct GameInfo {
     pub home_score: Option<i32>,
     pub away_score: Option<i32>,
     pub game_phase: GamePhase,
+    /// Game start time as Unix timestamp (seconds), if available.
+    pub start_time_ts: Option<i64>,
+    /// Status description, e.g. "Halftime", "8:42 - 2nd Half"
+    pub status_detail: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]

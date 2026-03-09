@@ -101,6 +101,7 @@ fn evaluate_market(
         price_cents,
         size_dollars: size,
         post_only: true,
+        expiration_ts: None,
     })
 }
 

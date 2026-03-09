@@ -51,6 +51,11 @@ pub struct GameState {
     // Reference price — ESPN only
     pub espn_home_win_prob: Option<f64>,
 
+    /// Game start time as unix timestamp (seconds), from ESPN.
+    pub start_time_ts: Option<i64>,
+    /// Status detail from ESPN, e.g. "Halftime", "8:42 - 2nd Half"
+    pub status_detail: String,
+
     pub last_updated: std::time::Instant,
 }
 
@@ -67,6 +72,8 @@ impl GameState {
             away_score: None,
             phase: GamePhase::Unknown,
             espn_home_win_prob: None,
+            start_time_ts: None,
+            status_detail: String::new(),
             last_updated: std::time::Instant::now(),
         }
     }

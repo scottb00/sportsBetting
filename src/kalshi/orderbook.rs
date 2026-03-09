@@ -160,7 +160,7 @@ mod tests {
             price: 46,
             delta: 20,
             side: "yes".to_string(),
-            timestamp: 0,
+            ts: None,
         });
 
         assert_eq!(book.best_yes_bid().unwrap().price, 46);
@@ -172,7 +172,7 @@ mod tests {
             price: 46,
             delta: -20,
             side: "yes".to_string(),
-            timestamp: 0,
+            ts: None,
         });
 
         assert_eq!(book.best_yes_bid().unwrap().price, 45);

@@ -28,6 +28,9 @@ impl ClvHunter {
         if game.phase != GamePhase::PreGame {
             return None;
         }
-        evaluate_edge(game, risk, current_game_exposure, self.min_edge, "clv_hunter")
+        let mut signal = evaluate_edge(game, risk, current_game_exposure, self.min_edge, "clv_hunter")?;
+        // Set expiration to game start time so Kalshi auto-expires the order at tipoff
+        signal.expiration_ts = game.start_time_ts;
+        Some(signal)
     }
 }
