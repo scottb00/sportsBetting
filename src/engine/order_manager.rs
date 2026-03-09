@@ -112,4 +112,13 @@ impl OrderManager {
     pub fn open_order_count(&self) -> usize {
         self.open_orders.len()
     }
+
+    /// Get order IDs for a market ticker (for bulk cancellation).
+    pub fn order_ids_for_market(&self, ticker: &str) -> Vec<String> {
+        self.open_orders
+            .values()
+            .filter(|o| o.ticker == ticker)
+            .map(|o| o.order_id.clone())
+            .collect()
+    }
 }

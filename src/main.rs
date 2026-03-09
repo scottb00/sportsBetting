@@ -226,16 +226,32 @@ async fn main() -> Result<()> {
     let mut game_tracker = GameTracker::new();
     let mut scoreboard_interval =
         tokio::time::interval(tokio::time::Duration::from_secs(config.polling.scoreboard_interval_secs));
+    let mut cleanup_interval =
+        tokio::time::interval(tokio::time::Duration::from_secs(300));
+    let mut current_day = chrono::Local::now().format("%Y-%m-%d").to_string();
 
     tracing::info!("Entering main event loop");
 
     loop {
         tokio::select! {
             _ = scoreboard_interval.tick() => {
+                // Check for daily reset (new trading day)
+                let now_day = chrono::Local::now().format("%Y-%m-%d").to_string();
+                if now_day != current_day {
+                    tracing::info!("New trading day: {} -> {}", current_day, now_day);
+                    let mut s = state.lock().await;
+                    s.risk.reset_daily();
+                    current_day = now_day;
+                }
+
                 handle_scoreboard_tick(
                     &espn_poller, &state, &mut game_tracker,
                     &strategies, &kalshi_rest, config.kalshi.dry_run,
                 ).await;
+            }
+
+            _ = cleanup_interval.tick() => {
+                cleanup_finished_games(&state, &kalshi_rest, config.kalshi.dry_run).await;
             }
 
             Some(event) = async {
@@ -467,6 +483,74 @@ async fn handle_polymarket_event(event: PolymarketEvent, state: &SharedState) {
         PolymarketEvent::TradeUpdate { .. } => {}
         PolymarketEvent::Connected => tracing::info!("Polymarket WebSocket connected"),
         PolymarketEvent::Disconnected => tracing::warn!("Polymarket WebSocket disconnected"),
+    }
+}
+
+/// Cancel orders for finished games and clean up state.
+async fn cleanup_finished_games(
+    state: &SharedState,
+    kalshi_rest: &Arc<KalshiRestClient>,
+    dry_run: bool,
+) {
+    let mut s = state.lock().await;
+
+    // Find tickers for finished games that have resting orders
+    let finished_tickers: Vec<String> = s.game_state.games.values()
+        .filter(|g| g.phase == GamePhase::Final)
+        .filter_map(|g| g.kalshi_ticker.clone())
+        .collect();
+
+    // Collect order IDs to cancel
+    let mut orders_to_cancel = Vec::new();
+    for ticker in &finished_tickers {
+        let order_ids = s.order_manager.order_ids_for_market(ticker);
+        for oid in order_ids {
+            orders_to_cancel.push((oid, ticker.clone()));
+        }
+    }
+
+    // Cancel orders (release lock during API calls)
+    if !orders_to_cancel.is_empty() {
+        tracing::info!("Cancelling {} orders for {} finished games",
+            orders_to_cancel.len(), finished_tickers.len());
+        drop(s);
+
+        for (order_id, ticker) in &orders_to_cancel {
+            if dry_run {
+                tracing::info!("DRY RUN: would cancel order {} on finished {}", order_id, ticker);
+            } else {
+                match kalshi_rest.cancel_order(order_id).await {
+                    Ok(()) => tracing::info!("Cancelled order {} (game finished: {})", order_id, ticker),
+                    Err(e) => tracing::warn!("Failed to cancel order {}: {:?}", order_id, e),
+                }
+            }
+        }
+
+        // Update local state
+        let mut s = state.lock().await;
+        for (order_id, _) in &orders_to_cancel {
+            s.order_manager.handle_cancel(order_id);
+        }
+        // Remove finished games and their order books
+        let removed: Vec<String> = s.game_state.games.iter()
+            .filter(|(_, g)| g.phase == GamePhase::Final)
+            .map(|(id, _)| id.clone())
+            .collect();
+        s.game_state.cleanup_finished();
+        for ticker in &finished_tickers {
+            s.order_books.remove(ticker);
+        }
+        if !removed.is_empty() {
+            tracing::info!("Cleaned up {} finished games", removed.len());
+        }
+    } else {
+        // No orders to cancel, just clean up finished games
+        let count_before = s.game_state.games.len();
+        s.game_state.cleanup_finished();
+        let removed = count_before - s.game_state.games.len();
+        if removed > 0 {
+            tracing::info!("Cleaned up {} finished games", removed);
+        }
     }
 }
 
