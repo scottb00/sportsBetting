@@ -14,6 +14,7 @@ use crate::engine::bot::SharedState;
 struct DashboardState {
     bot: SharedState,
     db_path: String,
+    dry_run: bool,
 }
 
 // --- JSON response types ---
@@ -41,10 +42,15 @@ struct MarketView {
     yes_ask: Option<f64>,
     yes_mid: Option<f64>,
     fair_value: Option<f64>,
+    /// Best tradeable edge (always positive if opportunity exists). Sign indicates YES (>0 raw) or NO (<0 raw) side.
     edge: Option<f64>,
+    /// Which side has the edge: "YES" or "NO"
+    edge_side: Option<String>,
     volume: Option<i64>,
     has_resting_order: bool,
     exposure: f64,
+    /// Net position: positive = holding YES contracts, negative = holding NO contracts
+    position: i64,
 }
 
 #[derive(Serialize)]
@@ -55,6 +61,7 @@ struct RiskView {
     max_position_per_game: f64,
     daily_loss_limit: f64,
     halted: bool,
+    dry_run: bool,
     open_orders: usize,
     in_flight: usize,
 }
@@ -115,9 +122,18 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
     }).map(|g| {
         let markets: Vec<MarketView> = g.kalshi_markets.iter().map(|m| {
             let fair_value = g.fair_value_for_market(m);
-            let edge = match (fair_value, m.yes_mid) {
-                (Some(fv), Some(mid)) => Some(fv - mid / 100.0),
-                _ => None,
+            // Compute tradeable edge: pick the better side (YES or NO)
+            let (edge, edge_side) = match (fair_value, m.yes_mid) {
+                (Some(fv), Some(mid)) => {
+                    let mid_prob = mid / 100.0;
+                    let yes_edge = fv - mid_prob;       // positive = YES is cheap
+                    if yes_edge >= 0.0 {
+                        (Some(yes_edge), Some("YES".to_string()))
+                    } else {
+                        (Some(-yes_edge), Some("NO".to_string()))
+                    }
+                }
+                _ => (None, None),
             };
             MarketView {
                 ticker: m.ticker.clone(),
@@ -127,9 +143,11 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
                 yes_mid: m.yes_mid,
                 fair_value,
                 edge,
+                edge_side,
                 volume: m.volume,
                 has_resting_order: s.order_manager.has_resting_order(&m.ticker),
                 exposure: s.order_manager.committed_contracts(&m.ticker) as f64,
+                position: s.positions.get(&m.ticker).map(|p| p.position).unwrap_or(0),
             }
         }).collect();
 
@@ -177,21 +195,29 @@ async fn api_risk(State(state): State<DashboardState>) -> impl IntoResponse {
         max_position_per_game: s.risk.max_position_per_game,
         daily_loss_limit: s.risk.daily_loss_limit,
         halted: s.risk.is_halted(),
+        dry_run: state.dry_run,
         open_orders: s.order_manager.open_order_count(),
         in_flight: s.order_manager.in_flight_count(),
     })
 }
 
 async fn api_orders(State(state): State<DashboardState>) -> impl IntoResponse {
-    let mut rows = query_orders(&state.db_path).unwrap_or_default();
+    let mut rows = match query_orders(&state.db_path) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Dashboard: orders query failed: {:?}", e);
+            vec![]
+        }
+    };
     // Enrich with game names and live edge from state
     let s = state.bot.lock().await;
     for row in &mut rows {
         if let Some(game) = s.game_state.get_by_kalshi_ticker(&row.ticker) {
             row.game_name = Some(format!("{} vs {}", game.away_team, game.home_team));
             // Compute perceived edge: fair_value vs order price
-            if let Some(market) = game.kalshi_markets.iter().find(|m| m.ticker == row.ticker) {
-                if let Some(fv) = game.fair_value_for_market(market) {
+            if let Some(market) = game.kalshi_markets.iter().find(|m| m.ticker == row.ticker)
+                && let Some(fv) = game.fair_value_for_market(market)
+            {
                     let order_prob = row.price_cents as f64 / 100.0;
                     // For buy YES: edge = fv - price (buying cheap is positive)
                     // For buy NO: edge = (1-fv) - price
@@ -200,7 +226,6 @@ async fn api_orders(State(state): State<DashboardState>) -> impl IntoResponse {
                     let fair_for_side = if is_yes { fv } else { 1.0 - fv };
                     let raw_edge = fair_for_side - order_prob;
                     row.edge = Some(if row.action.eq_ignore_ascii_case("buy") { raw_edge } else { -raw_edge });
-                }
             }
         }
     }
@@ -208,7 +233,13 @@ async fn api_orders(State(state): State<DashboardState>) -> impl IntoResponse {
 }
 
 async fn api_fills(State(state): State<DashboardState>) -> impl IntoResponse {
-    let mut rows = query_fills(&state.db_path).unwrap_or_default();
+    let mut rows = match query_fills(&state.db_path) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Dashboard: fills query failed: {:?}", e);
+            vec![]
+        }
+    };
     // Enrich with game names from live state
     let s = state.bot.lock().await;
     for row in &mut rows {
@@ -294,10 +325,11 @@ fn query_fills(db_path: &str) -> anyhow::Result<Vec<FillRow>> {
 
 // --- Server ---
 
-pub async fn serve(bot_state: SharedState, db_path: &str, port: u16) -> anyhow::Result<()> {
+pub async fn serve(bot_state: SharedState, db_path: &str, port: u16, dry_run: bool) -> anyhow::Result<()> {
     let state = DashboardState {
         bot: bot_state,
         db_path: db_path.to_string(),
+        dry_run,
     };
 
     let app = Router::new()

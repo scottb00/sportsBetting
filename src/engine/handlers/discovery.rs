@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use crate::engine::bot::{SharedState, populate_game_states, fetch_and_apply_summary};
 use crate::engine::market_prep::{
-    kalshi_date_tag, build_espn_for_matching, build_kalshi_for_matching,
+    build_espn_for_matching, build_kalshi_for_matching,
     build_kalshi_volume, filter_events_for_dates, fetch_all_kalshi_cbb_events,
+    today_and_tomorrow_tags,
 };
 use crate::espn::poller::EspnPoller;
 use crate::kalshi::rest::KalshiRestClient;
@@ -16,11 +17,7 @@ pub async fn discover_new_markets(
     state: &SharedState,
     ws_handle: Option<&KalshiWsHandle>,
 ) {
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let tomorrow = (chrono::Local::now() + chrono::Duration::days(1))
-        .format("%Y-%m-%d")
-        .to_string();
-    let date_tags = vec![kalshi_date_tag(&today), kalshi_date_tag(&tomorrow)];
+    let (today, _, date_tags) = today_and_tomorrow_tags();
     let mut kalshi_events = fetch_all_kalshi_cbb_events(kalshi_rest).await;
     filter_events_for_dates(&mut kalshi_events, &date_tags);
 
@@ -88,23 +85,19 @@ pub async fn discover_new_markets(
     drop(s);
 
     // Fetch ESPN summaries for new games (async I/O — lock released above)
-    {
+    let new_event_ids: Vec<String> = {
         let s = state.lock().await;
-        let new_event_ids: Vec<String> = new_tickers
-            .iter()
+        new_tickers.iter()
             .filter_map(|ticker| {
-                s.game_state.games.values()
-                    .find(|g| g.kalshi_markets.iter().any(|m| m.ticker == *ticker))
+                s.game_state.get_by_kalshi_ticker(ticker)
                     .map(|g| g.espn_event_id.clone())
             })
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
-            .collect();
-        drop(s);
-
-        for event_id in &new_event_ids {
-            fetch_and_apply_summary(espn_poller, state, event_id, "Discovery: ").await;
-        }
+            .collect()
+    };
+    for event_id in &new_event_ids {
+        fetch_and_apply_summary(espn_poller, state, event_id, "Discovery: ").await;
     }
 
     // Subscribe to new tickers on the live WS connection

@@ -32,27 +32,23 @@ async fn main() -> Result<()> {
     ];
 
     for series in &series_list {
-        match client
+        if let Ok(resp) = client
             .get_events_with_series(None, Some(series), Some("open"), None, Some(200))
             .await
+            && !resp.events.is_empty()
         {
-            Ok(resp) => {
-                if !resp.events.is_empty() {
-                    println!("=== {} — {} events ===", series, resp.events.len());
-                    for event in &resp.events {
-                        let market_count = event.markets.as_ref().map(|m| m.len()).unwrap_or(0);
-                        println!("  {} | {} | markets={}", event.event_ticker, event.title, market_count);
-                        if let Some(markets) = &event.markets {
-                            for m in markets {
-                                println!("    [{}] {} | status={} yes_bid={:?} yes_ask={:?} vol={:?}",
-                                    m.ticker, m.title, m.status, m.yes_bid, m.yes_ask, m.volume);
-                            }
-                        }
+            println!("=== {} — {} events ===", series, resp.events.len());
+            for event in &resp.events {
+                let market_count = event.markets.as_ref().map(|m| m.len()).unwrap_or(0);
+                println!("  {} | {} | markets={}", event.event_ticker, event.title, market_count);
+                if let Some(markets) = &event.markets {
+                    for m in markets {
+                        println!("    [{}] {} | status={} yes_bid={:?} yes_ask={:?} vol={:?}",
+                            m.ticker, m.title, m.status, m.yes_bid, m.yes_ask, m.volume);
                     }
-                    println!();
                 }
             }
-            Err(_) => {}
+            println!();
         }
     }
 

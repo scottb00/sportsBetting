@@ -116,6 +116,20 @@ impl GameState {
         self.kalshi_markets.iter().filter_map(|m| m.volume).sum()
     }
 
+    /// Update game state fields from an ESPN scoreboard poll.
+    pub fn update_from_espn(&mut self, game: &crate::espn::types::GameInfo) {
+        self.phase = game.game_phase.clone();
+        self.home_score = game.home_score;
+        self.away_score = game.away_score;
+        self.status_detail = game.status_detail.clone();
+        self.last_play = game.last_play.clone();
+        self.last_play_type = game.last_play_type.clone();
+        if game.start_time_ts.is_some() {
+            self.start_time_ts = game.start_time_ts;
+        }
+        self.last_updated = std::time::Instant::now();
+    }
+
     /// Update ESPN win probability from a summary response.
     pub fn update_from_espn_summary(&mut self, win_prob: Option<f64>) {
         self.espn_home_win_prob = win_prob;
@@ -166,6 +180,13 @@ impl GameStateManager {
     pub fn get_by_kalshi_ticker(&self, ticker: &str) -> Option<&GameState> {
         let event_id = self.ticker_to_event.get(ticker)?;
         self.games.get(event_id)
+    }
+
+    /// Get all Kalshi tickers (as owned Strings) for the game containing the given ticker.
+    pub fn game_tickers_for(&self, ticker: &str) -> Vec<String> {
+        self.get_by_kalshi_ticker(ticker)
+            .map(|g| g.kalshi_tickers().into_iter().map(|t| t.to_string()).collect())
+            .unwrap_or_default()
     }
 
     /// Find game mutably by any Kalshi ticker (O(1) via reverse index).

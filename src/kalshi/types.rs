@@ -105,14 +105,9 @@ pub struct Position {
     pub resting_orders_count: i64,
     #[serde(default)]
     pub total_traded: i64,
+    /// Net position: positive = holding YES contracts, negative = holding NO.
     #[serde(default)]
-    pub yes_amount: i64,
-    #[serde(default)]
-    pub yes_avg_price: i64,
-    #[serde(default)]
-    pub no_amount: i64,
-    #[serde(default)]
-    pub no_avg_price: i64,
+    pub position: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,11 +152,12 @@ pub struct GetEventsResponse {
 
 // --- Fills (REST) ---
 
+/// Fill from Kalshi REST API. Note: Kalshi sends both `ticker` and `market_ticker`
+/// fields with the same value — we keep `ticker` and ignore unknown fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RestFill {
     pub trade_id: String,
     pub order_id: String,
-    #[serde(alias = "market_ticker")]
     pub ticker: String,
     pub side: String,
     pub action: String,
@@ -170,9 +166,56 @@ pub struct RestFill {
     pub no_price: i64,
     #[serde(default)]
     pub is_taker: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_f64_from_any")]
     pub fee_cost: Option<f64>,
     pub created_time: String,
+}
+
+/// Deserialize an Option<f64> that may come as a JSON number or a JSON string.
+fn deserialize_optional_f64_from_any<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct F64Visitor;
+    impl<'de> de::Visitor<'de> for F64Visitor {
+        type Value = Option<f64>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a number or numeric string")
+        }
+
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(Some(v as f64))
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v as f64))
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            v.parse::<f64>().map(Some).map_err(de::Error::custom)
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D2: serde::Deserializer<'de>>(self, deserializer: D2) -> Result<Self::Value, D2::Error> {
+            deserializer.deserialize_any(F64Visitor)
+        }
+    }
+
+    deserializer.deserialize_any(F64Visitor)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

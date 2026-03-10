@@ -58,6 +58,7 @@ pub async fn handle_kalshi_event(
             let _ = s.logger.log_fill(
                 &fill.trade_id, &fill.order_id, &fill.market_ticker,
                 &fill.side, &fill.action, price_cents, fill.count, 0.0,
+                None, // WS fills don't include timestamp; use current time
             );
             // Send fill notification (drop lock first since it's async)
             let ticker = fill.market_ticker.clone();

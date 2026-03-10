@@ -247,12 +247,12 @@ impl OrderManager {
 
     /// Remove an order from local cache (e.g. after cancel).
     pub fn remove_order(&mut self, order_id: &str) {
-        if let Some(order) = self.resting_orders.remove(order_id) {
-            if let Some(ids) = self.orders_by_ticker.get_mut(&order.ticker) {
-                ids.remove(order_id);
-                if ids.is_empty() {
-                    self.orders_by_ticker.remove(&order.ticker);
-                }
+        if let Some(order) = self.resting_orders.remove(order_id)
+            && let Some(ids) = self.orders_by_ticker.get_mut(&order.ticker)
+        {
+            ids.remove(order_id);
+            if ids.is_empty() {
+                self.orders_by_ticker.remove(&order.ticker);
             }
         }
         self.clv_orders.remove(order_id);

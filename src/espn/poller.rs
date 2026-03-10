@@ -170,15 +170,6 @@ impl EspnPoller {
         None
     }
 
-    /// Convert American moneyline odds to implied probability.
-    pub fn moneyline_to_prob(moneyline: f64) -> f64 {
-        if moneyline > 0.0 {
-            100.0 / (moneyline + 100.0)
-        } else {
-            moneyline.abs() / (moneyline.abs() + 100.0)
-        }
-    }
-
     fn parse_event(event: &EspnEvent) -> Option<GameInfo> {
         let comp = event.competitions.first()?;
         let home = comp.competitors.iter().find(|c| c.home_away == "home")?;
@@ -295,18 +286,18 @@ impl GameTracker {
         let mut ended = Vec::new();
 
         for game in games {
-            if let Some(prev) = self.previous_phases.get(&game.event_id) {
-                if prev.is_break() && !game.game_phase.is_break() {
-                    tracing::info!(
-                        "Break ended: {} vs {} (event {}) — {:?} -> {:?}",
-                        game.away_team,
-                        game.home_team,
-                        game.event_id,
-                        prev,
-                        game.game_phase,
-                    );
-                    ended.push(game.event_id.clone());
-                }
+            if let Some(prev) = self.previous_phases.get(&game.event_id)
+                && prev.is_break() && !game.game_phase.is_break()
+            {
+                tracing::info!(
+                    "Break ended: {} vs {} (event {}) — {:?} -> {:?}",
+                    game.away_team,
+                    game.home_team,
+                    game.event_id,
+                    prev,
+                    game.game_phase,
+                );
+                ended.push(game.event_id.clone());
             }
         }
 
@@ -319,18 +310,20 @@ impl GameTracker {
         let mut transitioned = Vec::new();
 
         for game in games {
-            if let Some(prev) = self.previous_phases.get(&game.event_id) {
-                if *prev == GamePhase::PreGame && game.game_phase != GamePhase::PreGame && game.game_phase != GamePhase::Final {
-                    tracing::info!(
-                        "PreGame -> Live: {} vs {} (event {}) — {:?} -> {:?}",
-                        game.away_team,
-                        game.home_team,
-                        game.event_id,
-                        prev,
-                        game.game_phase,
-                    );
-                    transitioned.push(game.event_id.clone());
-                }
+            if let Some(prev) = self.previous_phases.get(&game.event_id)
+                && *prev == GamePhase::PreGame
+                && game.game_phase != GamePhase::PreGame
+                && game.game_phase != GamePhase::Final
+            {
+                tracing::info!(
+                    "PreGame -> Live: {} vs {} (event {}) — {:?} -> {:?}",
+                    game.away_team,
+                    game.home_team,
+                    game.event_id,
+                    prev,
+                    game.game_phase,
+                );
+                transitioned.push(game.event_id.clone());
             }
         }
 
@@ -471,25 +464,6 @@ mod tests {
         // From fixture: homeTeamOdds.moneyLine=950, awayTeamOdds.moneyLine=-1650
         assert_eq!(home_ml, 950.0);
         assert_eq!(away_ml, -1650.0);
-    }
-
-    #[test]
-    fn test_moneyline_to_prob() {
-        // +950 => 100/1050 ≈ 0.0952
-        let home_prob = EspnPoller::moneyline_to_prob(950.0);
-        assert!((home_prob - 0.0952).abs() < 0.001, "Got {}", home_prob);
-
-        // -1650 => 1650/1750 ≈ 0.9429
-        let away_prob = EspnPoller::moneyline_to_prob(-1650.0);
-        assert!((away_prob - 0.9429).abs() < 0.001, "Got {}", away_prob);
-
-        // Even money
-        let even = EspnPoller::moneyline_to_prob(100.0);
-        assert!((even - 0.5).abs() < 0.001);
-
-        // -100
-        let neg_even = EspnPoller::moneyline_to_prob(-100.0);
-        assert!((neg_even - 0.5).abs() < 0.001);
     }
 
     #[test]

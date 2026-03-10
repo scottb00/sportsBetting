@@ -51,6 +51,16 @@ pub fn kalshi_date_tag(date_str: &str) -> String {
     dt.format("%y%b%d").to_string().to_uppercase()
 }
 
+/// Get today's date and tomorrow's date as Kalshi date tags, plus today's YYYY-MM-DD string.
+pub fn today_and_tomorrow_tags() -> (String, String, Vec<String>) {
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let tomorrow = (chrono::Local::now() + chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    let tags = vec![kalshi_date_tag(&today), kalshi_date_tag(&tomorrow)];
+    (today, tomorrow, tags)
+}
+
 /// Fetch all CBB events from Kalshi across multiple series (concurrent).
 pub async fn fetch_all_kalshi_cbb_events(
     kalshi_rest: &KalshiRestClient,

@@ -175,10 +175,7 @@ pub async fn execute_signal(
         }
 
         // Re-compute contract cap across ALL tickers for this game (not just the signal's ticker)
-        let game_tickers: Vec<String> = s.game_state
-            .get_by_kalshi_ticker(&signal.kalshi_ticker)
-            .map(|g| g.kalshi_tickers().into_iter().map(|t| t.to_string()).collect())
-            .unwrap_or_default();
+        let game_tickers = s.game_state.game_tickers_for(&signal.kalshi_ticker);
         let game_committed: i64 = game_tickers.iter()
             .map(|t| s.order_manager.committed_contracts(t))
             .sum();

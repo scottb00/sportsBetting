@@ -46,16 +46,16 @@ async fn main() -> Result<()> {
         }
     };
     for pos in &positions.market_positions {
-        if pos.yes_amount > 0 || pos.no_amount > 0 {
+        if pos.position != 0 {
+            let side = if pos.position > 0 { "YES" } else { "NO" };
             println!(
-                "  {} | yes={} @avg={} | no={} @avg={} | exposure={} | pnl={}",
-                pos.ticker, pos.yes_amount, pos.yes_avg_price,
-                pos.no_amount, pos.no_avg_price,
+                "  {} | {} {} contracts | exposure={} | pnl={}",
+                pos.ticker, pos.position.abs(), side,
                 pos.market_exposure, pos.realized_pnl
             );
         }
     }
-    if positions.market_positions.iter().all(|p| p.yes_amount == 0 && p.no_amount == 0) {
+    if positions.market_positions.iter().all(|p| p.position == 0) {
         println!("  No active positions.");
     }
 

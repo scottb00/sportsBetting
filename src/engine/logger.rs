@@ -10,6 +10,9 @@ impl TradeLogger {
     pub fn new(db_path: &str) -> Result<Self> {
         let conn = Connection::open(db_path).context("Failed to open trade log database")?;
 
+        // Enable WAL mode for concurrent read/write access (dashboard reads while bot writes)
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS orders (
@@ -92,6 +95,8 @@ impl TradeLogger {
     }
 
     /// Log a fill. Returns true if a new row was inserted (false if duplicate trade_id).
+    /// `filled_at` should be the actual fill timestamp from Kalshi (ISO 8601).
+    /// If None, falls back to current time.
     #[allow(clippy::too_many_arguments)]
     pub fn log_fill(
         &self,
@@ -103,11 +108,12 @@ impl TradeLogger {
         price_cents: i64,
         count: i64,
         fee_cents: f64,
+        filled_at: Option<&str>,
     ) -> Result<bool> {
         let rows = self.conn.execute(
-            "INSERT OR IGNORE INTO fills (trade_id, order_id, ticker, side, action, price_cents, count, fee_cents)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![trade_id, order_id, ticker, side, action, price_cents, count, fee_cents],
+            "INSERT OR IGNORE INTO fills (trade_id, order_id, ticker, side, action, price_cents, count, fee_cents, filled_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, datetime('now')))",
+            rusqlite::params![trade_id, order_id, ticker, side, action, price_cents, count, fee_cents, filled_at],
         )?;
         Ok(rows > 0)
     }
@@ -144,6 +150,29 @@ impl TradeLogger {
             "INSERT INTO clv_checks (order_id, ticker, side, order_price_cents, closing_mid_cents, clv_cents, captured)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![order_id, ticker, side, order_price_cents, closing_mid_cents, clv_cents, captured],
+        )?;
+        Ok(())
+    }
+
+    /// Insert an order row only if it doesn't already exist (backfill from sync).
+    /// Uses INSERT OR IGNORE so it won't overwrite orders with real strategy/edge data.
+    /// `created_at` should be the actual order creation time from Kalshi (ISO 8601).
+    #[allow(clippy::too_many_arguments)]
+    pub fn log_order_if_missing(
+        &self,
+        order_id: &str,
+        ticker: &str,
+        action: &str,
+        side: &str,
+        price_cents: i64,
+        count: i64,
+        status: &str,
+        created_at: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, created_at)
+             VALUES (?1, ?2, '', ?3, ?4, ?5, ?6, ?7, COALESCE(?8, datetime('now')))",
+            rusqlite::params![order_id, ticker, action, side, price_cents, count, status, created_at],
         )?;
         Ok(())
     }

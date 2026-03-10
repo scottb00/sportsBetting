@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net"] }
 
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
@@ -47,6 +47,11 @@ axum = "0.8"
 # URL handling
 url = "2"
 urlencoding = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
 
 [dev-dependencies]
 proptest = "1"

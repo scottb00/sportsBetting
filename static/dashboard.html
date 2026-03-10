@@ -42,6 +42,9 @@
 
   /* Order indicator */
   .order-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: #f0883e; }
+  .pos-badge { padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .pos-yes { background: #3fb95033; color: #3fb950; }
+  .pos-no { background: #f8514933; color: #f85149; }
 
   .updated { font-size: 11px; color: #484f58; text-align: right; margin-bottom: 8px; }
 
@@ -129,6 +132,7 @@
         <th class="num">Kalshi Mid</th>
         <th class="num">Edge</th>
         <th class="num">Volume</th>
+        <th>Position</th>
         <th>Orders</th>
       </tr>
     </thead>
@@ -184,16 +188,26 @@ const $ = s => document.querySelector(s);
 function pnlClass(v) { return v > 0 ? 'positive' : v < 0 ? 'negative' : 'neutral'; }
 function fmt$(v) { return (v >= 0 ? '+' : '') + '$' + v.toFixed(2); }
 function fmtPct(v) { return v != null ? (v * 100).toFixed(1) + '%' : '-'; }
-function fmtEdge(v) {
+function fmtEdge(v, side) {
   if (v == null) return '-';
   const pct = (v * 100).toFixed(1);
   const cls = v > 0 ? 'edge-pos' : v < 0 ? 'edge-neg' : '';
-  return `<span class="${cls}">${v > 0 ? '+' : ''}${pct}%</span>`;
+  const sideLabel = side ? ` <span style="font-size:10px;opacity:0.7">${side}</span>` : '';
+  return `<span class="${cls}">${v > 0 ? '+' : ''}${pct}%${sideLabel}</span>`;
 }
 function shortTime(ts) {
   if (!ts) return '-';
   try { return new Date(ts + 'Z').toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
   catch { return ts.slice(11, 16); }
+}
+function shortDateTime(ts) {
+  if (!ts) return '-';
+  try {
+    const d = new Date(ts + 'Z');
+    const date = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return `${date} ${time}`;
+  } catch { return ts.slice(0, 16); }
 }
 function gameDateTime(epochSecs) {
   if (!epochSecs) return { display: '-', date: '', sortKey: Infinity };
@@ -239,7 +253,7 @@ async function refresh() {
       </div>
       <div class="risk-item">
         <span class="risk-label">Status</span>
-        <span class="risk-value ${risk.halted ? 'halted' : 'positive'}">${risk.halted ? 'HALTED' : 'ACTIVE'}</span>
+        <span class="risk-value ${risk.halted ? 'halted' : risk.dry_run ? 'neutral' : 'positive'}">${risk.halted ? 'HALTED' : risk.dry_run ? 'DRY RUN' : 'LIVE'}</span>
       </div>
     `;
   }
@@ -298,10 +312,12 @@ async function refresh() {
       const hm = g.markets.find(m => m.is_home) || g.markets[0];
       const mid = hm ? hm.yes_mid : null;
       const edge = hm ? hm.edge : null;
+      const edgeSide = hm ? hm.edge_side : null;
       const vol = g.markets.reduce((s, m) => s + (m.volume || 0), 0);
       const hasOrder = g.markets.some(m => m.has_resting_order);
+      const pos = g.markets.reduce((s, m) => s + (m.position || 0), 0);
       const dt = gameDateTime(g.start_time_ts);
-      return { ...g, _hm: hm, _mid: mid, _edge: edge, _vol: vol, _hasOrder: hasOrder, _dt: dt };
+      return { ...g, _hm: hm, _mid: mid, _edge: edge, _edgeSide: edgeSide, _vol: vol, _hasOrder: hasOrder, _pos: pos, _dt: dt };
     }).filter(g => {
       if (fPhase && g.phase !== fPhase) return false;
       if (fDate && g._dt.date !== fDate) return false;
@@ -313,7 +329,7 @@ async function refresh() {
     });
 
     if (enriched.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="10" class="empty">No games match filters</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="11" class="empty">No games match filters</td></tr>';
     } else {
       tbody.innerHTML = enriched.map(g => {
         const score = g.home_score != null ? `${g.away_score}-${g.home_score}` : '-';
@@ -325,8 +341,9 @@ async function refresh() {
           <td>${g.status_detail || '-'}</td>
           <td class="num">${fmtPct(g.espn_home_win_prob)}</td>
           <td class="num">${g._mid != null ? g._mid.toFixed(0) + '¢' : '-'}</td>
-          <td class="num">${fmtEdge(g._edge)}</td>
+          <td class="num">${fmtEdge(g._edge, g._edgeSide)}</td>
           <td class="num">${g._vol > 0 ? g._vol.toLocaleString() : '-'}</td>
+          <td>${g._pos > 0 ? `<span class="pos-badge pos-yes">${g._pos} YES</span>` : g._pos < 0 ? `<span class="pos-badge pos-no">${Math.abs(g._pos)} NO</span>` : '-'}</td>
           <td>${g._hasOrder ? '<span class="order-dot"></span>' : ''}</td>
         </tr>`;
       }).join('');

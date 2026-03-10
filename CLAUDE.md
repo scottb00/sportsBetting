@@ -46,7 +46,8 @@ src/
 │       ├── polymarket_ws.rs — Polymarket WebSocket event handler
 │       ├── cleanup.rs       — Cancel orders for finished games
 │       ├── discovery.rs     — Discover new Kalshi markets
-│       └── order_sync.rs    — Sync resting orders from Kalshi REST
+│       ├── order_sync.rs    — Sync resting orders + positions from Kalshi REST
+│       └── fill_sync.rs     — Sync fills from Kalshi REST
 ├── strategies/
 │   ├── mod.rs           — Strategy trait + StrategyRegistry
 │   ├── common.rs        — evaluate_edge(), evaluate_market(), ALO price calc
@@ -82,6 +83,8 @@ This is the #1 source of bugs. Each venue defines "YES" differently:
 
 ### API Gotchas
 - **Kalshi WS deltas**: Use `ts` field (ISO string), not `timestamp` (i64). Wrong field = silently dropped deltas.
+- **Kalshi positions API**: Returns `position` field (signed int: positive=YES, negative=NO). Does NOT return `yes_amount`/`no_amount`.
+- **Kalshi fills API**: `fee_cost` is a JSON string (e.g. `"0.0900"`), not float — needs custom deserializer. Also sends both `ticker` and `market_ticker` fields — cannot use `serde(alias)` or it fails with "duplicate field". `min_ts` param expects unix timestamp integer, not ISO string.
 - **ESPN dates**: Sends truncated ISO like `"2026-03-08T19:00Z"` (no seconds). Must normalize before parsing.
 - **Polymarket `outcomes`**: JSON string field, not native array. Needs explicit parsing.
 - **LLM market matching**: Claude Haiku often modifies ticker suffixes. Always validate returned tickers against the known valid set.

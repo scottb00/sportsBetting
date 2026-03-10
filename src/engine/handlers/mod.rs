@@ -10,6 +10,6 @@ pub use cleanup::cleanup_finished_games;
 pub use discovery::discover_new_markets;
 pub use fill_sync::sync_fills;
 pub use kalshi_ws::handle_kalshi_event;
-pub use order_sync::sync_orders;
+pub use order_sync::{sync_orders, sync_positions};
 pub use polymarket_ws::handle_polymarket_event;
 pub use scoreboard::handle_scoreboard_tick;

@@ -14,6 +14,7 @@ use crate::engine::risk::RiskManager;
 use crate::espn::poller::EspnPoller;
 use crate::espn::types::GameInfo;
 use crate::kalshi::orderbook::LocalOrderBook;
+use crate::kalshi::types::Position;
 use crate::strategies::Strategy;
 
 /// All shared mutable state for the bot.
@@ -26,6 +27,8 @@ pub struct BotState {
     pub logger: TradeLogger,
     /// High-water mark for fill sync: latest fill `created_time` we've seen from REST.
     pub last_fill_sync_ts: Option<String>,
+    /// Live positions from Kalshi, keyed by ticker.
+    pub positions: HashMap<String, Position>,
 }
 
 pub type SharedState = Arc<Mutex<BotState>>;
@@ -64,6 +67,7 @@ pub fn create_bot_state(config: &Config) -> Result<BotState> {
         order_manager: OrderManager::new(),
         logger,
         last_fill_sync_ts: None,
+        positions: HashMap::new(),
     })
 }
 
@@ -106,14 +110,7 @@ pub fn populate_game_states(
             game.home_team.clone(),
             game.away_team.clone(),
         );
-        gs.phase = game.game_phase.clone();
-        gs.home_score = game.home_score;
-        gs.away_score = game.away_score;
-        if game.start_time_ts.is_some() {
-            gs.start_time_ts = game.start_time_ts;
-        }
-        gs.status_detail = game.status_detail.clone();
-        gs.last_updated = std::time::Instant::now();
+        gs.update_from_espn(game);
 
         // Set up Kalshi markets if not already present
         if gs.kalshi_markets.is_empty() && !kalshi_market_infos.is_empty() {

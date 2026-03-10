@@ -36,17 +36,11 @@ pub async fn handle_scoreboard_tick(
             game.home_team.clone(),
             game.away_team.clone(),
         );
-        gs.phase = game.game_phase.clone();
-        gs.home_score = game.home_score;
-        gs.away_score = game.away_score;
-        gs.status_detail = game.status_detail.clone();
-        gs.last_play = game.last_play.clone();
-        gs.last_play_type = game.last_play_type.clone();
+        gs.update_from_espn(game);
         // Update win prob from play-by-play during live/break (more current than summary)
         if game.last_play_home_win_prob.is_some() && game.game_phase.is_live_or_break() {
             gs.espn_home_win_prob = game.last_play_home_win_prob;
         }
-        gs.last_updated = std::time::Instant::now();
     }
 
     // Log game-start transitions

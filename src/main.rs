@@ -12,8 +12,8 @@ use sports_betting::engine::bot::{
 use sports_betting::engine::dashboard;
 use sports_betting::engine::handlers;
 use sports_betting::engine::market_prep::{
-    self, kalshi_date_tag, build_espn_for_matching, build_kalshi_for_matching,
-    build_kalshi_volume, filter_events_for_dates,
+    self, build_espn_for_matching, build_kalshi_for_matching,
+    build_kalshi_volume, filter_events_for_dates, today_and_tomorrow_tags,
 };
 use sports_betting::engine::notifier::Notifier;
 use sports_betting::espn::poller::{EspnPoller, GameTracker};
@@ -70,8 +70,9 @@ async fn main() -> Result<()> {
     {
         let dashboard_state = state.clone();
         let db_path = config.logging.db_path.clone();
+        let dashboard_dry_run = config.kalshi.dry_run;
         tokio::spawn(async move {
-            if let Err(e) = dashboard::serve(dashboard_state, &db_path, 3030).await {
+            if let Err(e) = dashboard::serve(dashboard_state, &db_path, 3030, dashboard_dry_run).await {
                 tracing::error!("Dashboard server failed: {:?}", e);
             }
         });
@@ -95,20 +96,28 @@ async fn main() -> Result<()> {
             if pos.total_traded > 0 {
                 s.order_manager.record_startup_position(&pos.ticker, pos.total_traded);
                 tracing::info!(
-                    "Position: {} | traded={} yes={} no={} exposure={} pnl={}",
-                    pos.ticker, pos.total_traded, pos.yes_amount, pos.no_amount,
+                    "Position: {} | traded={} position={} exposure={} pnl={}",
+                    pos.ticker, pos.total_traded, pos.position,
                     pos.market_exposure, pos.realized_pnl,
                 );
             }
             // Seed risk manager with current positions for PnL tracking
-            if pos.yes_amount > 0 {
-                s.risk.seed_positions(&pos.ticker, "yes", pos.yes_avg_price, pos.yes_amount);
-            }
-            if pos.no_amount > 0 {
-                s.risk.seed_positions(&pos.ticker, "no", pos.no_avg_price, pos.no_amount);
+            if pos.position > 0 {
+                // Positive position = YES contracts
+                let avg_price = (pos.market_exposure as f64 / pos.position as f64) as i64;
+                s.risk.seed_positions(&pos.ticker, "yes", avg_price, pos.position);
+            } else if pos.position < 0 {
+                // Negative position = NO contracts
+                let abs_pos = pos.position.abs();
+                let avg_price = (pos.market_exposure as f64 / abs_pos as f64) as i64;
+                s.risk.seed_positions(&pos.ticker, "no", avg_price, abs_pos);
             }
         }
-        tracing::info!("Loaded {} positions from Kalshi", positions.len());
+        // Store positions for dashboard display
+        for pos in positions {
+            s.positions.insert(pos.ticker.clone(), pos);
+        }
+        tracing::info!("Loaded {} positions from Kalshi", s.positions.len());
     }
     handlers::sync_orders(&state, &kalshi_rest).await;
     // Backfill fills from Kalshi REST (catches any missed WS fill events)
@@ -161,6 +170,7 @@ async fn main() -> Result<()> {
             _ = order_sync_interval.tick() => {
                 handlers::sync_orders(&state, &kalshi_rest).await;
                 handlers::sync_fills(&state, &kalshi_rest).await;
+                handlers::sync_positions(&state, &kalshi_rest).await;
             }
             Some(event) = async {
                 match &mut kalshi_rx {
@@ -200,10 +210,7 @@ async fn fetch_initial_markets(
     });
     tracing::info!("Found {} Polymarket events", poly_events.len());
 
-    let tomorrow = (chrono::Local::now() + chrono::Duration::days(1))
-        .format("%Y-%m-%d")
-        .to_string();
-    let date_tags = vec![kalshi_date_tag(today), kalshi_date_tag(&tomorrow)];
+    let (_, tomorrow, date_tags) = today_and_tomorrow_tags();
     let mut kalshi_events = market_prep::fetch_all_kalshi_cbb_events(kalshi_rest).await;
     let before = kalshi_events.events.len();
     filter_events_for_dates(&mut kalshi_events, &date_tags);

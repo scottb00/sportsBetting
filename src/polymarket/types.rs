@@ -27,21 +27,6 @@ pub struct GammaEvent {
     /// Date of the event in YYYY-MM-DD format.
     #[serde(rename = "eventDate", default)]
     pub event_date: Option<String>,
-    /// Live game score, e.g. "68-75".
-    #[serde(default)]
-    pub score: Option<String>,
-    /// Game period, e.g. "H1", "H2", "HT", "FT".
-    #[serde(default)]
-    pub period: Option<String>,
-    /// Whether the game is currently live.
-    #[serde(default)]
-    pub live: Option<bool>,
-    /// Whether the game has ended.
-    #[serde(default)]
-    pub ended: Option<bool>,
-    /// Polymarket internal game ID.
-    #[serde(rename = "gameId", default)]
-    pub game_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,15 +56,9 @@ pub struct GammaMarket {
     /// Sports market type: "moneyline", "spreads", or "totals".
     #[serde(rename = "sportsMarketType", default)]
     pub sports_market_type: Option<String>,
-    /// Line value for spreads/totals, e.g. -6.5 or 141.5.
-    #[serde(default)]
-    pub line: Option<f64>,
     /// Game start time, e.g. "2026-03-08 23:30:00+00".
     #[serde(rename = "gameStartTime", default)]
     pub game_start_time: Option<String>,
-    /// Short title for grouped market display, e.g. "Spread -6.5", "O/U 141.5".
-    #[serde(rename = "groupItemTitle", default)]
-    pub group_item_title: Option<String>,
     /// Outcome labels as JSON string, e.g. "[\"Team A\", \"Team B\"]".
     #[serde(default)]
     pub outcomes: Option<String>,

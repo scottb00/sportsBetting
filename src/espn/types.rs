@@ -109,12 +109,6 @@ pub struct SummaryResponse {
     pub pickcenter: Option<Vec<PickcenterEntry>>,
     #[serde(default)]
     pub predictor: Option<Predictor>,
-    #[serde(default)]
-    pub header: Option<serde_json::Value>,
-    #[serde(default)]
-    pub boxscore: Option<serde_json::Value>,
-    #[serde(default)]
-    pub plays: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

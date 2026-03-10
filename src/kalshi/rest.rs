@@ -30,26 +30,33 @@ impl KalshiRestClient {
         format!("/trade-api/v2{}", path)
     }
 
-    async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let full_url = self.url(path);
+    /// Send an authenticated request, check status, and return the raw response.
+    async fn request(&self, method: &str, path: &str, builder: reqwest::RequestBuilder) -> Result<reqwest::Response> {
         let api_path = self.api_path(path);
-        let headers = self.auth.sign_request("GET", &api_path)?;
+        let headers = self.auth.sign_request(method, &api_path)?;
 
         let resp = headers
-            .apply(self.client.get(&full_url))
+            .apply(builder)
             .send()
             .await
-            .with_context(|| format!("GET {} failed", path))?;
+            .with_context(|| format!("{} {} failed", method, path))?;
 
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("GET {} returned {}: {}", path, status, body);
+            anyhow::bail!("{} {} returned {}: {}", method, path, status, body);
         }
 
-        resp.json::<T>()
-            .await
-            .with_context(|| format!("Failed to parse response from GET {}", path))
+        Ok(resp)
+    }
+
+    async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let url = self.url(path);
+        let resp = self.request("GET", path, self.client.get(&url)).await?;
+        let body = resp.text().await
+            .with_context(|| format!("Failed to read response body from GET {}", path))?;
+        serde_json::from_str::<T>(&body)
+            .with_context(|| format!("Failed to parse response from GET {}:\n{}", path, &body[..body.len().min(500)]))
     }
 
     async fn post<T: serde::de::DeserializeOwned, B: serde::Serialize>(
@@ -57,45 +64,26 @@ impl KalshiRestClient {
         path: &str,
         body: &B,
     ) -> Result<T> {
-        let full_url = self.url(path);
-        let api_path = self.api_path(path);
-        let headers = self.auth.sign_request("POST", &api_path)?;
-
-        let resp = headers
-            .apply(self.client.post(&full_url).json(body))
-            .send()
-            .await
-            .with_context(|| format!("POST {} failed", path))?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("POST {} returned {}: {}", path, status, body_text);
-        }
-
-        resp.json::<T>()
+        let url = self.url(path);
+        self.request("POST", path, self.client.post(&url).json(body))
+            .await?
+            .json::<T>()
             .await
             .with_context(|| format!("Failed to parse response from POST {}", path))
     }
 
     async fn delete(&self, path: &str) -> Result<()> {
-        let full_url = self.url(path);
-        let api_path = self.api_path(path);
-        let headers = self.auth.sign_request("DELETE", &api_path)?;
-
-        let resp = headers
-            .apply(self.client.delete(&full_url))
-            .send()
-            .await
-            .with_context(|| format!("DELETE {} failed", path))?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("DELETE {} returned {}: {}", path, status, body);
-        }
-
+        let url = self.url(path);
+        self.request("DELETE", path, self.client.delete(&url)).await?;
         Ok(())
+    }
+
+    /// Build a query string from key-value pairs, filtering out None values.
+    fn build_query(params: &[(&str, Option<String>)]) -> String {
+        let parts: Vec<String> = params.iter()
+            .filter_map(|(k, v)| v.as_ref().map(|val| format!("{}={}", k, val)))
+            .collect();
+        if parts.is_empty() { String::new() } else { format!("?{}", parts.join("&")) }
     }
 
     // --- Portfolio ---
@@ -120,21 +108,11 @@ impl KalshiRestClient {
 
     /// Fetch fills from Kalshi. Optionally filter by ticker and/or min timestamp.
     pub async fn get_fills(&self, ticker: Option<&str>, min_ts: Option<&str>, limit: Option<i32>) -> Result<GetFillsResponse> {
-        let mut params = Vec::new();
-        if let Some(t) = ticker {
-            params.push(format!("ticker={}", t));
-        }
-        if let Some(ts) = min_ts {
-            params.push(format!("min_ts={}", ts));
-        }
-        if let Some(l) = limit {
-            params.push(format!("limit={}", l));
-        }
-        let query = if params.is_empty() {
-            String::new()
-        } else {
-            format!("?{}", params.join("&"))
-        };
+        let query = Self::build_query(&[
+            ("ticker", ticker.map(|s| s.to_string())),
+            ("min_ts", min_ts.map(|s| s.to_string())),
+            ("limit", limit.map(|l| l.to_string())),
+        ]);
         self.get(&format!("/portfolio/fills{}", query)).await
     }
 
@@ -147,19 +125,6 @@ impl KalshiRestClient {
     }
 
     // --- Market Data ---
-
-    pub async fn get_orderbook(&self, ticker: &str, depth: Option<i32>) -> Result<OrderBookSnapshot> {
-        let path = match depth {
-            Some(d) => format!("/markets/{}/orderbook?depth={}", ticker, d),
-            None => format!("/markets/{}/orderbook", ticker),
-        };
-        self.get::<serde_json::Value>(&path)
-            .await
-            .and_then(|v| {
-                serde_json::from_value(v.get("orderbook").cloned().unwrap_or(v))
-                    .context("Failed to parse orderbook")
-            })
-    }
 
     pub async fn get_events(
         &self,
@@ -179,35 +144,15 @@ impl KalshiRestClient {
         cursor: Option<&str>,
         limit: Option<i32>,
     ) -> Result<GetEventsResponse> {
-        let mut params = Vec::new();
-        if let Some(c) = category {
-            params.push(format!("category={}", c));
-        }
-        if let Some(st) = series_ticker {
-            params.push(format!("series_ticker={}", st));
-        }
-        if let Some(s) = status {
-            params.push(format!("status={}", s));
-        }
-        if let Some(c) = cursor {
-            params.push(format!("cursor={}", c));
-        }
-        if let Some(l) = limit {
-            params.push(format!("limit={}", l));
-        }
-        params.push("with_nested_markets=true".to_string());
-        let query = if params.is_empty() {
-            String::new()
-        } else {
-            format!("?{}", params.join("&"))
-        };
+        let query = Self::build_query(&[
+            ("category", category.map(|s| s.to_string())),
+            ("series_ticker", series_ticker.map(|s| s.to_string())),
+            ("status", status.map(|s| s.to_string())),
+            ("cursor", cursor.map(|s| s.to_string())),
+            ("limit", limit.map(|l| l.to_string())),
+            ("with_nested_markets", Some("true".to_string())),
+        ]);
         self.get(&format!("/events{}", query)).await
-    }
-
-    pub async fn get_market(&self, ticker: &str) -> Result<Market> {
-        let resp: serde_json::Value = self.get(&format!("/markets/{}", ticker)).await?;
-        serde_json::from_value(resp.get("market").cloned().unwrap_or(resp))
-            .context("Failed to parse market")
     }
 
     pub async fn search_markets(&self, query: &str) -> Result<Vec<Market>> {

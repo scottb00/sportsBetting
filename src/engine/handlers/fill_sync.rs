@@ -3,13 +3,20 @@ use std::sync::Arc;
 use crate::engine::bot::SharedState;
 use crate::kalshi::rest::KalshiRestClient;
 
+/// Convert an ISO timestamp to a unix timestamp string for the Kalshi API.
+fn iso_to_unix_ts(iso: &str) -> Option<String> {
+    chrono::DateTime::parse_from_rfc3339(iso)
+        .ok()
+        .map(|dt| dt.timestamp().to_string())
+}
+
 /// Sync fills from Kalshi REST API into the local SQLite database.
 /// Uses a high-water mark (latest fill timestamp) to only fetch new fills.
 pub async fn sync_fills(state: &SharedState, kalshi_rest: &Arc<KalshiRestClient>) {
-    // Read high-water mark from state
+    // Read high-water mark from state, convert ISO to unix ts for Kalshi API
     let min_ts = {
         let s = state.lock().await;
-        s.last_fill_sync_ts.clone()
+        s.last_fill_sync_ts.as_deref().and_then(iso_to_unix_ts)
     };
 
     let fills = match kalshi_rest
@@ -39,6 +46,19 @@ pub async fn sync_fills(state: &SharedState, kalshi_rest: &Arc<KalshiRestClient>
         };
         let fee_cents = fill.fee_cost.unwrap_or(0.0);
 
+        // Backfill a stub order row if this order isn't in the DB yet
+        // (e.g. placed in a previous session before current DB was created)
+        let _ = s.logger.log_order_if_missing(
+            &fill.order_id,
+            &fill.ticker,
+            &fill.action,
+            &fill.side,
+            price_cents,
+            fill.count,
+            "filled",
+            Some(&fill.created_time),
+        );
+
         // INSERT OR IGNORE: returns true if new row inserted, false if duplicate
         match s.logger.log_fill(
             &fill.trade_id,
@@ -49,6 +69,7 @@ pub async fn sync_fills(state: &SharedState, kalshi_rest: &Arc<KalshiRestClient>
             price_cents,
             fill.count,
             fee_cents,
+            Some(&fill.created_time),
         ) {
             Ok(true) => {
                 new_count += 1;
