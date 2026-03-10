@@ -57,7 +57,7 @@ pub async fn handle_kalshi_event(
             let _ = s.logger.update_order_status(&fill.order_id, new_status);
             let _ = s.logger.log_fill(
                 &fill.trade_id, &fill.order_id, &fill.market_ticker,
-                &fill.side, &fill.action, fill.yes_price, fill.count, 0.0,
+                &fill.side, &fill.action, price_cents, fill.count, 0.0,
             );
             // Send fill notification (drop lock first since it's async)
             let ticker = fill.market_ticker.clone();

@@ -258,6 +258,13 @@ impl OrderManager {
         self.clv_orders.remove(order_id);
     }
 
+    /// Remove committed_contracts entries for finished tickers (prevents unbounded growth).
+    pub fn clear_committed_contracts(&mut self, tickers: &[String]) {
+        for ticker in tickers {
+            self.committed_contracts.remove(ticker.as_str());
+        }
+    }
+
     /// Get total committed contracts across multiple tickers (game-level check).
     pub fn committed_contracts_for_tickers(&self, tickers: &[&str]) -> i64 {
         tickers.iter()

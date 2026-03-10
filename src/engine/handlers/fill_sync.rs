@@ -50,13 +50,22 @@ pub async fn sync_fills(state: &SharedState, kalshi_rest: &Arc<KalshiRestClient>
             fill.count,
             fee_cents,
         ) {
-            Ok(true) => new_count += 1,
+            Ok(true) => {
+                new_count += 1;
+                // Update in-memory order tracking (decrement remaining qty)
+                s.order_manager.record_fill(&fill.order_id, fill.count);
+            }
             Ok(false) => {} // duplicate trade_id — already logged
             Err(e) => tracing::warn!("Failed to log fill {}: {:?}", fill.trade_id, e),
         }
 
-        // Also update order status if we have the order tracked
-        let _ = s.logger.update_order_status(&fill.order_id, "filled");
+        // Update order status: check if order is fully filled or partial
+        let status = if s.order_manager.has_resting_order(&fill.ticker) {
+            "partial_fill"
+        } else {
+            "filled"
+        };
+        let _ = s.logger.update_order_status(&fill.order_id, status);
     }
 
     // Update high-water mark to the latest fill's created_time

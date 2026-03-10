@@ -43,7 +43,7 @@ impl KalshiWsHandle {
             .collect();
         let count = truly_new.len();
         if count > 0 {
-            all.extend(truly_new.clone());
+            all.extend(truly_new.iter().cloned());
             let _ = self.cmd_tx.send(truly_new);
         }
         count
@@ -229,7 +229,7 @@ impl KalshiWsClient {
         match msg_type {
             "orderbook_snapshot" => {
                 let ticker = data.get("market_ticker").and_then(|v| v.as_str()).map(|s| s.to_string());
-                match serde_json::from_value::<OrderBookSnapshot>(data.clone()) {
+                match serde_json::from_value::<OrderBookSnapshot>(data) {
                     Ok(snapshot) => {
                         if let Some(ticker) = ticker {
                             tracing::debug!("WS snapshot: {} yes_levels={} no_levels={}", ticker, snapshot.yes.len(), snapshot.no.len());
@@ -240,17 +240,17 @@ impl KalshiWsClient {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("WS snapshot parse error: {:?}, keys: {:?}", e, data.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+                        tracing::warn!("WS snapshot parse error: {:?}", e);
                     }
                 }
             }
             "orderbook_delta" => {
-                match serde_json::from_value::<OrderBookDelta>(data.clone()) {
+                match serde_json::from_value::<OrderBookDelta>(data) {
                     Ok(delta) => {
                         let _ = tx.send(KalshiWsEvent::OrderBookDelta(delta));
                     }
                     Err(e) => {
-                        tracing::warn!("WS delta parse error: {:?}, raw: {:.200}", e, data);
+                        tracing::warn!("WS delta parse error: {:?}", e);
                     }
                 }
             }

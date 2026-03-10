@@ -30,15 +30,23 @@ pub async fn cleanup_finished_games(
         // Drop lock before async REST calls to avoid holding mutex across I/O
         drop(s);
 
-        for (order_id, ticker) in &orders_to_cancel {
-            if dry_run {
+        if dry_run {
+            for (order_id, ticker) in &orders_to_cancel {
                 tracing::info!("DRY RUN: would cancel order {} on finished {}", order_id, ticker);
-            } else {
-                match kalshi_rest.cancel_order(order_id).await {
-                    Ok(()) => tracing::info!("Cancelled order {} (game finished: {})", order_id, ticker),
-                    Err(e) => tracing::warn!("Failed to cancel order {}: {:?}", order_id, e),
-                }
             }
+        } else {
+            let futs: Vec<_> = orders_to_cancel.iter().map(|(order_id, ticker)| {
+                let rest = kalshi_rest.clone();
+                let oid = order_id.clone();
+                let t = ticker.clone();
+                async move {
+                    match rest.cancel_order(&oid).await {
+                        Ok(()) => tracing::info!("Cancelled order {} (game finished: {})", oid, t),
+                        Err(e) => tracing::warn!("Failed to cancel order {}: {:?}", oid, e),
+                    }
+                }
+            }).collect();
+            futures_util::future::join_all(futs).await;
         }
 
         let mut s = state.lock().await;
@@ -46,12 +54,14 @@ pub async fn cleanup_finished_games(
             s.order_manager.remove_order(order_id);
         }
         s.game_state.cleanup_finished();
+        s.order_manager.clear_committed_contracts(&finished_tickers);
         for ticker in &finished_tickers {
             s.order_books.remove(ticker);
         }
     } else {
         let count_before = s.game_state.games.len();
         s.game_state.cleanup_finished();
+        s.order_manager.clear_committed_contracts(&finished_tickers);
         let removed = count_before - s.game_state.games.len();
         if removed > 0 {
             tracing::info!("Cleaned up {} finished games", removed);

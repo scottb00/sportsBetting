@@ -25,7 +25,6 @@ pub async fn handle_scoreboard_tick(
     };
 
     // Detect phase transitions BEFORE updating the tracker (needs previous phases)
-    let _breaks_ended = game_tracker.breaks_ended(&games);
     let pregame_to_live = game_tracker.pregame_to_live(&games);
     let new_breaks = game_tracker.update(&games);
     let mut s = state.lock().await;
@@ -76,11 +75,10 @@ pub async fn handle_scoreboard_tick(
     }
 
     // Release lock before async ESPN summary fetches to avoid blocking event loop
-    let break_ids = new_breaks.clone();
     drop(s);
 
     // Fetch summary on new breaks (for updated win probs) — lock released
-    for event_id in &break_ids {
+    for event_id in &new_breaks {
         fetch_and_apply_summary(espn_poller, state, event_id, "Break ").await;
     }
 

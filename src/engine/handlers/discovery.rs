@@ -27,9 +27,9 @@ pub async fn discover_new_markets(
     let kalshi_for_matching = build_kalshi_for_matching(&kalshi_events);
     let kalshi_volume = build_kalshi_volume(&kalshi_events);
 
-    let already_mapped: Vec<String> = {
+    let already_mapped: std::collections::HashSet<String> = {
         let s = state.lock().await;
-        s.market_mapper.all_mapped_kalshi_tickers()
+        s.market_mapper.all_mapped_kalshi_tickers().into_iter().collect()
     };
 
     let new_events: Vec<_> = kalshi_for_matching

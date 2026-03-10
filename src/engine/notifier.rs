@@ -51,25 +51,6 @@ impl Notifier {
         }
     }
 
-    /// Notify that an order was placed.
-    pub async fn notify_order_placed(
-        &self,
-        strategy: &str,
-        ticker: &str,
-        side: &str,
-        action: &str,
-        count: i64,
-        price_cents: i64,
-        size_dollars: f64,
-    ) {
-        let title = format!("Order Placed: {}", strategy);
-        let body = format!(
-            "{} {} {} {} contracts @ {}c\nSize: ${:.2}\nTicker: {}",
-            action, side, ticker, count, price_cents, size_dollars, ticker,
-        );
-        self.send(&title, &body, Priority::High).await;
-    }
-
     /// Notify that a fill was received.
     pub async fn notify_fill(
         &self,
@@ -127,8 +108,6 @@ impl Notifier {
 
 pub enum Priority {
     High,
-    Default,
-    Low,
 }
 
 /// Escape special characters for Telegram MarkdownV2.

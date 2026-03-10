@@ -37,19 +37,20 @@ impl EspnPoller {
         // ESPN's default (no date param) returns the "current window" which may only
         // include in-progress/recently-finished games, missing upcoming scheduled games.
         // Fetch it for live games, then also explicitly fetch today + tomorrow by date.
-        let current_games = self.fetch_scoreboard_for_date(None).await?;
-        all_games.extend(current_games);
-
         let today = chrono::Local::now().format("%Y%m%d").to_string();
-        let today_games = self.fetch_scoreboard_for_date(Some(&today)).await?;
-        all_games.extend(today_games);
-
-        // Also fetch tomorrow's games for pre-game CLV (Kalshi often lists next-day games)
         let tomorrow = (chrono::Local::now() + chrono::Duration::days(1))
             .format("%Y%m%d")
             .to_string();
-        let tomorrow_games = self.fetch_scoreboard_for_date(Some(&tomorrow)).await?;
-        all_games.extend(tomorrow_games);
+
+        let (current_result, today_result, tomorrow_result) = tokio::join!(
+            self.fetch_scoreboard_for_date(None),
+            self.fetch_scoreboard_for_date(Some(&today)),
+            self.fetch_scoreboard_for_date(Some(&tomorrow)),
+        );
+
+        all_games.extend(current_result?);
+        all_games.extend(today_result?);
+        all_games.extend(tomorrow_result?);
 
         // Dedup by event_id
         let mut seen = std::collections::HashSet::new();

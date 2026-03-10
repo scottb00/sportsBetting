@@ -220,14 +220,18 @@ async fn api_fills(State(state): State<DashboardState>) -> impl IntoResponse {
 }
 
 async fn api_edge(State(state): State<DashboardState>) -> impl IntoResponse {
-    let summary = query_edge_summary(&state.db_path).unwrap_or(EdgeSummary {
-        total_edge_dollars: 0.0,
-        total_fills: 0,
-        avg_edge_bps: 0.0,
-        today_edge_dollars: 0.0,
-        today_fills: 0,
-    });
-    Json(summary)
+    let s = state.bot.lock().await;
+    let (total_edge_dollars, total_fills, avg_edge_bps) =
+        s.logger.edge_summary().unwrap_or((0.0, 0, 0.0));
+    let (today_edge_dollars, today_fills) =
+        s.logger.edge_summary_today().unwrap_or((0.0, 0));
+    Json(EdgeSummary {
+        total_edge_dollars,
+        total_fills,
+        avg_edge_bps,
+        today_edge_dollars,
+        today_fills,
+    })
 }
 
 // --- SQLite queries (read-only connection) ---
@@ -286,33 +290,6 @@ fn query_fills(db_path: &str) -> anyhow::Result<Vec<FillRow>> {
         })
     })?.filter_map(|r| r.ok()).collect();
     Ok(rows)
-}
-
-fn query_edge_summary(db_path: &str) -> anyhow::Result<EdgeSummary> {
-    let conn = Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    // All-time
-    let (total_edge_dollars, total_fills, avg_edge_bps): (f64, i64, f64) = conn.query_row(
-        "SELECT COALESCE(SUM(o.edge_bps / 10000.0 * f.price_cents * f.count / 100.0), 0.0),
-                COUNT(*),
-                COALESCE(AVG(o.edge_bps), 0.0)
-         FROM fills f JOIN orders o ON f.order_id = o.order_id
-         WHERE o.edge_bps IS NOT NULL",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
-    // Today
-    let (today_edge_dollars, today_fills): (f64, i64) = conn.query_row(
-        "SELECT COALESCE(SUM(o.edge_bps / 10000.0 * f.price_cents * f.count / 100.0), 0.0),
-                COUNT(*)
-         FROM fills f JOIN orders o ON f.order_id = o.order_id
-         WHERE o.edge_bps IS NOT NULL AND date(f.filled_at) = date('now')",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    Ok(EdgeSummary { total_edge_dollars, total_fills, avg_edge_bps, today_edge_dollars, today_fills })
 }
 
 // --- Server ---
