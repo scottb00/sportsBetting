@@ -1,4 +1,5 @@
 pub mod bot;
+pub mod dashboard;
 pub mod executor;
 pub mod game_state;
 pub mod handlers;

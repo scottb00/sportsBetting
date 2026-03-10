@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sports Betting Bot</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', Monaco, monospace; background: #0d1117; color: #c9d1d9; font-size: 13px; }
+  .container { max-width: 1400px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 18px; font-weight: 600; margin-bottom: 16px; color: #58a6ff; }
+  h2 { font-size: 14px; font-weight: 600; margin: 20px 0 8px; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; }
+
+  /* Risk bar */
+  .risk-bar { display: flex; gap: 24px; padding: 12px 16px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; margin-bottom: 16px; flex-wrap: wrap; }
+  .risk-item { display: flex; flex-direction: column; }
+  .risk-label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+  .risk-value { font-size: 18px; font-weight: 700; margin-top: 2px; }
+  .risk-value.positive { color: #3fb950; }
+  .risk-value.negative { color: #f85149; }
+  .risk-value.neutral { color: #c9d1d9; }
+  .halted { color: #f85149; font-weight: 700; animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: 0.5; } }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
+  th { text-align: left; padding: 6px 10px; font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #30363d; }
+  td { padding: 6px 10px; border-bottom: 1px solid #21262d; white-space: nowrap; }
+  tr:hover td { background: #161b22; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* Phase badges */
+  .phase { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; display: inline-block; }
+  .phase-Live { background: #1f6feb33; color: #58a6ff; }
+  .phase-Break, .phase-Halftime { background: #f0883e33; color: #f0883e; }
+  .phase-PreGame { background: #8b949e33; color: #8b949e; }
+  .phase-Final { background: #21262d; color: #484f58; }
+
+  /* Edge coloring */
+  .edge-pos { color: #3fb950; }
+  .edge-neg { color: #f85149; }
+
+  /* Order indicator */
+  .order-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: #f0883e; }
+
+  .updated { font-size: 11px; color: #484f58; text-align: right; margin-bottom: 8px; }
+  .empty { color: #484f58; padding: 16px; text-align: center; }
+
+  /* Strategy badges */
+  .strat { padding: 2px 6px; border-radius: 4px; font-size: 11px; }
+  .strat-break_ev { background: #1f6feb33; color: #58a6ff; }
+  .strat-clv_hunter { background: #a371f733; color: #a371f7; }
+  .strat-arb { background: #3fb95033; color: #3fb950; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Sports Betting Bot Dashboard</h1>
+  <div id="risk-bar" class="risk-bar"></div>
+  <div class="updated" id="updated"></div>
+
+  <h2>Tracked Games</h2>
+  <table id="games-table">
+    <thead>
+      <tr>
+        <th>Game</th>
+        <th>Score</th>
+        <th>Phase</th>
+        <th>Status</th>
+        <th class="num">ESPN Fair</th>
+        <th class="num">Kalshi Mid</th>
+        <th class="num">Edge</th>
+        <th class="num">Volume</th>
+        <th>Orders</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>Recent Orders</h2>
+  <table id="orders-table">
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Strategy</th>
+        <th>Ticker</th>
+        <th>Side</th>
+        <th>Action</th>
+        <th class="num">Price</th>
+        <th class="num">Qty</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>Recent Fills</h2>
+  <table id="fills-table">
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Ticker</th>
+        <th>Side</th>
+        <th>Action</th>
+        <th class="num">Price</th>
+        <th class="num">Qty</th>
+        <th class="num">Fee</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+
+function pnlClass(v) { return v > 0 ? 'positive' : v < 0 ? 'negative' : 'neutral'; }
+function fmt$(v) { return (v >= 0 ? '+' : '') + '$' + v.toFixed(2); }
+function fmtPct(v) { return v != null ? (v * 100).toFixed(1) + '%' : '-'; }
+function fmtEdge(v) {
+  if (v == null) return '-';
+  const pct = (v * 100).toFixed(1);
+  const cls = v > 0 ? 'edge-pos' : v < 0 ? 'edge-neg' : '';
+  return `<span class="${cls}">${v > 0 ? '+' : ''}${pct}%</span>`;
+}
+function shortTime(ts) {
+  if (!ts) return '-';
+  try { return new Date(ts + 'Z').toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
+  catch { return ts.slice(11, 16); }
+}
+
+async function fetchJson(url) {
+  try { const r = await fetch(url); return await r.json(); }
+  catch { return null; }
+}
+
+async function refresh() {
+  const [risk, games, orders, fills] = await Promise.all([
+    fetchJson('/api/risk'),
+    fetchJson('/api/games'),
+    fetchJson('/api/orders'),
+    fetchJson('/api/fills'),
+  ]);
+
+  // Risk bar
+  if (risk) {
+    $('#risk-bar').innerHTML = `
+      <div class="risk-item">
+        <span class="risk-label">Daily P&L</span>
+        <span class="risk-value ${pnlClass(risk.daily_pnl)}">${fmt$(risk.daily_pnl)}</span>
+      </div>
+      <div class="risk-item">
+        <span class="risk-label">Exposure</span>
+        <span class="risk-value neutral">$${risk.current_total_exposure.toFixed(2)} / $${risk.max_total_exposure.toFixed(0)}</span>
+      </div>
+      <div class="risk-item">
+        <span class="risk-label">Loss Limit</span>
+        <span class="risk-value neutral">$${risk.daily_loss_limit.toFixed(0)}</span>
+      </div>
+      <div class="risk-item">
+        <span class="risk-label">Open Orders</span>
+        <span class="risk-value neutral">${risk.open_orders}${risk.in_flight ? ` (+${risk.in_flight})` : ''}</span>
+      </div>
+      <div class="risk-item">
+        <span class="risk-label">Status</span>
+        <span class="risk-value ${risk.halted ? 'halted' : 'positive'}">${risk.halted ? 'HALTED' : 'ACTIVE'}</span>
+      </div>
+    `;
+  }
+
+  // Games
+  if (games) {
+    const tbody = $('#games-table tbody');
+    if (games.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="9" class="empty">No games being tracked</td></tr>';
+    } else {
+      tbody.innerHTML = games.map(g => {
+        // Use the home-aligned market for display (or first available)
+        const hm = g.markets.find(m => m.is_home) || g.markets[0];
+        const mid = hm ? hm.yes_mid : null;
+        const edge = hm ? hm.edge : null;
+        const vol = g.markets.reduce((s, m) => s + (m.volume || 0), 0);
+        const hasOrder = g.markets.some(m => m.has_resting_order);
+        const score = g.home_score != null ? `${g.away_score}-${g.home_score}` : '-';
+
+        return `<tr>
+          <td>${g.away_team} @ ${g.home_team}</td>
+          <td class="num">${score}</td>
+          <td><span class="phase phase-${g.phase}">${g.phase}</span></td>
+          <td>${g.status_detail || '-'}</td>
+          <td class="num">${fmtPct(g.espn_home_win_prob)}</td>
+          <td class="num">${mid != null ? mid.toFixed(0) + '¢' : '-'}</td>
+          <td class="num">${fmtEdge(edge)}</td>
+          <td class="num">${vol > 0 ? vol.toLocaleString() : '-'}</td>
+          <td>${hasOrder ? '<span class="order-dot"></span>' : ''}</td>
+        </tr>`;
+      }).join('');
+    }
+  }
+
+  // Orders
+  if (orders) {
+    const tbody = $('#orders-table tbody');
+    if (orders.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" class="empty">No orders yet</td></tr>';
+    } else {
+      tbody.innerHTML = orders.map(o => {
+        const stratCls = o.strategy ? `strat strat-${o.strategy}` : '';
+        return `<tr>
+          <td>${shortTime(o.created_at)}</td>
+          <td><span class="${stratCls}">${o.strategy || '-'}</span></td>
+          <td>${o.ticker}</td>
+          <td>${o.side}</td>
+          <td>${o.action}</td>
+          <td class="num">${o.price_cents}¢</td>
+          <td class="num">${o.count}</td>
+          <td>${o.status}</td>
+        </tr>`;
+      }).join('');
+    }
+  }
+
+  // Fills
+  if (fills) {
+    const tbody = $('#fills-table tbody');
+    if (fills.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" class="empty">No fills yet</td></tr>';
+    } else {
+      tbody.innerHTML = fills.map(f => `<tr>
+        <td>${shortTime(f.filled_at)}</td>
+        <td>${f.ticker}</td>
+        <td>${f.side}</td>
+        <td>${f.action}</td>
+        <td class="num">${f.price_cents}¢</td>
+        <td class="num">${f.count}</td>
+        <td class="num">${f.fee_cents.toFixed(0)}¢</td>
+      </tr>`).join('');
+    }
+  }
+
+  $('#updated').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

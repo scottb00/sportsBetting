@@ -6,9 +6,12 @@ primary_region = "iad"  # US East (Ashburn) — closest to Kalshi
 [env]
   RUST_LOG = "sports_betting=info"
 
-# No HTTP service needed — this is a background worker
-[processes]
-  app = ""
+# Dashboard HTTP service on port 3030
+[http_service]
+  internal_port = 3030
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
 
 [[vm]]
   size = "shared-cpu-1x"

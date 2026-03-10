@@ -9,6 +9,7 @@ use sports_betting::engine::bot::{
     self, SharedState, create_bot_state, create_strategies,
     populate_game_states, fetch_summaries_for_games,
 };
+use sports_betting::engine::dashboard;
 use sports_betting::engine::handlers;
 use sports_betting::engine::market_prep::{
     self, kalshi_date_tag, build_espn_for_matching, build_kalshi_for_matching,
@@ -64,6 +65,17 @@ async fn main() -> Result<()> {
     ).await?;
 
     let state: SharedState = Arc::new(Mutex::new(bot_state));
+
+    // Start dashboard web server
+    {
+        let dashboard_state = state.clone();
+        let db_path = config.logging.db_path.clone();
+        tokio::spawn(async move {
+            if let Err(e) = dashboard::serve(dashboard_state, &db_path, 3030).await {
+                tracing::error!("Dashboard server failed: {:?}", e);
+            }
+        });
+    }
 
     // Fetch initial ESPN win probs
     fetch_summaries_for_games(&espn_poller, &state).await;

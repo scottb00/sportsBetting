@@ -41,6 +41,9 @@ toml = "0.8"
 # Database (trade logging)
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# Dashboard web server
+axum = "0.8"
+
 # URL handling
 url = "2"
 urlencoding = "2"
