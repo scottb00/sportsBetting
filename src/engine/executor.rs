@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use crate::engine::bot::{BotState, SharedState, StrategyRegistry};
-use crate::engine::notifier::Notifier;
 use crate::engine::order_manager::{OrderManager, OrderSignal};
 use crate::kalshi::rest::KalshiRestClient;
 
@@ -97,15 +96,27 @@ pub fn evaluate_strategies(
     signals
 }
 
+/// Info about a successfully placed order, used for batch notifications.
+pub struct PlacedOrder {
+    pub strategy: String,
+    pub ticker: String,
+    pub side: String,
+    pub action: String,
+    pub count: i64,
+    pub price_cents: i64,
+    pub size_dollars: f64,
+    pub edge_after_fees: f64,
+}
+
 /// Execute an order signal via Kalshi REST API (or log if dry_run).
+/// Returns placement info if the order was successfully placed (for batch notifications).
 pub async fn execute_signal(
     signal: OrderSignal,
     state: &SharedState,
     kalshi_rest: &Arc<KalshiRestClient>,
     dry_run: bool,
     live_strategies: &[String],
-    notifier: Option<&Notifier>,
-) {
+) -> Option<PlacedOrder> {
     let s = state.lock().await;
     if !s.risk.can_trade(signal.size_dollars) {
         tracing::warn!(
@@ -113,7 +124,7 @@ pub async fn execute_signal(
             signal.strategy,
             signal.kalshi_ticker
         );
-        return;
+        return None;
     }
     drop(s);
 
@@ -138,7 +149,7 @@ pub async fn execute_signal(
         // Mark in-flight so we don't double-fire on the same ticker this tick
         let mut s = state.lock().await;
         s.order_manager.mark_in_flight(&signal.kalshi_ticker);
-        return;
+        return None;
     }
 
     tracing::info!(
@@ -160,51 +171,53 @@ pub async fn execute_signal(
 
     match kalshi_rest.create_order(&order_req).await {
         Ok(resp) => {
-            let mut s = state.lock().await;
-            let _ = s.logger.log_order(
-                &resp.order.order_id,
-                &signal.kalshi_ticker,
-                &signal.strategy,
-                &format!("{:?}", order_req.action),
-                &format!("{:?}", order_req.side),
-                order_req.yes_price.or(order_req.no_price).unwrap_or(0),
-                order_req.count,
-                &resp.order.status,
-            );
-
-            // Track CLV orders for closing-line validation
-            if signal.strategy == "clv_hunter" {
-                let price = order_req.yes_price.or(order_req.no_price).unwrap_or(0);
-                s.order_manager.record_clv_order(
+            {
+                let mut s = state.lock().await;
+                let _ = s.logger.log_order(
                     &resp.order.order_id,
                     &signal.kalshi_ticker,
+                    &signal.strategy,
+                    &format!("{:?}", order_req.action),
                     &format!("{:?}", order_req.side),
-                    price,
+                    order_req.yes_price.or(order_req.no_price).unwrap_or(0),
+                    order_req.count,
+                    &resp.order.status,
                 );
-            }
 
-            s.order_manager.record_placed_order(resp.order);
+                // Track CLV orders for closing-line validation
+                if signal.strategy == "clv_hunter" {
+                    let price = order_req.yes_price.or(order_req.no_price).unwrap_or(0);
+                    s.order_manager.record_clv_order(
+                        &resp.order.order_id,
+                        &signal.kalshi_ticker,
+                        &format!("{:?}", order_req.side),
+                        price,
+                    );
+                }
+
+                s.order_manager.record_placed_order(resp.order);
+            } // lock dropped
+
             tracing::info!("Order placed successfully");
 
-            // Send push notification
-            if let Some(n) = notifier {
-                let price_cents = order_req.yes_price.or(order_req.no_price).unwrap_or(0);
-                n.notify_order_placed(
-                    &signal.strategy,
-                    &signal.kalshi_ticker,
-                    &format!("{:?}", order_req.side),
-                    &format!("{:?}", order_req.action),
-                    order_req.count,
-                    price_cents,
-                    signal.size_dollars,
-                ).await;
-            }
+            let price_cents = order_req.yes_price.or(order_req.no_price).unwrap_or(0);
+            Some(PlacedOrder {
+                strategy: signal.strategy,
+                ticker: signal.kalshi_ticker,
+                side: format!("{:?}", order_req.side),
+                action: format!("{:?}", order_req.action),
+                count: order_req.count,
+                price_cents,
+                size_dollars: signal.size_dollars,
+                edge_after_fees: signal.edge_after_fees,
+            })
         }
         Err(e) => {
             tracing::error!("Failed to place order: {:?}", e);
             // Clear in-flight so the strategy can retry next tick
             let mut s = state.lock().await;
             s.order_manager.clear_in_flight(&signal.kalshi_ticker);
+            None
         }
     }
 }

@@ -91,11 +91,22 @@ pub async fn handle_scoreboard_tick(
     let signals = evaluate_strategies(&s, registry);
     drop(s);
 
+    let mut placed = Vec::new();
     for signal in signals {
-        execute_signal(
+        if let Some(order) = execute_signal(
             signal, state, kalshi_rest, dry_run,
-            &registry.live_strategies, notifier,
-        ).await;
+            &registry.live_strategies,
+        ).await {
+            placed.push(order);
+        }
+    }
+
+    // Send notifications only for break_ev orders
+    if let Some(n) = notifier {
+        let break_ev_orders: Vec<_> = placed.into_iter()
+            .filter(|o| o.strategy == "break_ev")
+            .collect();
+        n.notify_orders_batch(&break_ev_orders).await;
     }
 }
 

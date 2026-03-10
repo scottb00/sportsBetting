@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
     let poly_client = PolymarketClient::new();
 
     let notifier = config.notify.as_ref().map(|nc| {
-        tracing::info!("Notifications enabled via ntfy.sh topic: {}", nc.ntfy_topic);
+        tracing::info!("Notifications enabled via Telegram bot");
         Notifier::new(nc)
     });
 

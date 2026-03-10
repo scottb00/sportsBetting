@@ -108,8 +108,10 @@ pub struct LoggingConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct NotifyConfig {
-    /// ntfy.sh topic name (e.g. "my-sports-bot-abc123")
-    pub ntfy_topic: String,
+    /// Telegram bot token from @BotFather
+    pub telegram_bot_token: String,
+    /// Telegram chat ID to send notifications to
+    pub telegram_chat_id: i64,
 }
 
 impl Config {
