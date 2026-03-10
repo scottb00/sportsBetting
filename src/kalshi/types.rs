@@ -155,6 +155,32 @@ pub struct GetEventsResponse {
     pub cursor: Option<String>,
 }
 
+// --- Fills (REST) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestFill {
+    pub trade_id: String,
+    pub order_id: String,
+    #[serde(alias = "market_ticker")]
+    pub ticker: String,
+    pub side: String,
+    pub action: String,
+    pub count: i64,
+    pub yes_price: i64,
+    pub no_price: i64,
+    #[serde(default)]
+    pub is_taker: bool,
+    #[serde(default)]
+    pub fee_cost: Option<f64>,
+    pub created_time: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetFillsResponse {
+    pub fills: Vec<RestFill>,
+    pub cursor: Option<String>,
+}
+
 // --- WebSocket ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

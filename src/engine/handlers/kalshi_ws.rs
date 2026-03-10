@@ -49,7 +49,12 @@ pub async fn handle_kalshi_event(
                 price_cents, fill.count,
             );
             // Decrement remaining count; only removes order when fully filled
+            let was_resting = s.order_manager.has_resting_order(&fill.market_ticker);
             s.order_manager.record_fill(&fill.order_id, fill.count);
+            let still_resting = s.order_manager.has_resting_order(&fill.market_ticker);
+            // Update order status in the DB
+            let new_status = if was_resting && !still_resting { "filled" } else { "partial_fill" };
+            let _ = s.logger.update_order_status(&fill.order_id, new_status);
             let _ = s.logger.log_fill(
                 &fill.trade_id, &fill.order_id, &fill.market_ticker,
                 &fill.side, &fill.action, fill.yes_price, fill.count, 0.0,

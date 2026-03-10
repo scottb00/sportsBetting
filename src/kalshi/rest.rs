@@ -118,6 +118,26 @@ impl KalshiRestClient {
         self.delete(&format!("/portfolio/orders/{}", order_id)).await
     }
 
+    /// Fetch fills from Kalshi. Optionally filter by ticker and/or min timestamp.
+    pub async fn get_fills(&self, ticker: Option<&str>, min_ts: Option<&str>, limit: Option<i32>) -> Result<GetFillsResponse> {
+        let mut params = Vec::new();
+        if let Some(t) = ticker {
+            params.push(format!("ticker={}", t));
+        }
+        if let Some(ts) = min_ts {
+            params.push(format!("min_ts={}", ts));
+        }
+        if let Some(l) = limit {
+            params.push(format!("limit={}", l));
+        }
+        let query = if params.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", params.join("&"))
+        };
+        self.get(&format!("/portfolio/fills{}", query)).await
+    }
+
     pub async fn get_orders(&self, ticker: Option<&str>) -> Result<GetOrdersResponse> {
         let path = match ticker {
             Some(t) => format!("/portfolio/orders?ticker={}&status=resting", t),

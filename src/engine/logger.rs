@@ -21,6 +21,7 @@ impl TradeLogger {
                 price_cents INTEGER NOT NULL,
                 count INTEGER NOT NULL,
                 status TEXT NOT NULL,
+                edge_bps REAL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
@@ -36,6 +37,8 @@ impl TradeLogger {
                 fee_cents REAL,
                 filled_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_fills_trade_id ON fills(trade_id);
 
             CREATE TABLE IF NOT EXISTS pnl_snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,6 +64,9 @@ impl TradeLogger {
         )
         .context("Failed to create trade log tables")?;
 
+        // Migrate: add edge_bps column if it doesn't exist (for existing DBs)
+        let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN edge_bps REAL");
+
         Ok(Self { conn })
     }
 
@@ -75,15 +81,17 @@ impl TradeLogger {
         price_cents: i64,
         count: i64,
         status: &str,
+        edge_bps: Option<f64>,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![order_id, ticker, strategy, action, side, price_cents, count, status],
+            "INSERT OR REPLACE INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps],
         )?;
         Ok(())
     }
 
+    /// Log a fill. Returns true if a new row was inserted (false if duplicate trade_id).
     #[allow(clippy::too_many_arguments)]
     pub fn log_fill(
         &self,
@@ -95,13 +103,13 @@ impl TradeLogger {
         price_cents: i64,
         count: i64,
         fee_cents: f64,
-    ) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO fills (trade_id, order_id, ticker, side, action, price_cents, count, fee_cents)
+    ) -> Result<bool> {
+        let rows = self.conn.execute(
+            "INSERT OR IGNORE INTO fills (trade_id, order_id, ticker, side, action, price_cents, count, fee_cents)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![trade_id, order_id, ticker, side, action, price_cents, count, fee_cents],
         )?;
-        Ok(())
+        Ok(rows > 0)
     }
 
     pub fn log_pnl_snapshot(
@@ -138,6 +146,49 @@ impl TradeLogger {
             rusqlite::params![order_id, ticker, side, order_price_cents, closing_mid_cents, clv_cents, captured],
         )?;
         Ok(())
+    }
+
+    /// Update order status (e.g. to "filled" or "partial_fill").
+    pub fn update_order_status(&self, order_id: &str, status: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE orders SET status = ?1 WHERE order_id = ?2",
+            rusqlite::params![status, order_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get theoretical edge summary: total edge-weighted dollars from filled orders.
+    /// Returns (total_edge_dollars, fill_count, avg_edge_bps) across all time.
+    pub fn edge_summary(&self) -> Result<(f64, i64, f64)> {
+        let (total_edge_dollars, fill_count): (f64, i64) = self.conn.query_row(
+            "SELECT COALESCE(SUM(o.edge_bps / 10000.0 * f.price_cents * f.count / 100.0), 0.0),
+                    COUNT(*)
+             FROM fills f
+             JOIN orders o ON f.order_id = o.order_id
+             WHERE o.edge_bps IS NOT NULL",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let avg_edge_bps = if fill_count > 0 {
+            total_edge_dollars / fill_count as f64 * 10000.0
+        } else {
+            0.0
+        };
+        Ok((total_edge_dollars, fill_count, avg_edge_bps))
+    }
+
+    /// Get today's theoretical edge summary.
+    pub fn edge_summary_today(&self) -> Result<(f64, i64)> {
+        let (total_edge_dollars, fill_count): (f64, i64) = self.conn.query_row(
+            "SELECT COALESCE(SUM(o.edge_bps / 10000.0 * f.price_cents * f.count / 100.0), 0.0),
+                    COUNT(*)
+             FROM fills f
+             JOIN orders o ON f.order_id = o.order_id
+             WHERE o.edge_bps IS NOT NULL AND date(f.filled_at) = date('now')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok((total_edge_dollars, fill_count))
     }
 
     /// Get total realized P&L for today.

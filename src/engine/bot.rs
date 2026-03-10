@@ -24,6 +24,8 @@ pub struct BotState {
     pub risk: RiskManager,
     pub order_manager: OrderManager,
     pub logger: TradeLogger,
+    /// High-water mark for fill sync: latest fill `created_time` we've seen from REST.
+    pub last_fill_sync_ts: Option<String>,
 }
 
 pub type SharedState = Arc<Mutex<BotState>>;
@@ -61,6 +63,7 @@ pub fn create_bot_state(config: &Config) -> Result<BotState> {
         ),
         order_manager: OrderManager::new(),
         logger,
+        last_fill_sync_ts: None,
     })
 }
 

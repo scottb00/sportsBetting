@@ -34,8 +34,14 @@ impl EspnPoller {
     pub async fn fetch_scoreboard(&self) -> Result<Vec<GameInfo>> {
         let mut all_games = Vec::new();
 
-        // Fetch today's full slate
-        let today_games = self.fetch_scoreboard_for_date(None).await?;
+        // ESPN's default (no date param) returns the "current window" which may only
+        // include in-progress/recently-finished games, missing upcoming scheduled games.
+        // Fetch it for live games, then also explicitly fetch today + tomorrow by date.
+        let current_games = self.fetch_scoreboard_for_date(None).await?;
+        all_games.extend(current_games);
+
+        let today = chrono::Local::now().format("%Y%m%d").to_string();
+        let today_games = self.fetch_scoreboard_for_date(Some(&today)).await?;
         all_games.extend(today_games);
 
         // Also fetch tomorrow's games for pre-game CLV (Kalshi often lists next-day games)

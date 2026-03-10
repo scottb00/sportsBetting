@@ -44,6 +44,13 @@
   .order-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: #f0883e; }
 
   .updated { font-size: 11px; color: #484f58; text-align: right; margin-bottom: 8px; }
+
+  /* Filters */
+  .filters { display: flex; gap: 12px; padding: 10px 14px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+  .filters label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+  .filters select, .filters input { background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 4px 8px; font-size: 12px; font-family: inherit; }
+  .filters select:focus, .filters input:focus { outline: none; border-color: #58a6ff; }
+  .filter-group { display: flex; flex-direction: column; gap: 2px; }
   .empty { color: #484f58; padding: 16px; text-align: center; }
 
   /* Strategy badges */
@@ -51,6 +58,21 @@
   .strat-break_ev { background: #1f6feb33; color: #58a6ff; }
   .strat-clv_hunter { background: #a371f733; color: #a371f7; }
   .strat-arb { background: #3fb95033; color: #3fb950; }
+
+  /* Status badges */
+  .status { padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .status-resting { background: #f0883e33; color: #f0883e; }
+  .status-filled { background: #3fb95033; color: #3fb950; }
+  .status-partial_fill { background: #1f6feb33; color: #58a6ff; }
+  .status-canceled, .status-cancelled { background: #484f5833; color: #484f58; }
+
+  /* Game name subtitle */
+  .game-name { font-size: 11px; color: #8b949e; margin-top: 1px; }
+  .ticker-cell { display: flex; flex-direction: column; }
+
+  /* Side badges */
+  .side-yes { color: #3fb950; font-weight: 600; }
+  .side-no { color: #f85149; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -60,9 +82,45 @@
   <div class="updated" id="updated"></div>
 
   <h2>Tracked Games</h2>
+  <div class="filters" id="game-filters">
+    <div class="filter-group">
+      <label>Phase</label>
+      <select id="filter-phase">
+        <option value="">All</option>
+        <option value="PreGame">Pre-Game</option>
+        <option value="Live">Live</option>
+        <option value="Break">Break</option>
+        <option value="Halftime">Halftime</option>
+        <option value="Final">Final</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label>Date</label>
+      <select id="filter-date">
+        <option value="">All</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label>Min Edge</label>
+      <input type="number" id="filter-min-edge" placeholder="e.g. 2" step="0.5" style="width:70px">
+    </div>
+    <div class="filter-group">
+      <label>Min Volume</label>
+      <input type="number" id="filter-min-vol" placeholder="e.g. 5000" step="1000" style="width:90px">
+    </div>
+    <div class="filter-group">
+      <label>Has Orders</label>
+      <select id="filter-orders">
+        <option value="">All</option>
+        <option value="yes">Yes</option>
+        <option value="no">No</option>
+      </select>
+    </div>
+  </div>
   <table id="games-table">
     <thead>
       <tr>
+        <th>Time</th>
         <th>Game</th>
         <th>Score</th>
         <th>Phase</th>
@@ -83,28 +141,37 @@
       <tr>
         <th>Time</th>
         <th>Strategy</th>
-        <th>Ticker</th>
+        <th>Game</th>
         <th>Side</th>
         <th>Action</th>
         <th class="num">Price</th>
+        <th class="num">Edge</th>
         <th class="num">Qty</th>
+        <th class="num">Cost</th>
         <th>Status</th>
       </tr>
     </thead>
     <tbody></tbody>
   </table>
 
-  <h2>Recent Fills</h2>
-  <table id="fills-table">
+  <h2 style="font-size:16px; color:#58a6ff; margin-top:28px;">Theoretical Edge</h2>
+  <div id="edge-bar" class="risk-bar"></div>
+
+  <h2 style="font-size:16px; color:#58a6ff; margin-top:28px;">Recent Fills</h2>
+  <table id="fills-table" style="font-size:14px;">
     <thead>
       <tr>
         <th>Time</th>
-        <th>Ticker</th>
+        <th>Strategy</th>
+        <th>Game</th>
         <th>Side</th>
         <th>Action</th>
         <th class="num">Price</th>
+        <th class="num">Edge</th>
         <th class="num">Qty</th>
+        <th class="num">Cost</th>
         <th class="num">Fee</th>
+        <th class="num">Net</th>
       </tr>
     </thead>
     <tbody></tbody>
@@ -128,6 +195,14 @@ function shortTime(ts) {
   try { return new Date(ts + 'Z').toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
   catch { return ts.slice(11, 16); }
 }
+function gameDateTime(epochSecs) {
+  if (!epochSecs) return { display: '-', date: '', sortKey: Infinity };
+  const d = new Date(epochSecs * 1000);
+  const date = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const dateKey = d.toLocaleDateString([], { year: 'numeric', month: '2-digit', day: '2-digit' });
+  return { display: `${date} ${time}`, date: dateKey, sortKey: epochSecs };
+}
 
 async function fetchJson(url) {
   try { const r = await fetch(url); return await r.json(); }
@@ -135,11 +210,12 @@ async function fetchJson(url) {
 }
 
 async function refresh() {
-  const [risk, games, orders, fills] = await Promise.all([
+  const [risk, games, orders, fills, edge] = await Promise.all([
     fetchJson('/api/risk'),
     fetchJson('/api/games'),
     fetchJson('/api/orders'),
     fetchJson('/api/fills'),
+    fetchJson('/api/edge'),
   ]);
 
   // Risk bar
@@ -168,31 +244,90 @@ async function refresh() {
     `;
   }
 
+  // Edge summary
+  if (edge) {
+    $('#edge-bar').innerHTML = `
+      <div class="risk-item">
+        <span class="risk-label">Today's Edge</span>
+        <span class="risk-value ${pnlClass(edge.today_edge_dollars)}">${fmt$(edge.today_edge_dollars)}</span>
+      </div>
+      <div class="risk-item">
+        <span class="risk-label">Today Fills</span>
+        <span class="risk-value neutral">${edge.today_fills}</span>
+      </div>
+      <div class="risk-item">
+        <span class="risk-label">All-Time Edge</span>
+        <span class="risk-value ${pnlClass(edge.total_edge_dollars)}">${fmt$(edge.total_edge_dollars)}</span>
+      </div>
+      <div class="risk-item">
+        <span class="risk-label">All-Time Fills</span>
+        <span class="risk-value neutral">${edge.total_fills}</span>
+      </div>
+      <div class="risk-item">
+        <span class="risk-label">Avg Edge</span>
+        <span class="risk-value ${pnlClass(edge.avg_edge_bps)}">${edge.avg_edge_bps.toFixed(0)} bps</span>
+      </div>
+    `;
+  }
+
   // Games
   if (games) {
     const tbody = $('#games-table tbody');
-    if (games.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="9" class="empty">No games being tracked</td></tr>';
-    } else {
-      tbody.innerHTML = games.map(g => {
-        // Use the home-aligned market for display (or first available)
-        const hm = g.markets.find(m => m.is_home) || g.markets[0];
-        const mid = hm ? hm.yes_mid : null;
-        const edge = hm ? hm.edge : null;
-        const vol = g.markets.reduce((s, m) => s + (m.volume || 0), 0);
-        const hasOrder = g.markets.some(m => m.has_resting_order);
-        const score = g.home_score != null ? `${g.away_score}-${g.home_score}` : '-';
 
+    // Populate date filter options from available games
+    const dateSet = new Set();
+    games.forEach(g => {
+      const dt = gameDateTime(g.start_time_ts);
+      if (dt.date) dateSet.add(dt.date);
+    });
+    const dateSel = $('#filter-date');
+    const curDateVal = dateSel.value;
+    const dateOpts = Array.from(dateSet).sort();
+    dateSel.innerHTML = '<option value="">All</option>' + dateOpts.map(d => `<option value="${d}">${d}</option>`).join('');
+    dateSel.value = curDateVal; // preserve selection
+
+    // Read filter values
+    const fPhase = $('#filter-phase').value;
+    const fDate = $('#filter-date').value;
+    const fMinEdge = parseFloat($('#filter-min-edge').value) || 0;
+    const fMinVol = parseInt($('#filter-min-vol').value) || 0;
+    const fOrders = $('#filter-orders').value;
+
+    // Enrich and filter
+    const enriched = games.map(g => {
+      const hm = g.markets.find(m => m.is_home) || g.markets[0];
+      const mid = hm ? hm.yes_mid : null;
+      const edge = hm ? hm.edge : null;
+      const vol = g.markets.reduce((s, m) => s + (m.volume || 0), 0);
+      const hasOrder = g.markets.some(m => m.has_resting_order);
+      const dt = gameDateTime(g.start_time_ts);
+      return { ...g, _hm: hm, _mid: mid, _edge: edge, _vol: vol, _hasOrder: hasOrder, _dt: dt };
+    }).filter(g => {
+      if (fPhase && g.phase !== fPhase) return false;
+      if (fDate && g._dt.date !== fDate) return false;
+      if (fMinEdge && (g._edge == null || Math.abs(g._edge * 100) < fMinEdge)) return false;
+      if (fMinVol && g._vol < fMinVol) return false;
+      if (fOrders === 'yes' && !g._hasOrder) return false;
+      if (fOrders === 'no' && g._hasOrder) return false;
+      return true;
+    });
+
+    if (enriched.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="10" class="empty">No games match filters</td></tr>';
+    } else {
+      tbody.innerHTML = enriched.map(g => {
+        const score = g.home_score != null ? `${g.away_score}-${g.home_score}` : '-';
         return `<tr>
+          <td style="font-size:11px">${g._dt.display}</td>
           <td>${g.away_team} @ ${g.home_team}</td>
           <td class="num">${score}</td>
           <td><span class="phase phase-${g.phase}">${g.phase}</span></td>
           <td>${g.status_detail || '-'}</td>
           <td class="num">${fmtPct(g.espn_home_win_prob)}</td>
-          <td class="num">${mid != null ? mid.toFixed(0) + '¢' : '-'}</td>
-          <td class="num">${fmtEdge(edge)}</td>
-          <td class="num">${vol > 0 ? vol.toLocaleString() : '-'}</td>
-          <td>${hasOrder ? '<span class="order-dot"></span>' : ''}</td>
+          <td class="num">${g._mid != null ? g._mid.toFixed(0) + '¢' : '-'}</td>
+          <td class="num">${fmtEdge(g._edge)}</td>
+          <td class="num">${g._vol > 0 ? g._vol.toLocaleString() : '-'}</td>
+          <td>${g._hasOrder ? '<span class="order-dot"></span>' : ''}</td>
         </tr>`;
       }).join('');
     }
@@ -202,19 +337,25 @@ async function refresh() {
   if (orders) {
     const tbody = $('#orders-table tbody');
     if (orders.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8" class="empty">No orders yet</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="10" class="empty">No orders yet</td></tr>';
     } else {
       tbody.innerHTML = orders.map(o => {
         const stratCls = o.strategy ? `strat strat-${o.strategy}` : '';
+        const statusCls = `status status-${o.status}`;
+        const sideCls = o.side.toLowerCase() === 'yes' ? 'side-yes' : 'side-no';
+        const gameLabel = o.game_name || o.ticker;
+        const cost = (o.price_cents * o.count / 100).toFixed(2);
         return `<tr>
           <td>${shortTime(o.created_at)}</td>
           <td><span class="${stratCls}">${o.strategy || '-'}</span></td>
-          <td>${o.ticker}</td>
-          <td>${o.side}</td>
+          <td><div class="ticker-cell"><span>${gameLabel}</span>${o.game_name ? `<span class="game-name">${o.ticker}</span>` : ''}</div></td>
+          <td><span class="${sideCls}">${o.side}</span></td>
           <td>${o.action}</td>
           <td class="num">${o.price_cents}¢</td>
+          <td class="num">${fmtEdge(o.edge)}</td>
           <td class="num">${o.count}</td>
-          <td>${o.status}</td>
+          <td class="num">$${cost}</td>
+          <td><span class="${statusCls}">${o.status}</span></td>
         </tr>`;
       }).join('');
     }
@@ -224,17 +365,32 @@ async function refresh() {
   if (fills) {
     const tbody = $('#fills-table tbody');
     if (fills.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty">No fills yet</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="11" class="empty">No fills yet</td></tr>';
     } else {
-      tbody.innerHTML = fills.map(f => `<tr>
-        <td>${shortTime(f.filled_at)}</td>
-        <td>${f.ticker}</td>
-        <td>${f.side}</td>
-        <td>${f.action}</td>
-        <td class="num">${f.price_cents}¢</td>
-        <td class="num">${f.count}</td>
-        <td class="num">${f.fee_cents.toFixed(0)}¢</td>
-      </tr>`).join('');
+      tbody.innerHTML = fills.map(f => {
+        const stratCls = f.strategy ? `strat strat-${f.strategy}` : '';
+        const sideCls = f.side.toLowerCase() === 'yes' ? 'side-yes' : 'side-no';
+        const gameLabel = f.game_name || f.ticker;
+        const cost = (f.price_cents * f.count / 100).toFixed(2);
+        const fee = f.fee_cents / 100;
+        const net = (f.action === 'buy' ? -1 : 1) * (f.price_cents * f.count / 100) - fee;
+        const netCls = net > 0 ? 'edge-pos' : net < 0 ? 'edge-neg' : '';
+        const edgeBps = f.edge_bps != null ? f.edge_bps.toFixed(0) : '-';
+        const edgeCls = f.edge_bps > 0 ? 'edge-pos' : f.edge_bps < 0 ? 'edge-neg' : '';
+        return `<tr>
+          <td>${shortTime(f.filled_at)}</td>
+          <td><span class="${stratCls}">${f.strategy || '-'}</span></td>
+          <td><div class="ticker-cell"><span>${gameLabel}</span>${f.game_name ? `<span class="game-name">${f.ticker}</span>` : ''}</div></td>
+          <td><span class="${sideCls}">${f.side}</span></td>
+          <td>${f.action}</td>
+          <td class="num">${f.price_cents}¢</td>
+          <td class="num"><span class="${edgeCls}">${edgeBps}${f.edge_bps != null ? ' bps' : ''}</span></td>
+          <td class="num">${f.count}</td>
+          <td class="num">$${cost}</td>
+          <td class="num">${f.fee_cents.toFixed(0)}¢</td>
+          <td class="num"><span class="${netCls}">${net >= 0 ? '+' : ''}$${net.toFixed(2)}</span></td>
+        </tr>`;
+      }).join('');
     }
   }
 

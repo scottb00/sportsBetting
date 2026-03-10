@@ -28,6 +28,8 @@ struct GameView {
     phase: String,
     status_detail: String,
     espn_home_win_prob: Option<f64>,
+    /// Game start time as unix seconds (from ESPN).
+    start_time_ts: Option<i64>,
     markets: Vec<MarketView>,
 }
 
@@ -61,6 +63,7 @@ struct RiskView {
 struct OrderRow {
     order_id: String,
     ticker: String,
+    game_name: Option<String>,
     strategy: String,
     action: String,
     side: String,
@@ -68,6 +71,8 @@ struct OrderRow {
     count: i64,
     status: String,
     created_at: String,
+    /// Perceived edge: fair_value - order_price (positive = buying below fair value)
+    edge: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -75,12 +80,24 @@ struct FillRow {
     trade_id: String,
     order_id: String,
     ticker: String,
+    game_name: Option<String>,
+    strategy: String,
     side: String,
     action: String,
     price_cents: i64,
     count: i64,
     fee_cents: f64,
     filled_at: String,
+    edge_bps: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct EdgeSummary {
+    total_edge_dollars: f64,
+    total_fills: i64,
+    avg_edge_bps: f64,
+    today_edge_dollars: f64,
+    today_fills: i64,
 }
 
 // --- Handlers ---
@@ -92,7 +109,10 @@ async fn index() -> impl IntoResponse {
 
 async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
     let s = state.bot.lock().await;
-    let mut games: Vec<GameView> = s.game_state.games.values().map(|g| {
+    let mut games: Vec<GameView> = s.game_state.games.values().filter(|g| {
+        // Skip games with TBD teams (e.g. tournament bracket placeholders)
+        !g.home_team.eq_ignore_ascii_case("TBD") && !g.away_team.eq_ignore_ascii_case("TBD")
+    }).map(|g| {
         let markets: Vec<MarketView> = g.kalshi_markets.iter().map(|m| {
             let fair_value = g.fair_value_for_market(m);
             let edge = match (fair_value, m.yes_mid) {
@@ -122,15 +142,28 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
             phase: format!("{:?}", g.phase),
             status_detail: g.status_detail.clone(),
             espn_home_win_prob: g.espn_home_win_prob,
+            start_time_ts: g.start_time_ts,
             markets,
         }
     }).collect();
-    // Sort by phase (Live first, then Break, PreGame, etc.)
-    games.sort_by_key(|g| match g.phase.as_str() {
-        "Live" => 0,
-        "Break" | "Halftime" => 1,
-        "PreGame" => 2,
-        _ => 3,
+    // Sort: Live/Break first, then by start time (soonest first), Final last
+    games.sort_by(|a, b| {
+        let phase_ord = |p: &str| -> u8 {
+            match p {
+                "Live" => 0,
+                "Break" | "Halftime" => 1,
+                "PreGame" => 2,
+                "Final" => 4,
+                _ => 3,
+            }
+        };
+        let pa = phase_ord(&a.phase);
+        let pb = phase_ord(&b.phase);
+        pa.cmp(&pb).then_with(|| {
+            let ta = a.start_time_ts.unwrap_or(i64::MAX);
+            let tb = b.start_time_ts.unwrap_or(i64::MAX);
+            ta.cmp(&tb)
+        })
     });
     Json(games)
 }
@@ -150,13 +183,51 @@ async fn api_risk(State(state): State<DashboardState>) -> impl IntoResponse {
 }
 
 async fn api_orders(State(state): State<DashboardState>) -> impl IntoResponse {
-    let rows = query_orders(&state.db_path).unwrap_or_default();
+    let mut rows = query_orders(&state.db_path).unwrap_or_default();
+    // Enrich with game names and live edge from state
+    let s = state.bot.lock().await;
+    for row in &mut rows {
+        if let Some(game) = s.game_state.get_by_kalshi_ticker(&row.ticker) {
+            row.game_name = Some(format!("{} vs {}", game.away_team, game.home_team));
+            // Compute perceived edge: fair_value vs order price
+            if let Some(market) = game.kalshi_markets.iter().find(|m| m.ticker == row.ticker) {
+                if let Some(fv) = game.fair_value_for_market(market) {
+                    let order_prob = row.price_cents as f64 / 100.0;
+                    // For buy YES: edge = fv - price (buying cheap is positive)
+                    // For buy NO: edge = (1-fv) - price
+                    // For sell: flip sign
+                    let is_yes = row.side.eq_ignore_ascii_case("yes");
+                    let fair_for_side = if is_yes { fv } else { 1.0 - fv };
+                    let raw_edge = fair_for_side - order_prob;
+                    row.edge = Some(if row.action.eq_ignore_ascii_case("buy") { raw_edge } else { -raw_edge });
+                }
+            }
+        }
+    }
     Json(rows)
 }
 
 async fn api_fills(State(state): State<DashboardState>) -> impl IntoResponse {
-    let rows = query_fills(&state.db_path).unwrap_or_default();
+    let mut rows = query_fills(&state.db_path).unwrap_or_default();
+    // Enrich with game names from live state
+    let s = state.bot.lock().await;
+    for row in &mut rows {
+        if let Some(game) = s.game_state.get_by_kalshi_ticker(&row.ticker) {
+            row.game_name = Some(format!("{} vs {}", game.away_team, game.home_team));
+        }
+    }
     Json(rows)
+}
+
+async fn api_edge(State(state): State<DashboardState>) -> impl IntoResponse {
+    let summary = query_edge_summary(&state.db_path).unwrap_or(EdgeSummary {
+        total_edge_dollars: 0.0,
+        total_fills: 0,
+        avg_edge_bps: 0.0,
+        today_edge_dollars: 0.0,
+        today_fills: 0,
+    });
+    Json(summary)
 }
 
 // --- SQLite queries (read-only connection) ---
@@ -174,6 +245,7 @@ fn query_orders(db_path: &str) -> anyhow::Result<Vec<OrderRow>> {
         Ok(OrderRow {
             order_id: row.get(0)?,
             ticker: row.get(1)?,
+            game_name: None,
             strategy: row.get(2)?,
             action: row.get(3)?,
             side: row.get(4)?,
@@ -181,6 +253,7 @@ fn query_orders(db_path: &str) -> anyhow::Result<Vec<OrderRow>> {
             count: row.get(6)?,
             status: row.get(7)?,
             created_at: row.get(8)?,
+            edge: None,
         })
     })?.filter_map(|r| r.ok()).collect();
     Ok(rows)
@@ -192,23 +265,54 @@ fn query_fills(db_path: &str) -> anyhow::Result<Vec<FillRow>> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     let mut stmt = conn.prepare(
-        "SELECT trade_id, order_id, ticker, side, action, price_cents, count, COALESCE(fee_cents,0), filled_at
-         FROM fills ORDER BY filled_at DESC LIMIT 50"
+        "SELECT f.trade_id, f.order_id, f.ticker, f.side, f.action, f.price_cents, f.count, COALESCE(f.fee_cents,0), f.filled_at, COALESCE(o.strategy,''), o.edge_bps
+         FROM fills f LEFT JOIN orders o ON f.order_id = o.order_id
+         ORDER BY f.filled_at DESC LIMIT 200"
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(FillRow {
             trade_id: row.get(0)?,
             order_id: row.get(1)?,
             ticker: row.get(2)?,
+            game_name: None,
+            strategy: row.get(9)?,
             side: row.get(3)?,
             action: row.get(4)?,
             price_cents: row.get(5)?,
             count: row.get(6)?,
             fee_cents: row.get(7)?,
             filled_at: row.get(8)?,
+            edge_bps: row.get(10)?,
         })
     })?.filter_map(|r| r.ok()).collect();
     Ok(rows)
+}
+
+fn query_edge_summary(db_path: &str) -> anyhow::Result<EdgeSummary> {
+    let conn = Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    // All-time
+    let (total_edge_dollars, total_fills, avg_edge_bps): (f64, i64, f64) = conn.query_row(
+        "SELECT COALESCE(SUM(o.edge_bps / 10000.0 * f.price_cents * f.count / 100.0), 0.0),
+                COUNT(*),
+                COALESCE(AVG(o.edge_bps), 0.0)
+         FROM fills f JOIN orders o ON f.order_id = o.order_id
+         WHERE o.edge_bps IS NOT NULL",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    // Today
+    let (today_edge_dollars, today_fills): (f64, i64) = conn.query_row(
+        "SELECT COALESCE(SUM(o.edge_bps / 10000.0 * f.price_cents * f.count / 100.0), 0.0),
+                COUNT(*)
+         FROM fills f JOIN orders o ON f.order_id = o.order_id
+         WHERE o.edge_bps IS NOT NULL AND date(f.filled_at) = date('now')",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(EdgeSummary { total_edge_dollars, total_fills, avg_edge_bps, today_edge_dollars, today_fills })
 }
 
 // --- Server ---
@@ -225,6 +329,7 @@ pub async fn serve(bot_state: SharedState, db_path: &str, port: u16) -> anyhow::
         .route("/api/risk", get(api_risk))
         .route("/api/orders", get(api_orders))
         .route("/api/fills", get(api_fills))
+        .route("/api/edge", get(api_edge))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");

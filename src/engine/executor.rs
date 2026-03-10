@@ -253,6 +253,7 @@ pub async fn execute_signal(
             let price_cents = order_req.yes_price.or(order_req.no_price).unwrap_or(0);
             {
                 let mut s = state.lock().await;
+                let edge_bps = Some(signal.edge_after_fees * 10000.0);
                 let _ = s.logger.log_order(
                     &resp.order.order_id,
                     &signal.kalshi_ticker,
@@ -262,6 +263,7 @@ pub async fn execute_signal(
                     price_cents,
                     order_req.count,
                     &resp.order.status,
+                    edge_bps,
                 );
 
                 // Track CLV orders for closing-line validation

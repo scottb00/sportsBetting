@@ -111,6 +111,8 @@ async fn main() -> Result<()> {
         tracing::info!("Loaded {} positions from Kalshi", positions.len());
     }
     handlers::sync_orders(&state, &kalshi_rest).await;
+    // Backfill fills from Kalshi REST (catches any missed WS fill events)
+    handlers::sync_fills(&state, &kalshi_rest).await;
 
     // --- Connect WebSockets ---
     let (mut kalshi_rx, kalshi_ws_handle) = connect_kalshi_ws(&auth, &config, &state).await?;
@@ -158,6 +160,7 @@ async fn main() -> Result<()> {
             }
             _ = order_sync_interval.tick() => {
                 handlers::sync_orders(&state, &kalshi_rest).await;
+                handlers::sync_fills(&state, &kalshi_rest).await;
             }
             Some(event) = async {
                 match &mut kalshi_rx {
