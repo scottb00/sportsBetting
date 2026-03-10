@@ -4,3 +4,4 @@ config.toml
 trades.db
 market_mappings.json
 bot_debug.log
+bot.log
