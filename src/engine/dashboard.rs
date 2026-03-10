@@ -8,6 +8,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::engine::bot::{SharedState, SharedLogger};
+use crate::engine::risk::RiskManager;
 
 /// Shared state for the dashboard server.
 #[derive(Clone)]
@@ -52,6 +53,14 @@ struct MarketView {
     exposure: f64,
     /// Net position: positive = holding YES contracts, negative = holding NO contracts
     position: i64,
+    /// ALO price we'd post at (cents)
+    alo_price: Option<i64>,
+    /// Edge before maker fees
+    edge_raw: Option<f64>,
+    /// Edge after maker fees
+    edge_after_fees: Option<f64>,
+    /// Strategy eval result: "signal", "near_miss", "fees_eaten", "no_book", "resting_order", "no_fair"
+    eval_result: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -144,6 +153,39 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
                 }
                 _ => (None, None),
             };
+            // Compute strategy eval: ALO price, edge after fees, result
+            let has_resting = s.order_manager.has_resting_order(&m.ticker);
+            let (alo_price, edge_raw, edge_after_fees, eval_result) = if has_resting {
+                (None, None, None, Some("resting_order".to_string()))
+            } else if let (Some(fv), Some(bid), Some(ask), Some(mid)) = (fair_value, prices.bid, prices.ask, prices.mid) {
+                let bid_i = bid as i64;
+                let ask_i = ask as i64;
+                if bid_i <= 0 || ask_i >= 100 || bid_i >= ask_i {
+                    (None, None, None, Some("bad_book".to_string()))
+                } else {
+                    let mid_prob = mid / 100.0;
+                    let buying_yes = fv > mid_prob;
+                    let price = if buying_yes {
+                        (ask_i - 1).max(1)
+                    } else {
+                        (100 - bid_i - 1).max(1)
+                    };
+                    let order_prob = price as f64 / 100.0;
+                    let raw = if buying_yes { fv - order_prob } else { (1.0 - fv) - order_prob };
+                    if raw <= 0.0 {
+                        (Some(price), Some(raw), None, Some("no_edge".to_string()))
+                    } else {
+                        let fee = RiskManager::maker_fee(1, price) / 100.0;
+                        let net = raw - fee;
+                        let result = if net >= 0.015 { "signal" } else if net > 0.0 { "near_miss" } else { "fees_eaten" };
+                        (Some(price), Some(raw), Some(net), Some(result.to_string()))
+                    }
+                }
+            } else {
+                let reason = if fair_value.is_none() { "no_fair" } else { "no_book" };
+                (None, None, None, Some(reason.to_string()))
+            };
+
             MarketView {
                 ticker: m.ticker.clone(),
                 is_home: m.is_home,
@@ -154,9 +196,13 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
                 edge,
                 edge_side,
                 volume: m.volume,
-                has_resting_order: s.order_manager.has_resting_order(&m.ticker),
+                has_resting_order: has_resting,
                 exposure: s.order_manager.committed_contracts(&m.ticker) as f64,
                 position: s.risk.net_position(&m.ticker),
+                alo_price,
+                edge_raw,
+                edge_after_fees,
+                eval_result,
             }
         }).collect();
 
@@ -280,6 +326,11 @@ async fn api_fills(State(state): State<DashboardState>) -> impl IntoResponse {
     Json(rows)
 }
 
+async fn api_break_evals(State(state): State<DashboardState>) -> impl IntoResponse {
+    let s = state.bot.lock().await;
+    Json(s.break_eval_log.iter().cloned().collect::<Vec<_>>())
+}
+
 async fn api_edge(State(state): State<DashboardState>) -> impl IntoResponse {
     let log = state.logger.lock().unwrap();
     let (total_edge_dollars, total_fills, avg_edge_bps) =
@@ -378,6 +429,7 @@ pub async fn serve(bot_state: SharedState, logger: SharedLogger, db_path: &str, 
         .route("/api/orders", get(api_orders))
         .route("/api/fills", get(api_fills))
         .route("/api/edge", get(api_edge))
+        .route("/api/break_evals", get(api_break_evals))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");

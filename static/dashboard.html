@@ -149,6 +149,28 @@
   </table>
   <div class="pagination" id="games-pagination"></div>
 
+  <h2>Break Evaluations</h2>
+  <table id="break-evals-table">
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Game</th>
+        <th>Score</th>
+        <th>Status</th>
+        <th>Ticker</th>
+        <th>Side</th>
+        <th class="num">Bid/Ask</th>
+        <th class="num">Fair</th>
+        <th class="num">ALO Price</th>
+        <th class="num">Edge</th>
+        <th class="num">Edge-Fees</th>
+        <th>Result</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <div class="pagination" id="breakEvals-pagination"></div>
+
   <h2>Recent Orders</h2>
   <div class="filters" id="order-filters">
     <div class="filter-group">
@@ -256,7 +278,7 @@
 const $ = s => document.querySelector(s);
 
 // Pagination state per table
-const pageState = { games: { page: 0, perPage: 20 }, orders: { page: 0, perPage: 20 }, fills: { page: 0, perPage: 20 } };
+const pageState = { games: { page: 0, perPage: 20 }, breakEvals: { page: 0, perPage: 20 }, orders: { page: 0, perPage: 20 }, fills: { page: 0, perPage: 20 } };
 
 function paginate(items, key) {
   const s = pageState[key];
@@ -281,6 +303,17 @@ function renderPagination(key, info) {
   `;
 }
 
+function fmtEvalBadge(result, edgeAfterFees, aloPrice) {
+  if (!result) return '';
+  const labels = { signal: 'SIGNAL', near_miss: 'NEAR MISS', fees_eaten: 'FEES', no_edge: 'NO EDGE', resting_order: 'RESTING', no_book: 'NO BOOK', no_fair: 'NO FAIR', bad_book: 'BAD BOOK' };
+  const colors = { signal: '#3fb950', near_miss: '#f0883e', fees_eaten: '#8b949e', no_edge: '#8b949e', resting_order: '#a371f7', no_book: '#484f58', no_fair: '#484f58', bad_book: '#484f58' };
+  const label = labels[result] || result;
+  const color = colors[result] || '#484f58';
+  let detail = '';
+  if (edgeAfterFees != null) detail += ` ${(edgeAfterFees * 100).toFixed(1)}%`;
+  if (aloPrice != null) detail += ` @${aloPrice}c`;
+  return `<span style="color:${color};font-size:10px;font-weight:600">${label}${detail}</span>`;
+}
 function pnlClass(v) { return v > 0 ? 'positive' : v < 0 ? 'negative' : 'neutral'; }
 function fmt$(v) { return (v >= 0 ? '+' : '') + '$' + v.toFixed(2); }
 function fmtPct(v) { return v != null ? (v * 100).toFixed(1) + '%' : '-'; }
@@ -352,11 +385,12 @@ async function fetchJson(url) {
 }
 
 async function refresh() {
-  const [risk, games, orders, fills] = await Promise.all([
+  const [risk, games, orders, fills, breakEvals] = await Promise.all([
     fetchJson('/api/risk'),
     fetchJson('/api/games'),
     fetchJson('/api/orders'),
     fetchJson('/api/fills'),
+    fetchJson('/api/break_evals'),
   ]);
 
   // Risk bar
@@ -432,7 +466,17 @@ async function refresh() {
         return { qty, side, contractTeam, cls: m.position > 0 ? 'pos-yes' : 'pos-no' };
       });
       const dt = gameDateTime(g.start_time_ts);
-      return { ...g, _hm: hm, _bid: bid, _ask: ask, _edge: edge, _edgeSide: edgeSide, _vol: vol, _hasOrder: hasOrder, _posLabels: posLabels, _dt: dt };
+      // Best eval result across markets (prefer signal > near_miss > others)
+      const evalPriority = { signal: 0, near_miss: 1, fees_eaten: 2, no_edge: 3, resting_order: 4, no_book: 5, no_fair: 6, bad_book: 7 };
+      const bestEval = g.markets.reduce((best, m) => {
+        if (!m.eval_result) return best;
+        if (!best || (evalPriority[m.eval_result] ?? 99) < (evalPriority[best.eval_result] ?? 99)) return m;
+        return best;
+      }, null);
+      const evalResult = bestEval ? bestEval.eval_result : null;
+      const evalEdgeAfterFees = bestEval ? bestEval.edge_after_fees : null;
+      const evalAloPrice = bestEval ? bestEval.alo_price : null;
+      return { ...g, _hm: hm, _bid: bid, _ask: ask, _edge: edge, _edgeSide: edgeSide, _vol: vol, _hasOrder: hasOrder, _posLabels: posLabels, _dt: dt, _evalResult: evalResult, _evalEdgeAfterFees: evalEdgeAfterFees, _evalAloPrice: evalAloPrice };
     }).filter(g => {
       if (fPhase && g.phase !== fPhase) return false;
       if (fDate && g._dt.date !== fDate) return false;
@@ -456,7 +500,7 @@ async function refresh() {
           <td><span class="phase phase-${g.phase}">${g.status_detail || g.phase}</span></td>
           <td class="num">${fmtPct(g.espn_home_win_prob)}</td>
           <td class="num">${g._bid != null || g._ask != null ? (g._bid != null ? g._bid.toFixed(0) : '-') + ' / ' + (g._ask != null ? g._ask.toFixed(0) : '-') : '-'}</td>
-          <td class="num">${fmtEdge(g._edge)}</td>
+          <td class="num">${fmtEdge(g._edge)}${(g.phase === 'Break' || g.phase === 'Halftime' || g.phase === 'Live') && g._evalResult ? '<br>' + fmtEvalBadge(g._evalResult, g._evalEdgeAfterFees, g._evalAloPrice) : ''}</td>
           <td class="num">${g._vol > 0 ? g._vol.toLocaleString() : '-'}</td>
           <td>${g._posLabels.length > 0 ? g._posLabels.map(p => `<span class="pos-badge ${p.cls}">${p.qty} ${p.side} ${p.contractTeam}</span>`).join(' ') : '-'}</td>
           <td>${g._hasOrder ? '<span class="order-dot"></span>' : ''}</td>
@@ -464,6 +508,48 @@ async function refresh() {
       }).join('');
     }
     renderPagination('games', gp);
+  }
+
+  // Break Evaluations
+  if (breakEvals) {
+    const tbody = $('#break-evals-table tbody');
+    // Flatten: one row per market per break eval
+    const rows = [];
+    for (const ev of breakEvals) {
+      if (ev.markets.length === 0) {
+        rows.push({ ...ev, m: null });
+      } else {
+        for (const m of ev.markets) {
+          rows.push({ ...ev, m });
+        }
+      }
+    }
+    const bp = paginate(rows, 'breakEvals');
+    if (rows.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="12" class="empty">No break evaluations yet</td></tr>';
+    } else {
+      tbody.innerHTML = bp.rows.map(r => {
+        const m = r.m;
+        const resultColor = r.result.startsWith('SIGNAL') ? '#3fb950' : '#f85149';
+        const edgeRaw = m && m.edge_raw != null ? `${(m.edge_raw * 100).toFixed(1)}%` : '-';
+        const edgeNet = m && m.edge_after_fees != null ? `<span class="${m.edge_after_fees >= 0.015 ? 'edge-pos' : m.edge_after_fees > 0 ? '' : 'edge-neg'}">${(m.edge_after_fees * 100).toFixed(1)}%</span>` : '-';
+        return `<tr>
+          <td style="font-size:11px">${shortTime(r.timestamp)}</td>
+          <td>${r.away_team} @ ${r.home_team}</td>
+          <td class="num">${r.score}</td>
+          <td><span class="phase phase-Break">${r.status || 'Break'}</span></td>
+          <td style="font-size:11px">${m ? m.ticker : '-'}</td>
+          <td>${m && m.side ? `<span class="side-${m.side.toLowerCase()}">${m.side}</span>` : '-'}</td>
+          <td class="num">${m ? (m.bid != null ? m.bid.toFixed(0) : '-') + '/' + (m.ask != null ? m.ask.toFixed(0) : '-') : '-'}</td>
+          <td class="num">${m && m.fair != null ? (m.fair * 100).toFixed(1) + '%' : '-'}</td>
+          <td class="num">${m && m.alo_price != null ? m.alo_price + 'c' : '-'}</td>
+          <td class="num">${edgeRaw}</td>
+          <td class="num">${edgeNet}</td>
+          <td><span style="color:${resultColor};font-size:11px;font-weight:600">${r.result}</span></td>
+        </tr>`;
+      }).join('');
+    }
+    renderPagination('breakEvals', bp);
   }
 
   // Orders

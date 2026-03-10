@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
-use crate::engine::bot::{BotState, SharedState, SharedLogger, StrategyRegistry};
+use crate::engine::bot::{BotState, BreakEvalLog, BreakMarketEval, SharedState, SharedLogger, StrategyRegistry};
 use crate::engine::order_manager::{OrderManager, OrderSignal};
+use crate::engine::risk::RiskManager;
 use crate::kalshi::rest::KalshiRestClient;
 
 /// Run all strategies and collect order signals.
 /// Evaluates across ALL markets per game, picks the best signal per game.
 pub fn evaluate_strategies(
-    state: &BotState,
+    state: &mut BotState,
     registry: &StrategyRegistry,
 ) -> Vec<OrderSignal> {
     let mut signals = Vec::new();
@@ -71,8 +72,10 @@ pub fn evaluate_strategies(
             })
             .sum();
 
-        // Detailed break logging
-        if game.phase.is_break() {
+        // Detailed break logging + build market eval data for dashboard
+        let is_break = game.phase.is_break();
+        let mut market_evals: Vec<BreakMarketEval> = Vec::new();
+        if is_break {
             let home_score = game.home_score.unwrap_or(0);
             let away_score = game.away_score.unwrap_or(0);
             for market in &game.kalshi_markets {
@@ -88,6 +91,41 @@ pub fn evaluate_strategies(
                     prices.bid, prices.ask, kalshi_mid,
                     fair, market.volume,
                 );
+
+                // Compute ALO price and edge for the eval log
+                let (alo_price, edge_raw, edge_after_fees, side) =
+                    if let (Some(fv), Some(bid), Some(ask), Some(mid)) = (fair, prices.bid, prices.ask, prices.mid) {
+                        let bid_i = bid as i64;
+                        let ask_i = ask as i64;
+                        let mid_prob = mid / 100.0;
+                        if bid_i > 0 && ask_i < 100 && bid_i < ask_i {
+                            let buying_yes = fv > mid_prob;
+                            let price = if buying_yes { (ask_i - 1).max(1) } else { (100 - bid_i - 1).max(1) };
+                            let order_prob = price as f64 / 100.0;
+                            let raw = if buying_yes { fv - order_prob } else { (1.0 - fv) - order_prob };
+                            let fee = RiskManager::maker_fee(1, price) / 100.0;
+                            let net = if raw > 0.0 { raw - fee } else { raw };
+                            let side_str = if buying_yes { "YES" } else { "NO" };
+                            (Some(price), Some(raw), Some(net), Some(side_str.to_string()))
+                        } else {
+                            (None, None, None, None)
+                        }
+                    } else {
+                        (None, None, None, None)
+                    };
+
+                market_evals.push(BreakMarketEval {
+                    ticker: market.ticker.clone(),
+                    is_home: market.is_home,
+                    bid: prices.bid,
+                    ask: prices.ask,
+                    mid: prices.mid,
+                    fair,
+                    alo_price,
+                    edge_raw,
+                    edge_after_fees,
+                    side,
+                });
             }
         }
 
@@ -103,6 +141,12 @@ pub fn evaluate_strategies(
                 state.order_manager.has_resting_order(&m.ticker)
             });
             if has_resting {
+                if is_break {
+                    tracing::info!(
+                        "BREAK SKIP: {} v {} | {} blocked by resting order",
+                        game.away_team, game.home_team, strategy.name(),
+                    );
+                }
                 continue;
             }
 
@@ -121,7 +165,35 @@ pub fn evaluate_strategies(
 
         if let Some(mut signal) = best_signal {
             signal.max_contracts = Some(contracts_remaining);
+            if is_break {
+                // Log break eval with signal
+                state.break_eval_log.push_front(BreakEvalLog {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    away_team: game.away_team.clone(),
+                    home_team: game.home_team.clone(),
+                    score: format!("{}-{}", game.away_score.unwrap_or(0), game.home_score.unwrap_or(0)),
+                    status: game.status_detail.clone(),
+                    markets: market_evals,
+                    result: format!("SIGNAL: {} {:?} {}c", signal.kalshi_ticker, signal.side, signal.price_cents),
+                });
+                if state.break_eval_log.len() > 100 { state.break_eval_log.pop_back(); }
+            }
             signals.push(signal);
+        } else if is_break {
+            tracing::info!(
+                "BREAK RESULT: {} v {} | no signal generated",
+                game.away_team, game.home_team,
+            );
+            state.break_eval_log.push_front(BreakEvalLog {
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                away_team: game.away_team.clone(),
+                home_team: game.home_team.clone(),
+                score: format!("{}-{}", game.away_score.unwrap_or(0), game.home_score.unwrap_or(0)),
+                status: game.status_detail.clone(),
+                markets: market_evals,
+                result: "NO_SIGNAL".to_string(),
+            });
+            if state.break_eval_log.len() > 100 { state.break_eval_log.pop_back(); }
         }
     }
 
@@ -250,40 +322,49 @@ pub async fn execute_signal(
     match kalshi_rest.create_order(&order_req).await {
         Ok(resp) => {
             let price_cents = order_req.yes_price.or(order_req.no_price).unwrap_or(0);
+            let edge_bps = Some(signal.edge_after_fees * 10000.0);
+            let action_str = format!("{:?}", order_req.action);
+            let side_str = format!("{:?}", order_req.side);
+
+            // Collect game_info under state lock, then drop before logging
+            let game_info = {
+                let s = state.lock().await;
+                crate::engine::logger::GameInfo::from_game_state(&s.game_state, &signal.kalshi_ticker)
+            };
+
+            // Log under logger lock only (no state lock held)
+            {
+                let log = logger.lock().unwrap();
+                let _ = log.log_order(
+                    &resp.order.order_id,
+                    &signal.kalshi_ticker,
+                    &signal.strategy,
+                    &action_str,
+                    &side_str,
+                    price_cents,
+                    order_req.count,
+                    &resp.order.status,
+                    edge_bps,
+                    game_info.as_ref(),
+                );
+            }
+
+            // Apply state updates under state lock only (no logger lock)
             {
                 let mut s = state.lock().await;
-                let edge_bps = Some(signal.edge_after_fees * 10000.0);
-                let game_info = crate::engine::logger::GameInfo::from_game_state(&s.game_state, &signal.kalshi_ticker);
-
-                // Log under separate logger lock
-                {
-                    let log = logger.lock().unwrap();
-                    let _ = log.log_order(
-                        &resp.order.order_id,
-                        &signal.kalshi_ticker,
-                        &signal.strategy,
-                        &format!("{:?}", order_req.action),
-                        &format!("{:?}", order_req.side),
-                        price_cents,
-                        order_req.count,
-                        &resp.order.status,
-                        edge_bps,
-                        game_info.as_ref(),
-                    );
-                }
 
                 // Track CLV orders for closing-line validation
                 if signal.strategy == "clv_hunter" {
                     s.order_manager.record_clv_order(
                         &resp.order.order_id,
                         &signal.kalshi_ticker,
-                        &format!("{:?}", order_req.side),
+                        &side_str,
                         price_cents,
                     );
                 }
 
                 s.order_manager.record_placed_order(resp.order, order_req.count, &signal.strategy);
-            } // lock dropped
+            }
 
             tracing::info!("Order placed successfully");
 

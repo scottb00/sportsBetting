@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,12 +17,42 @@ use crate::espn::types::GameInfo;
 use crate::kalshi::orderbook::LocalOrderBook;
 use crate::strategies::Strategy;
 
+/// One row in the break evaluation log.
+#[derive(Clone, serde::Serialize)]
+pub struct BreakEvalLog {
+    pub timestamp: String,
+    pub away_team: String,
+    pub home_team: String,
+    pub score: String,
+    pub status: String,
+    /// Per-market eval details
+    pub markets: Vec<BreakMarketEval>,
+    /// Overall result for this game: "PLACED", "DRY_RUN", "NO_SIGNAL", or skip reason
+    pub result: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct BreakMarketEval {
+    pub ticker: String,
+    pub is_home: bool,
+    pub bid: Option<f64>,
+    pub ask: Option<f64>,
+    pub mid: Option<f64>,
+    pub fair: Option<f64>,
+    pub alo_price: Option<i64>,
+    pub edge_raw: Option<f64>,
+    pub edge_after_fees: Option<f64>,
+    pub side: Option<String>,
+}
+
 /// All shared mutable state for the bot.
 pub struct BotState {
     pub game_state: GameStateManager,
     pub order_books: HashMap<String, LocalOrderBook>,
     pub risk: RiskManager,
     pub order_manager: OrderManager,
+    /// Ring buffer of recent break evaluations (newest first).
+    pub break_eval_log: VecDeque<BreakEvalLog>,
 }
 
 impl BotState {
@@ -78,6 +108,7 @@ pub fn create_bot_state(config: &Config) -> Result<(BotState, TradeLogger, Marke
             config.risk.min_edge_threshold,
         ),
         order_manager: OrderManager::new(),
+        break_eval_log: VecDeque::new(),
     };
     Ok((state, logger, market_mapper))
 }

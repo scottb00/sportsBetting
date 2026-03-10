@@ -28,6 +28,14 @@ pub async fn handle_kalshi_event(
                 fill.market_ticker, fill.action, fill.side, fill.count,
                 fill.yes_price, fill.no_price,
             );
+
+            // In-memory dedup: skip if this fill was already processed (e.g. by REST fill sync)
+            if s.order_manager.is_fill_processed(&fill.trade_id) {
+                tracing::debug!("Skipping duplicate WS fill {}", fill.trade_id);
+                return;
+            }
+            s.order_manager.mark_fill_processed(&fill.trade_id);
+
             // Use the price for the side we're trading
             let price_cents = if fill.side == "yes" { fill.yes_price } else { fill.no_price };
             s.risk.record_fill(

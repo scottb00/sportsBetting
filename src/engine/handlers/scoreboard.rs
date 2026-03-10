@@ -79,11 +79,12 @@ pub async fn handle_scoreboard_tick(
 
     // Re-acquire lock for strategy evaluation and logging
     let mut s = state.lock().await;
-    // Clear in-flight at tick start — its only purpose is preventing double-sends within a tick
-    s.order_manager.clear_all_in_flight();
+    // Prune stale in-flight entries (older than 60s) instead of blanket clearing,
+    // so API calls still in progress from a previous tick keep their guard.
+    s.order_manager.prune_stale_in_flight(std::time::Duration::from_secs(60));
     log_game_summary(&s);
 
-    let signals = evaluate_strategies(&s, registry);
+    let signals = evaluate_strategies(&mut s, registry);
     drop(s);
 
     let mut placed = Vec::new();

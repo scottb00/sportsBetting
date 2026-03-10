@@ -73,13 +73,13 @@ fn evaluate_market(
     if edge_after_fees < min_edge {
         if edge_after_fees > 0.0 {
             // Near-miss: positive edge after fees but below threshold
-            tracing::debug!(
+            tracing::info!(
                 "{} near-miss: {} edge_after_fees={:.4} < min_edge={:.4} (edge={:.4}, fair={:.4}, price={}c)",
                 strategy_name, market.ticker, edge_after_fees, min_edge, edge, fair_value, price_cents
             );
         } else {
             // Fees eat the edge entirely
-            tracing::debug!(
+            tracing::info!(
                 "{} fees-eaten: {} edge={:.4} but edge_after_fees={:.4} (fee={:.4}, fair={:.4}, price={}c)",
                 strategy_name, market.ticker, edge, edge_after_fees, fee_per_contract, fair_value, price_cents
             );
