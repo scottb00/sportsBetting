@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderBookSnapshot {
+    #[serde(default)]
     pub yes: Vec<PriceLevel>,
+    #[serde(default)]
     pub no: Vec<PriceLevel>,
 }
 

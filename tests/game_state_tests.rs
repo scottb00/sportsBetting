@@ -402,9 +402,10 @@ fn signal_to_order_passes_expiration_in_seconds() {
         post_only: true,
         expiration_ts: Some(1772996400),
         edge_after_fees: 0.05,
+        max_contracts: None,
     };
 
-    let order = OrderManager::signal_to_order(&signal);
+    let order = OrderManager::signal_to_order(&signal).unwrap();
     // expiration_ts should pass through as-is (seconds, NOT multiplied by 1000)
     assert_eq!(order.expiration_ts, Some(1772996400));
 }
@@ -424,9 +425,10 @@ fn signal_to_order_none_expiration() {
         post_only: true,
         expiration_ts: None,
         edge_after_fees: 0.05,
+        max_contracts: None,
     };
 
-    let order = OrderManager::signal_to_order(&signal);
+    let order = OrderManager::signal_to_order(&signal).unwrap();
     assert_eq!(order.expiration_ts, None);
 }
 
@@ -454,7 +456,7 @@ fn has_resting_order_tracks_correctly() {
         created_time: "2026-03-09T18:00:00Z".to_string(),
     };
 
-    om.record_placed_order(order);
+    om.record_placed_order(order, 10);
 
     assert!(om.has_resting_order("TICKER-A"));
     assert!(!om.has_resting_order("TICKER-B"));
@@ -480,7 +482,7 @@ fn resting_order_cleared_after_remove() {
         created_time: "2026-03-09T18:00:00Z".to_string(),
     };
 
-    om.record_placed_order(order);
+    om.record_placed_order(order, 10);
     assert!(om.has_resting_order("TICKER-A"));
 
     om.remove_order("order-1");

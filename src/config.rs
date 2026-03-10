@@ -73,6 +73,7 @@ fn default_min_volume() -> i64 { 20_000 }
 fn default_min_price_cents() -> f64 { 10.0 }
 fn default_max_price_cents() -> f64 { 90.0 }
 fn default_order_ttl_secs() -> u64 { 120 }
+fn default_max_contracts_per_game() -> i64 { 20 }
 
 #[derive(Debug, Deserialize)]
 pub struct StrategyConfig {
@@ -92,6 +93,9 @@ pub struct StrategyConfig {
     /// Defaults to 120 seconds (2 minutes).
     #[serde(default = "default_order_ttl_secs")]
     pub order_ttl_secs: u64,
+    /// Hard cap on total contracts per game (across all tickers/orders). Default: 20.
+    #[serde(default = "default_max_contracts_per_game")]
+    pub max_contracts_per_game: i64,
 }
 
 #[derive(Debug, Deserialize)]

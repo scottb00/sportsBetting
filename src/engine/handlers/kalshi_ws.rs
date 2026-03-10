@@ -38,14 +38,18 @@ pub async fn handle_kalshi_event(
         }
         KalshiWsEvent::Fill(fill) => {
             tracing::info!(
-                "FILL: {} {:?} {} contracts @ {} yes_price",
-                fill.market_ticker, fill.action, fill.count, fill.yes_price
+                "FILL: {} {} {} {} contracts @ yes={} no={}",
+                fill.market_ticker, fill.action, fill.side, fill.count,
+                fill.yes_price, fill.no_price,
             );
-            let price = fill.yes_price.max(fill.no_price) as f64 / 100.0;
-            let exposure_change = fill.count as f64 * price;
-            s.risk.record_fill(exposure_change, 0.0);
-            // Remove from local cache; next sync will reconcile with Kalshi
-            s.order_manager.remove_order(&fill.order_id);
+            // Use the price for the side we're trading
+            let price_cents = if fill.side == "yes" { fill.yes_price } else { fill.no_price };
+            s.risk.record_fill(
+                &fill.market_ticker, &fill.action, &fill.side,
+                price_cents, fill.count,
+            );
+            // Decrement remaining count; only removes order when fully filled
+            s.order_manager.record_fill(&fill.order_id, fill.count);
             let _ = s.logger.log_fill(
                 &fill.trade_id, &fill.order_id, &fill.market_ticker,
                 &fill.side, &fill.action, fill.yes_price, fill.count, 0.0,

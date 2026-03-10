@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::engine::bot::{SharedState, populate_game_states, fetch_and_apply_summary};
 use crate::engine::market_prep::{
     kalshi_date_tag, build_espn_for_matching, build_kalshi_for_matching,
-    build_kalshi_volume, filter_events_for_today, fetch_all_kalshi_cbb_events,
+    build_kalshi_volume, filter_events_for_dates, fetch_all_kalshi_cbb_events,
 };
 use crate::espn::poller::EspnPoller;
 use crate::kalshi::rest::KalshiRestClient;
@@ -17,9 +17,12 @@ pub async fn discover_new_markets(
     ws_handle: Option<&KalshiWsHandle>,
 ) {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let date_tag = kalshi_date_tag(&today);
+    let tomorrow = (chrono::Local::now() + chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    let date_tags = vec![kalshi_date_tag(&today), kalshi_date_tag(&tomorrow)];
     let mut kalshi_events = fetch_all_kalshi_cbb_events(kalshi_rest).await;
-    filter_events_for_today(&mut kalshi_events, &date_tag);
+    filter_events_for_dates(&mut kalshi_events, &date_tags);
 
     let kalshi_for_matching = build_kalshi_for_matching(&kalshi_events);
     let kalshi_volume = build_kalshi_volume(&kalshi_events);

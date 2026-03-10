@@ -85,10 +85,10 @@ pub async fn fetch_all_kalshi_cbb_events(
     }
 }
 
-/// Filter Kalshi events to today's date tag (KXNCAAMBGAME) plus all conference tournaments.
-pub fn filter_events_for_today(events: &mut GetEventsResponse, date_tag: &str) {
+/// Filter Kalshi events to matching date tags (KXNCAAMBGAME) plus all conference tournaments.
+pub fn filter_events_for_dates(events: &mut GetEventsResponse, date_tags: &[String]) {
     events.events.retain(|e| {
-        e.event_ticker.contains(date_tag)
+        date_tags.iter().any(|tag| e.event_ticker.contains(tag))
             || !e.event_ticker.starts_with("KXNCAAMBGAME")
     });
 }

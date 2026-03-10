@@ -163,6 +163,12 @@ impl GameStateManager {
     }
 
     /// Find game by any Kalshi ticker (O(1) via reverse index).
+    pub fn get_by_kalshi_ticker(&self, ticker: &str) -> Option<&GameState> {
+        let event_id = self.ticker_to_event.get(ticker)?;
+        self.games.get(event_id)
+    }
+
+    /// Find game mutably by any Kalshi ticker (O(1) via reverse index).
     pub fn get_mut_by_kalshi_ticker(&mut self, ticker: &str) -> Option<&mut GameState> {
         let event_id = self.ticker_to_event.get(ticker)?.clone();
         self.games.get_mut(&event_id)

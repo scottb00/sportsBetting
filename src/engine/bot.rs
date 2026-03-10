@@ -37,6 +37,8 @@ pub struct StrategyRegistry {
     pub min_price_cents: f64,
     pub max_price_cents: f64,
     pub order_ttl: Duration,
+    /// Hard cap on total contracts per game (across all tickers/orders).
+    pub max_contracts_per_game: i64,
 }
 
 /// Build initial BotState from config.
@@ -81,6 +83,7 @@ pub fn create_strategies(config: &Config) -> StrategyRegistry {
         min_price_cents: config.strategy.min_price_cents,
         max_price_cents: config.strategy.max_price_cents,
         order_ttl: Duration::from_secs(config.strategy.order_ttl_secs),
+        max_contracts_per_game: config.strategy.max_contracts_per_game,
     }
 }
 
@@ -92,7 +95,6 @@ pub fn populate_game_states(
 ) {
     for game in games {
         let kalshi_market_infos: Vec<_> = s.market_mapper.kalshi_markets_for_game(&game.event_id).to_vec();
-        let _kalshi_title = s.market_mapper.kalshi_title(&game.event_id).map(|t| t.to_string());
         let poly_token = s.market_mapper.polymarket_token(&game.event_id).map(|t| t.to_string());
         let poly_is_home = s.market_mapper.polymarket_is_home_team(&game.event_id);
 

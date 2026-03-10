@@ -13,7 +13,7 @@ use sports_betting::engine::dashboard;
 use sports_betting::engine::handlers;
 use sports_betting::engine::market_prep::{
     self, kalshi_date_tag, build_espn_for_matching, build_kalshi_for_matching,
-    build_kalshi_volume, filter_events_for_today,
+    build_kalshi_volume, filter_events_for_dates,
 };
 use sports_betting::engine::notifier::Notifier;
 use sports_betting::espn::poller::{EspnPoller, GameTracker};
@@ -80,7 +80,36 @@ async fn main() -> Result<()> {
     // Fetch initial ESPN win probs
     fetch_summaries_for_games(&espn_poller, &state).await;
 
-    // --- Sync resting orders from Kalshi on startup ---
+    // --- Load existing positions and sync resting orders from Kalshi on startup ---
+    {
+        // Fetch positions outside the lock first
+        let positions = match kalshi_rest.get_positions().await {
+            Ok(resp) => resp.market_positions,
+            Err(e) => {
+                tracing::warn!("Failed to load positions from Kalshi: {:?}", e);
+                vec![]
+            }
+        };
+        let mut s = state.lock().await;
+        for pos in &positions {
+            if pos.total_traded > 0 {
+                s.order_manager.record_startup_position(&pos.ticker, pos.total_traded);
+                tracing::info!(
+                    "Position: {} | traded={} yes={} no={} exposure={} pnl={}",
+                    pos.ticker, pos.total_traded, pos.yes_amount, pos.no_amount,
+                    pos.market_exposure, pos.realized_pnl,
+                );
+            }
+            // Seed risk manager with current positions for PnL tracking
+            if pos.yes_amount > 0 {
+                s.risk.seed_positions(&pos.ticker, "yes", pos.yes_avg_price, pos.yes_amount);
+            }
+            if pos.no_amount > 0 {
+                s.risk.seed_positions(&pos.ticker, "no", pos.no_avg_price, pos.no_amount);
+            }
+        }
+        tracing::info!("Loaded {} positions from Kalshi", positions.len());
+    }
     handlers::sync_orders(&state, &kalshi_rest).await;
 
     // --- Connect WebSockets ---
@@ -168,22 +197,22 @@ async fn fetch_initial_markets(
     });
     tracing::info!("Found {} Polymarket events", poly_events.len());
 
-    let date_tag = kalshi_date_tag(today);
+    let tomorrow = (chrono::Local::now() + chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    let date_tags = vec![kalshi_date_tag(today), kalshi_date_tag(&tomorrow)];
     let mut kalshi_events = market_prep::fetch_all_kalshi_cbb_events(kalshi_rest).await;
     let before = kalshi_events.events.len();
-    filter_events_for_today(&mut kalshi_events, &date_tag);
+    filter_events_for_dates(&mut kalshi_events, &date_tags);
     tracing::info!(
-        "Found {} Kalshi CBB events ({} total, filtered to {} + conference tournaments)",
-        kalshi_events.events.len(), before, date_tag,
+        "Found {} Kalshi CBB events ({} total, filtered to {:?} + conference tournaments)",
+        kalshi_events.events.len(), before, date_tags,
     );
 
     let espn_for_matching = build_espn_for_matching(&espn_games);
     let kalshi_for_matching = build_kalshi_for_matching(&kalshi_events);
     let kalshi_volume = build_kalshi_volume(&kalshi_events);
 
-    let tomorrow = (chrono::Local::now() + chrono::Duration::days(1))
-        .format("%Y-%m-%d")
-        .to_string();
     let poly_for_matching: Vec<(String, String)> = poly_events
         .iter()
         .filter(|e| {

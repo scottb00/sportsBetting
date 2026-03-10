@@ -96,6 +96,7 @@ pub async fn handle_scoreboard_tick(
         if let Some(order) = execute_signal(
             signal, state, kalshi_rest, dry_run,
             &registry.live_strategies,
+            registry.max_contracts_per_game,
         ).await {
             placed.push(order);
         }

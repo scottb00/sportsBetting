@@ -1,3 +1,12 @@
+use std::collections::HashMap;
+
+/// Tracks average entry price and size for a position (keyed by "ticker:side").
+#[derive(Debug, Clone)]
+struct PositionEntry {
+    avg_price: f64, // in dollars (0.0–1.0)
+    contracts: i64,
+}
+
 /// Risk management and Kelly sizing.
 pub struct RiskManager {
     pub max_position_per_game: f64,  // dollars
@@ -9,6 +18,8 @@ pub struct RiskManager {
     pub current_total_exposure: f64,
     pub daily_pnl: f64,
     halted: bool,
+    /// Position tracking for PnL computation: "ticker:side" -> entry info.
+    positions: HashMap<String, PositionEntry>,
 }
 
 impl RiskManager {
@@ -28,6 +39,7 @@ impl RiskManager {
             current_total_exposure: 0.0,
             daily_pnl: 0.0,
             halted: false,
+            positions: HashMap::new(),
         }
     }
 
@@ -37,16 +49,9 @@ impl RiskManager {
 
     /// Check if we can take a new position.
     pub fn can_trade(&self, additional_exposure: f64) -> bool {
-        if self.halted {
-            return false;
-        }
-        if self.daily_pnl <= -self.daily_loss_limit {
-            return false;
-        }
-        if self.current_total_exposure + additional_exposure > self.max_total_exposure {
-            return false;
-        }
-        true
+        !self.halted
+            && self.daily_pnl > -self.daily_loss_limit
+            && self.current_total_exposure + additional_exposure <= self.max_total_exposure
     }
 
     /// Calculate optimal position size using fractional Kelly criterion.
@@ -109,10 +114,44 @@ impl RiskManager {
         (rate * contracts as f64 * p * (1.0 - p)).ceil()
     }
 
-    /// Record a fill — update exposure and P&L.
-    pub fn record_fill(&mut self, exposure_change: f64, pnl_change: f64) {
-        self.current_total_exposure += exposure_change;
-        self.daily_pnl += pnl_change;
+    /// Record a fill — update exposure and P&L based on action direction.
+    ///
+    /// - Buy fills increase exposure and track entry price for later PnL.
+    /// - Sell fills decrease exposure and realize PnL vs average entry.
+    pub fn record_fill(&mut self, ticker: &str, action: &str, side: &str, price_cents: i64, contracts: i64) {
+        let price = price_cents as f64 / 100.0;
+        let notional = contracts as f64 * price;
+        let key = format!("{}:{}", ticker, side);
+
+        if action == "buy" {
+            self.current_total_exposure += notional;
+            // Update weighted average entry price
+            let entry = self.positions.entry(key).or_insert(PositionEntry {
+                avg_price: 0.0,
+                contracts: 0,
+            });
+            let total_cost = entry.avg_price * entry.contracts as f64 + price * contracts as f64;
+            entry.contracts += contracts;
+            if entry.contracts > 0 {
+                entry.avg_price = total_cost / entry.contracts as f64;
+            }
+        } else {
+            // Sell: decrease exposure, realize PnL
+            self.current_total_exposure = (self.current_total_exposure - notional).max(0.0);
+            if let Some(entry) = self.positions.get_mut(&key) {
+                let avg_entry_cents = entry.avg_price * 100.0;
+                let realized_pnl = (price - entry.avg_price) * contracts as f64;
+                self.daily_pnl += realized_pnl;
+                entry.contracts -= contracts;
+                if entry.contracts <= 0 {
+                    self.positions.remove(&key);
+                }
+                tracing::info!(
+                    "Realized PnL on {} {}: ${:.4} ({} contracts @ {}c vs avg entry {:.2}c)",
+                    ticker, side, realized_pnl, contracts, price_cents, avg_entry_cents,
+                );
+            }
+        }
 
         if self.daily_pnl <= -self.daily_loss_limit {
             tracing::warn!(
@@ -120,6 +159,18 @@ impl RiskManager {
                 self.daily_pnl
             );
             self.halted = true;
+        }
+    }
+
+    /// Seed position tracking from Kalshi positions (call on startup).
+    pub fn seed_positions(&mut self, ticker: &str, side: &str, avg_price_cents: i64, contracts: i64) {
+        if contracts > 0 && avg_price_cents > 0 {
+            let key = format!("{}:{}", ticker, side);
+            self.positions.insert(key, PositionEntry {
+                avg_price: avg_price_cents as f64 / 100.0,
+                contracts,
+            });
+            self.current_total_exposure += contracts as f64 * avg_price_cents as f64 / 100.0;
         }
     }
 
@@ -163,11 +214,32 @@ mod tests {
         let mut rm = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.02);
         assert!(!rm.is_halted());
 
-        rm.record_fill(0.0, -200.0);
+        // Buy 100 contracts at 50c, then sell at 30c => realized PnL = (0.30 - 0.50) * 100 = -$20
+        rm.record_fill("T1", "buy", "yes", 50, 100);
+        assert!(!rm.is_halted());
+        rm.record_fill("T1", "sell", "yes", 30, 100);
+        assert_eq!(rm.daily_pnl, -20.0);
+
+        // Another big loss to hit the $200 limit
+        rm.record_fill("T2", "buy", "yes", 90, 500);
+        rm.record_fill("T2", "sell", "yes", 50, 500);
+        // PnL = -20 + (0.50 - 0.90) * 500 = -20 + -200 = -220
         assert!(rm.is_halted());
         assert!(!rm.can_trade(10.0));
 
         rm.reset_daily();
         assert!(!rm.is_halted());
+    }
+
+    #[test]
+    fn test_exposure_decreases_on_sell() {
+        let mut rm = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.02);
+
+        rm.record_fill("T1", "buy", "yes", 50, 10);
+        assert_eq!(rm.current_total_exposure, 5.0); // 10 * 0.50
+
+        rm.record_fill("T1", "sell", "yes", 60, 10);
+        assert!(rm.current_total_exposure < 0.01); // decreased by 10 * 0.60, clamped to ~0
+        assert!((rm.daily_pnl - 1.0).abs() < 0.01); // (0.60 - 0.50) * 10 = $1
     }
 }

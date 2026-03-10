@@ -22,7 +22,14 @@ pub fn evaluate_strategies(
         }
 
         // Skip low-volume games
-        if game.kalshi_total_volume() < registry.min_volume {
+        let total_vol = game.kalshi_total_volume();
+        if total_vol < registry.min_volume {
+            if game.phase.is_live_or_break() {
+                tracing::debug!(
+                    "SKIP (volume): {} v {} | vol={} < min={}",
+                    game.away_team, game.home_team, total_vol, registry.min_volume,
+                );
+            }
             continue;
         }
 
@@ -33,12 +40,35 @@ pub fn evaluate_strategies(
             })
         });
         if !has_tradeable_mid {
+            let mids: Vec<_> = game.kalshi_markets.iter()
+                .map(|m| format!("{}={:?}", m.ticker, m.yes_mid))
+                .collect();
+            if game.phase.is_live_or_break() || game.phase == crate::espn::types::GamePhase::PreGame {
+                tracing::debug!(
+                    "SKIP (no tradeable mid): {} v {} | mids={:?}",
+                    game.away_team, game.home_team, mids,
+                );
+            }
             continue;
         }
 
-        // Compute exposure across all markets for this game
+        // Check hard contract cap across all markets for this game
+        let game_committed: i64 = game.kalshi_markets.iter()
+            .map(|m| state.order_manager.committed_contracts(&m.ticker))
+            .sum();
+        if game_committed >= registry.max_contracts_per_game {
+            continue;
+        }
+        let contracts_remaining = registry.max_contracts_per_game - game_committed;
+
+        // Compute exposure for Kelly sizing from committed contracts across all game tickers
         let current_exposure: f64 = game.kalshi_markets.iter()
-            .map(|m| state.order_manager.market_exposure(&m.ticker))
+            .map(|m| {
+                let contracts = state.order_manager.committed_contracts(&m.ticker);
+                // Approximate exposure: contracts * average price (use 0.50 as fallback)
+                let avg_price = m.yes_mid.map(|mid| mid / 100.0).unwrap_or(0.50);
+                contracts as f64 * avg_price
+            })
             .sum();
 
         // Detailed break logging
@@ -82,13 +112,14 @@ pub fn evaluate_strategies(
                     signal.expiration_ts = Some(expire_at);
                 }
 
-                if best_signal.as_ref().is_none_or(|b| signal.size_dollars > b.size_dollars) {
+                if best_signal.as_ref().is_none_or(|b| signal.edge_after_fees > b.edge_after_fees) {
                     best_signal = Some(signal);
                 }
             }
         }
 
-        if let Some(signal) = best_signal {
+        if let Some(mut signal) = best_signal {
+            signal.max_contracts = Some(contracts_remaining);
             signals.push(signal);
         }
     }
@@ -110,25 +141,73 @@ pub struct PlacedOrder {
 
 /// Execute an order signal via Kalshi REST API (or log if dry_run).
 /// Returns placement info if the order was successfully placed (for batch notifications).
+///
+/// Re-checks contract limits at execution time (under lock) to prevent TOCTOU races
+/// between evaluate_strategies and the actual API call.
 pub async fn execute_signal(
     signal: OrderSignal,
     state: &SharedState,
     kalshi_rest: &Arc<KalshiRestClient>,
     dry_run: bool,
     live_strategies: &[String],
+    max_contracts_per_game: i64,
 ) -> Option<PlacedOrder> {
-    let s = state.lock().await;
-    if !s.risk.can_trade(signal.size_dollars) {
-        tracing::warn!(
-            "Risk check failed for {} signal on {}",
-            signal.strategy,
-            signal.kalshi_ticker
-        );
-        return None;
-    }
-    drop(s);
+    // Re-check risk AND contract limits under the lock right before building the order.
+    // This closes the TOCTOU gap: state may have changed since evaluate_strategies ran.
+    let signal = {
+        let s = state.lock().await;
+        if !s.risk.can_trade(signal.size_dollars) {
+            tracing::warn!(
+                "Risk check failed for {} signal on {}",
+                signal.strategy,
+                signal.kalshi_ticker
+            );
+            return None;
+        }
 
-    let order_req = OrderManager::signal_to_order(&signal);
+        // Re-check has_resting_order (a fill may have been partially processed)
+        if s.order_manager.has_resting_order(&signal.kalshi_ticker) {
+            tracing::info!(
+                "Skipping {} signal on {}: resting order appeared since evaluation",
+                signal.strategy, signal.kalshi_ticker
+            );
+            return None;
+        }
+
+        // Re-compute contract cap across ALL tickers for this game (not just the signal's ticker)
+        let game_tickers: Vec<String> = s.game_state
+            .get_by_kalshi_ticker(&signal.kalshi_ticker)
+            .map(|g| g.kalshi_tickers().into_iter().map(|t| t.to_string()).collect())
+            .unwrap_or_default();
+        let game_committed: i64 = game_tickers.iter()
+            .map(|t| s.order_manager.committed_contracts(t))
+            .sum();
+        let contracts_remaining = (max_contracts_per_game - game_committed).max(0);
+        if contracts_remaining <= 0 {
+            tracing::info!(
+                "Skipping {} signal on {}: contract limit reached ({}/{})",
+                signal.strategy, signal.kalshi_ticker,
+                game_committed, max_contracts_per_game
+            );
+            return None;
+        }
+
+        // Update max_contracts with the freshest cap
+        let mut signal = signal;
+        signal.max_contracts = Some(contracts_remaining);
+        signal
+    };
+
+    let order_req = match OrderManager::signal_to_order(&signal) {
+        Some(req) => req,
+        None => {
+            tracing::info!(
+                "Skipping {} signal on {}: contract cap is zero",
+                signal.strategy, signal.kalshi_ticker
+            );
+            return None;
+        }
+    };
 
     // Strategy is live only if it's in the configured live_strategies list
     let strategy_is_live = live_strategies.iter().any(|s| s == &signal.strategy);
@@ -171,6 +250,7 @@ pub async fn execute_signal(
 
     match kalshi_rest.create_order(&order_req).await {
         Ok(resp) => {
+            let price_cents = order_req.yes_price.or(order_req.no_price).unwrap_or(0);
             {
                 let mut s = state.lock().await;
                 let _ = s.logger.log_order(
@@ -179,28 +259,26 @@ pub async fn execute_signal(
                     &signal.strategy,
                     &format!("{:?}", order_req.action),
                     &format!("{:?}", order_req.side),
-                    order_req.yes_price.or(order_req.no_price).unwrap_or(0),
+                    price_cents,
                     order_req.count,
                     &resp.order.status,
                 );
 
                 // Track CLV orders for closing-line validation
                 if signal.strategy == "clv_hunter" {
-                    let price = order_req.yes_price.or(order_req.no_price).unwrap_or(0);
                     s.order_manager.record_clv_order(
                         &resp.order.order_id,
                         &signal.kalshi_ticker,
                         &format!("{:?}", order_req.side),
-                        price,
+                        price_cents,
                     );
                 }
 
-                s.order_manager.record_placed_order(resp.order);
+                s.order_manager.record_placed_order(resp.order, order_req.count);
             } // lock dropped
 
             tracing::info!("Order placed successfully");
 
-            let price_cents = order_req.yes_price.or(order_req.no_price).unwrap_or(0);
             Some(PlacedOrder {
                 strategy: signal.strategy,
                 ticker: signal.kalshi_ticker,

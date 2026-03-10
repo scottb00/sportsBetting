@@ -411,9 +411,10 @@ fn signal_yes_produces_yes_price_only() {
         post_only: true,
         expiration_ts: None,
         edge_after_fees: 0.05,
+        max_contracts: None,
     };
 
-    let order = OrderManager::signal_to_order(&signal);
+    let order = OrderManager::signal_to_order(&signal).unwrap();
     assert_eq!(order.yes_price, Some(55));
     assert_eq!(order.no_price, None);
     assert!(matches!(order.side, OrderSide::Yes));
@@ -432,9 +433,10 @@ fn signal_no_produces_no_price_only() {
         post_only: true,
         expiration_ts: None,
         edge_after_fees: 0.05,
+        max_contracts: None,
     };
 
-    let order = OrderManager::signal_to_order(&signal);
+    let order = OrderManager::signal_to_order(&signal).unwrap();
     assert_eq!(order.yes_price, None);
     assert_eq!(order.no_price, Some(45));
     assert!(matches!(order.side, OrderSide::No));
@@ -453,9 +455,10 @@ fn signal_to_order_contract_count() {
         post_only: true,
         expiration_ts: None,
         edge_after_fees: 0.05,
+        max_contracts: None,
     };
 
-    let order = OrderManager::signal_to_order(&signal);
+    let order = OrderManager::signal_to_order(&signal).unwrap();
     assert_eq!(order.count, 20); // $10 / $0.50 = 20 contracts
 }
 
@@ -472,9 +475,10 @@ fn signal_to_order_contract_count_floors() {
         post_only: true,
         expiration_ts: None,
         edge_after_fees: 0.05,
+        max_contracts: None,
     };
 
-    let order = OrderManager::signal_to_order(&signal);
+    let order = OrderManager::signal_to_order(&signal).unwrap();
     assert_eq!(order.count, 30); // floor(10.0 / 0.33) = 30
 }
 
@@ -491,9 +495,10 @@ fn signal_to_order_min_one_contract() {
         post_only: true,
         expiration_ts: None,
         edge_after_fees: 0.05,
+        max_contracts: None,
     };
 
-    let order = OrderManager::signal_to_order(&signal);
+    let order = OrderManager::signal_to_order(&signal).unwrap();
     assert!(order.count >= 1, "Must always place at least 1 contract");
 }
 
@@ -705,8 +710,9 @@ fn mapper_title_yes_is_away() {
 #[test]
 fn halted_risk_produces_no_signals() {
     let mut risk = test_risk();
-    // Trigger halt
-    risk.record_fill(0.0, -200.0);
+    // Trigger halt: buy at 80c, sell at 40c => PnL = (0.40 - 0.80) * 500 = -$200
+    risk.record_fill("T1", "buy", "yes", 80, 500);
+    risk.record_fill("T1", "sell", "yes", 40, 500);
     assert!(risk.is_halted());
 
     // Even with massive edge, kelly should return 0
@@ -720,7 +726,8 @@ fn halted_risk_produces_no_signals() {
 fn exposure_cap_prevents_oversize() {
     // With $90 already exposed, should cap remaining
     let mut risk_loaded = RiskManager::new(50.0, 100.0, 200.0, 0.5, 0.01);
-    risk_loaded.record_fill(90.0, 0.0);
+    // Buy 100 contracts at 90c => exposure = $90
+    risk_loaded.record_fill("T1", "buy", "yes", 90, 100);
 
     let size = risk_loaded.kelly_size(0.80, 30.0, 0.0);
     assert!(size <= 10.01, "Size {} should be capped to ~$10 remaining exposure", size);

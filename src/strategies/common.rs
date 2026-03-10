@@ -104,6 +104,7 @@ fn evaluate_market(
         post_only: true,
         expiration_ts: None,
         edge_after_fees,
+        max_contracts: None, // set by executor based on per-game limit
     })
 }
 
