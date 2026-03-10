@@ -1,6 +1,32 @@
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
+/// Game enrichment data to persist alongside orders/fills.
+#[derive(Clone, Debug)]
+pub struct GameInfo {
+    pub game_name: String,
+    pub home_team: String,
+    pub away_team: String,
+    pub is_home: bool,
+}
+
+impl GameInfo {
+    /// Look up game info from the live game state for a given Kalshi ticker.
+    pub fn from_game_state(
+        game_state: &crate::engine::game_state::GameStateManager,
+        ticker: &str,
+    ) -> Option<Self> {
+        let game = game_state.get_by_kalshi_ticker(ticker)?;
+        let market = game.kalshi_markets.iter().find(|m| m.ticker == ticker)?;
+        Some(GameInfo {
+            game_name: format!("{} vs {}", game.away_team, game.home_team),
+            home_team: game.home_team.clone(),
+            away_team: game.away_team.clone(),
+            is_home: market.is_home,
+        })
+    }
+}
+
 /// Persistent trade and order logger backed by SQLite.
 pub struct TradeLogger {
     conn: Connection,
@@ -67,8 +93,12 @@ impl TradeLogger {
         )
         .context("Failed to create trade log tables")?;
 
-        // Migrate: add edge_bps column if it doesn't exist (for existing DBs)
+        // Migrate: add columns if they don't exist (for existing DBs)
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN edge_bps REAL");
+        let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN game_name TEXT");
+        let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN home_team TEXT");
+        let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN away_team TEXT");
+        let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN is_home INTEGER");
 
         Ok(Self { conn })
     }
@@ -85,11 +115,18 @@ impl TradeLogger {
         count: i64,
         status: &str,
         edge_bps: Option<f64>,
+        game_info: Option<&GameInfo>,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            rusqlite::params![order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps],
+            "INSERT OR REPLACE INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps, game_name, home_team, away_team, is_home)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            rusqlite::params![
+                order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps,
+                game_info.map(|g| g.game_name.as_str()),
+                game_info.map(|g| g.home_team.as_str()),
+                game_info.map(|g| g.away_team.as_str()),
+                game_info.map(|g| g.is_home as i32),
+            ],
         )?;
         Ok(())
     }
@@ -154,8 +191,8 @@ impl TradeLogger {
         Ok(())
     }
 
-    /// Insert an order row only if it doesn't already exist (backfill from sync).
-    /// Uses INSERT OR IGNORE so it won't overwrite orders with real strategy/edge data.
+    /// Insert an order row if it doesn't exist, or update stub orders (strategy='')
+    /// with corrected data from sync. Won't overwrite bot-placed orders that have strategy/edge.
     /// `created_at` should be the actual order creation time from Kalshi (ISO 8601).
     #[allow(clippy::too_many_arguments)]
     pub fn log_order_if_missing(
@@ -168,11 +205,36 @@ impl TradeLogger {
         count: i64,
         status: &str,
         created_at: Option<&str>,
+        game_info: Option<&GameInfo>,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT OR IGNORE INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, created_at)
-             VALUES (?1, ?2, '', ?3, ?4, ?5, ?6, ?7, COALESCE(?8, datetime('now')))",
-            rusqlite::params![order_id, ticker, action, side, price_cents, count, status, created_at],
+            "INSERT INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, created_at, game_name, home_team, away_team, is_home)
+             VALUES (?1, ?2, '', ?3, ?4, ?5, ?6, ?7, COALESCE(?8, datetime('now')), ?9, ?10, ?11, ?12)
+             ON CONFLICT(order_id) DO UPDATE SET
+               price_cents = excluded.price_cents,
+               count = excluded.count,
+               status = excluded.status,
+               game_name = COALESCE(excluded.game_name, game_name),
+               home_team = COALESCE(excluded.home_team, home_team),
+               away_team = COALESCE(excluded.away_team, away_team),
+               is_home = COALESCE(excluded.is_home, is_home)
+             WHERE strategy = ''",
+            rusqlite::params![
+                order_id, ticker, action, side, price_cents, count, status, created_at,
+                game_info.map(|g| g.game_name.as_str()),
+                game_info.map(|g| g.home_team.as_str()),
+                game_info.map(|g| g.away_team.as_str()),
+                game_info.map(|g| g.is_home as i32),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Update order strategy if currently empty (backfill from in-memory state).
+    pub fn update_order_strategy(&self, order_id: &str, strategy: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE orders SET strategy = ?1 WHERE order_id = ?2 AND (strategy IS NULL OR strategy = '')",
+            rusqlite::params![strategy, order_id],
         )?;
         Ok(())
     }

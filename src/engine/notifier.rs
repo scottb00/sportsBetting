@@ -51,22 +51,6 @@ impl Notifier {
         }
     }
 
-    /// Notify that a fill was received.
-    pub async fn notify_fill(
-        &self,
-        ticker: &str,
-        action: &str,
-        count: i64,
-        yes_price: i64,
-    ) {
-        let title = "Fill Received".to_string();
-        let body = format!(
-            "{} {} contracts @ {}c yes_price\nTicker: {}",
-            action, count, yes_price, ticker,
-        );
-        self.send(&title, &body, Priority::High).await;
-    }
-
     /// Send a single batched notification for multiple placed orders.
     pub async fn notify_orders_batch(&self, orders: &[PlacedOrder]) {
         if orders.is_empty() {
@@ -100,10 +84,6 @@ impl Notifier {
         self.send(&title, &lines.join("\n"), Priority::High).await;
     }
 
-    /// Notify a risk event (loss limit, halt).
-    pub async fn notify_risk_event(&self, message: &str) {
-        self.send("Risk Alert", message, Priority::High).await;
-    }
 }
 
 pub enum Priority {

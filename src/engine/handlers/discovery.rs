@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::engine::bot::{SharedState, populate_game_states, fetch_and_apply_summary};
+use crate::engine::bot::{SharedState, SharedMapper, populate_game_states, fetch_and_apply_summary};
 use crate::engine::market_prep::{
     build_espn_for_matching, build_kalshi_for_matching,
     build_kalshi_volume, filter_events_for_dates, fetch_all_kalshi_cbb_events,
@@ -15,6 +15,7 @@ pub async fn discover_new_markets(
     kalshi_rest: &Arc<KalshiRestClient>,
     espn_poller: &EspnPoller,
     state: &SharedState,
+    mapper: &SharedMapper,
     ws_handle: Option<&KalshiWsHandle>,
 ) {
     let (today, _, date_tags) = today_and_tomorrow_tags();
@@ -25,8 +26,8 @@ pub async fn discover_new_markets(
     let kalshi_volume = build_kalshi_volume(&kalshi_events);
 
     let already_mapped: std::collections::HashSet<String> = {
-        let s = state.lock().await;
-        s.market_mapper.all_mapped_kalshi_tickers().into_iter().collect()
+        let m = mapper.lock().await;
+        m.all_mapped_kalshi_tickers().into_iter().collect()
     };
 
     let new_events: Vec<_> = kalshi_for_matching
@@ -52,12 +53,12 @@ pub async fn discover_new_markets(
 
     let espn_for_matching = build_espn_for_matching(&espn_games);
 
-    // Lock for mapping — drop before async ESPN summary fetches
-    let mut s = state.lock().await;
+    // Lock mapper first, then state (consistent ordering to prevent deadlocks)
+    let mut m = mapper.lock().await;
     let tickers_before: std::collections::HashSet<String> =
-        s.market_mapper.all_mapped_kalshi_tickers().into_iter().collect();
+        m.all_mapped_kalshi_tickers().into_iter().collect();
 
-    if let Err(e) = s.market_mapper.resolve_deterministic(
+    if let Err(e) = m.resolve_deterministic(
         &espn_for_matching,
         &kalshi_for_matching,
         &[],
@@ -68,7 +69,7 @@ pub async fn discover_new_markets(
     }
 
     let tickers_after: std::collections::HashSet<String> =
-        s.market_mapper.all_mapped_kalshi_tickers().into_iter().collect();
+        m.all_mapped_kalshi_tickers().into_iter().collect();
 
     let new_tickers: Vec<String> = tickers_after
         .difference(&tickers_before)
@@ -81,10 +82,14 @@ pub async fn discover_new_markets(
 
     tracing::info!("Discovery: {} new Kalshi tickers mapped: {:?}", new_tickers.len(), new_tickers);
 
-    populate_game_states(&mut s, &espn_games, Some(&kalshi_volume));
-    drop(s);
+    {
+        let mut s = state.lock().await;
+        populate_game_states(&mut s, &m, &espn_games, Some(&kalshi_volume));
+    }
+    // Drop mapper lock before async ESPN calls
+    drop(m);
 
-    // Fetch ESPN summaries for new games (async I/O — lock released above)
+    // Fetch ESPN summaries for new games (async I/O — locks released above)
     let new_event_ids: Vec<String> = {
         let s = state.lock().await;
         new_tickers.iter()

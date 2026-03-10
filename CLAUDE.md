@@ -30,11 +30,11 @@ src/
 │   ├── cancel_orders.rs — Utility to cancel all resting orders
 │   └── debug_kalshi.rs  — Utility to debug Kalshi API/markets
 ├── engine/
-│   ├── bot.rs           — BotState, SharedState (Arc<Mutex>), populate_game_states
+│   ├── bot.rs           — BotState, SharedState, SharedLogger, SharedMapper types
 │   ├── game_state.rs    — GameState, KalshiMarketState, GameStateManager
 │   ├── market_mapper.rs — Fuzzy team matching + LLM fallback + direction flags
 │   ├── market_prep.rs   — Shared fetch/filter/build helpers, BookPrices
-│   ├── order_manager.rs — Order tracking, intents, dedup, pruning
+│   ├── order_manager.rs — Order tracking, dedup, fill sync watermark
 │   ├── risk.rs          — Kelly sizing, position limits, fee calc
 │   ├── executor.rs      — Signal → Kalshi REST order placement
 │   ├── logger.rs        — SQLite trade logging
@@ -44,9 +44,9 @@ src/
 │       ├── scoreboard.rs    — ESPN poll → strategy evaluation → order signals
 │       ├── kalshi_ws.rs     — Kalshi WebSocket event handler
 │       ├── polymarket_ws.rs — Polymarket WebSocket event handler
-│       ├── cleanup.rs       — Cancel orders for finished games
+│       ├── cleanup.rs       — Internal cleanup for finished games (no REST calls)
 │       ├── discovery.rs     — Discover new Kalshi markets
-│       ├── order_sync.rs    — Sync resting orders + positions from Kalshi REST
+│       ├── order_sync.rs    — Sync resting orders from Kalshi REST
 │       └── fill_sync.rs     — Sync fills from Kalshi REST
 ├── strategies/
 │   ├── mod.rs           — Strategy trait + StrategyRegistry
@@ -60,11 +60,16 @@ src/
 
 ### Key Types
 
-- `SharedState` = `Arc<Mutex<BotState>>` — the global mutable state passed everywhere
+- `SharedState` = `Arc<Mutex<BotState>>` — hot-path mutable state (game_state, order_books, risk, order_manager)
+- `SharedLogger` = `Arc<std::sync::Mutex<TradeLogger>>` — independent SQLite logger lock (std::sync, no .await while held)
+- `SharedMapper` = `Arc<tokio::sync::Mutex<MarketMapper>>` — independent mapper lock (tokio::sync, held across .await in discovery)
 - `GameState` — per-game: ESPN probs, Kalshi markets, Polymarket price, phase, scores
 - `OrderSignal` — output of strategy evaluation, fed to executor
 - `LocalOrderBook` — per-ticker bid/ask from Kalshi WS snapshots + deltas
 - `StrategyRegistry` — holds all strategy instances, created at startup via `create_strategies()`
+
+### Lock Ordering
+When multiple locks are needed, acquire in this order to prevent deadlocks: **mapper → state → logger**
 
 ## Critical Domain Knowledge
 
@@ -144,13 +149,16 @@ To update secrets: `flyctl secrets set CONFIG_TOML="$(cat config.toml)" KALSHI_P
 
 ```
 tokio::select! {
-    scoreboard_interval.tick()  => handle_scoreboard_tick()   // ESPN poll + strategy eval
-    cleanup_interval.tick()     => cleanup_finished_games()   // cancel orders for ended games
-    discovery_interval.tick()   => discover_new_markets()     // find new Kalshi markets
-    order_sync_interval.tick()  => sync_orders()              // sync resting orders from REST
-    kalshi_rx.recv()            => handle_kalshi_event()      // WS orderbook updates
-    poly_rx.recv()              => handle_polymarket_event()  // WS price updates
+    scoreboard_interval.tick()   => handle_scoreboard_tick()    // ESPN poll + strategy eval
+    maintenance_interval.tick()  => handle_maintenance_tick()   // cleanup + discovery + order/fill sync
+    kalshi_rx.recv()             => handle_kalshi_event()       // WS orderbook updates + fills
+    poly_rx.recv()               => handle_polymarket_event()   // WS price updates
 }
 ```
+
+The maintenance tick (default 30s, configurable via `intervals.maintenance_interval_secs`) runs sequentially:
+1. `cleanup_finished_games()` — internal state cleanup only (Kalshi auto-cancels settled orders)
+2. `discover_new_markets()` — find new Kalshi markets, map them, subscribe WS
+3. `sync_orders()` + `sync_fills()` — reconcile with Kalshi REST
 
 Dashboard server runs as a separate tokio task on port 3030.

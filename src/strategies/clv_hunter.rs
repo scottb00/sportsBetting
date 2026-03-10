@@ -1,7 +1,10 @@
+use std::collections::HashMap;
+
 use crate::engine::game_state::GameState;
 use crate::engine::order_manager::OrderSignal;
 use crate::engine::risk::RiskManager;
 use crate::espn::types::GamePhase;
+use crate::kalshi::orderbook::LocalOrderBook;
 
 use super::Strategy;
 use super::common::evaluate_edge;
@@ -35,11 +38,12 @@ impl Strategy for ClvHunter {
         game: &GameState,
         risk: &RiskManager,
         current_game_exposure: f64,
+        order_books: &HashMap<String, LocalOrderBook>,
     ) -> Option<OrderSignal> {
         if !self.can_evaluate(game) {
             return None;
         }
-        let mut signal = evaluate_edge(game, risk, current_game_exposure, self.min_edge, self.name())?;
+        let mut signal = evaluate_edge(game, risk, current_game_exposure, self.min_edge, self.name(), order_books)?;
         // Set expiration to game start time so Kalshi auto-expires the order at tipoff
         signal.expiration_ts = game.start_time_ts;
         Some(signal)

@@ -1,6 +1,10 @@
+use std::collections::HashMap;
+
 use crate::engine::game_state::{GameState, KalshiMarketState};
+use crate::engine::market_prep::extract_book_prices;
 use crate::engine::order_manager::OrderSignal;
 use crate::engine::risk::RiskManager;
+use crate::kalshi::orderbook::LocalOrderBook;
 use crate::kalshi::types::{OrderAction, OrderSide};
 
 /// Evaluate edge for a specific Kalshi market within a game.
@@ -16,6 +20,7 @@ use crate::kalshi::types::{OrderAction, OrderSide};
 fn evaluate_market(
     game: &GameState,
     market: &KalshiMarketState,
+    order_books: &HashMap<String, LocalOrderBook>,
     risk: &RiskManager,
     current_game_exposure: f64,
     min_edge: f64,
@@ -23,16 +28,17 @@ fn evaluate_market(
 ) -> Option<OrderSignal> {
     let fair_value = game.fair_value_for_market(market)?;
 
-    // Need book data to price
-    let yes_bid = market.yes_bid? as i64;
-    let yes_ask = market.yes_ask? as i64;
+    // Derive prices from order book (single source of truth)
+    let prices = order_books.get(&market.ticker).map(extract_book_prices)?;
+    let yes_bid = prices.bid? as i64;
+    let yes_ask = prices.ask? as i64;
 
     if yes_bid <= 0 || yes_ask >= 100 || yes_bid >= yes_ask {
         return None;
     }
 
     // Determine direction: compare fair to mid
-    let mid = market.yes_mid? / 100.0;
+    let mid = prices.mid? / 100.0;
     let buying_yes = fair_value > mid;
 
     // ALO pricing: most aggressive passive price
@@ -115,11 +121,12 @@ pub fn evaluate_edge(
     current_game_exposure: f64,
     min_edge: f64,
     strategy_name: &str,
+    order_books: &HashMap<String, LocalOrderBook>,
 ) -> Option<OrderSignal> {
     let mut best: Option<OrderSignal> = None;
 
     for market in &game.kalshi_markets {
-        if let Some(signal) = evaluate_market(game, market, risk, current_game_exposure, min_edge, strategy_name)
+        if let Some(signal) = evaluate_market(game, market, order_books, risk, current_game_exposure, min_edge, strategy_name)
             && best.as_ref().is_none_or(|b| signal.edge_after_fees > b.edge_after_fees)
         {
             best = Some(signal);

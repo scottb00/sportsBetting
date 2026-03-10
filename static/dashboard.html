@@ -45,6 +45,7 @@
   .pos-badge { padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; }
   .pos-yes { background: #3fb95033; color: #3fb950; }
   .pos-no { background: #f8514933; color: #f85149; }
+  .pos-neutral { background: #8b949e22; color: #c9d1d9; }
 
   .updated { font-size: 11px; color: #484f58; text-align: right; margin-bottom: 8px; }
 
@@ -61,6 +62,7 @@
   .strat-break_ev { background: #1f6feb33; color: #58a6ff; }
   .strat-clv_hunter { background: #a371f733; color: #a371f7; }
   .strat-arb { background: #3fb95033; color: #3fb950; }
+  .strat-synced { background: #484f5833; color: #484f58; }
 
   /* Status badges */
   .status { padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; }
@@ -76,6 +78,14 @@
   /* Side badges */
   .side-yes { color: #3fb950; font-weight: 600; }
   .side-no { color: #f85149; font-weight: 600; }
+
+  /* Pagination */
+  .pagination { display: flex; align-items: center; gap: 8px; padding: 8px 0; font-size: 12px; color: #8b949e; }
+  .pagination button { background: #161b22; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 4px 10px; font-size: 12px; font-family: inherit; cursor: pointer; }
+  .pagination button:hover:not(:disabled) { border-color: #58a6ff; color: #58a6ff; }
+  .pagination button:disabled { opacity: 0.3; cursor: default; }
+  .pagination select { background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 3px 6px; font-size: 12px; font-family: inherit; }
+  .pagination .page-info { margin: 0 4px; }
 </style>
 </head>
 <body>
@@ -126,10 +136,9 @@
         <th>Time</th>
         <th>Game</th>
         <th>Score</th>
-        <th>Phase</th>
         <th>Status</th>
-        <th class="num">ESPN Fair</th>
-        <th class="num">Kalshi Mid</th>
+        <th class="num">Home Win%</th>
+        <th class="num">Kalshi Bid/Ask</th>
         <th class="num">Edge</th>
         <th class="num">Volume</th>
         <th>Position</th>
@@ -138,41 +147,101 @@
     </thead>
     <tbody></tbody>
   </table>
+  <div class="pagination" id="games-pagination"></div>
 
   <h2>Recent Orders</h2>
+  <div class="filters" id="order-filters">
+    <div class="filter-group">
+      <label>Strategy</label>
+      <select id="filter-order-strategy">
+        <option value="">All</option>
+        <option value="break_ev">break_ev</option>
+        <option value="clv_hunter">clv_hunter</option>
+        <option value="__synced__">synced</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label>Side</label>
+      <select id="filter-order-side">
+        <option value="">All</option>
+        <option value="yes">YES</option>
+        <option value="no">NO</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label>Status</label>
+      <select id="filter-order-status">
+        <option value="">All</option>
+        <option value="resting">Resting</option>
+        <option value="filled">Filled</option>
+        <option value="partial_fill">Partial</option>
+        <option value="canceled">Canceled</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label>Game</label>
+      <input type="text" id="filter-order-game" placeholder="Search..." style="width:120px">
+    </div>
+  </div>
   <table id="orders-table">
     <thead>
       <tr>
         <th>Time</th>
         <th>Strategy</th>
         <th>Game</th>
-        <th>Side</th>
-        <th>Action</th>
+        <th>Position</th>
+        <th class="num">Qty</th>
         <th class="num">Price</th>
         <th class="num">Edge</th>
-        <th class="num">Qty</th>
         <th class="num">Cost</th>
         <th>Status</th>
       </tr>
     </thead>
     <tbody></tbody>
   </table>
-
-  <h2 style="font-size:16px; color:#58a6ff; margin-top:28px;">Theoretical Edge</h2>
-  <div id="edge-bar" class="risk-bar"></div>
+  <div class="pagination" id="orders-pagination"></div>
 
   <h2 style="font-size:16px; color:#58a6ff; margin-top:28px;">Recent Fills</h2>
+  <div class="filters" id="fill-filters">
+    <div class="filter-group">
+      <label>Strategy</label>
+      <select id="filter-fill-strategy">
+        <option value="">All</option>
+        <option value="break_ev">break_ev</option>
+        <option value="clv_hunter">clv_hunter</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label>Side</label>
+      <select id="filter-fill-side">
+        <option value="">All</option>
+        <option value="yes">YES</option>
+        <option value="no">NO</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label>Action</label>
+      <select id="filter-fill-action">
+        <option value="">All</option>
+        <option value="buy">Buy</option>
+        <option value="sell">Sell</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label>Game</label>
+      <input type="text" id="filter-fill-game" placeholder="Search..." style="width:120px">
+    </div>
+  </div>
   <table id="fills-table" style="font-size:14px;">
     <thead>
       <tr>
         <th>Time</th>
         <th>Strategy</th>
         <th>Game</th>
-        <th>Side</th>
-        <th>Action</th>
+        <th>Position</th>
+        <th class="num">Qty</th>
         <th class="num">Price</th>
         <th class="num">Edge</th>
-        <th class="num">Qty</th>
         <th class="num">Cost</th>
         <th class="num">Fee</th>
         <th class="num">Net</th>
@@ -180,10 +249,37 @@
     </thead>
     <tbody></tbody>
   </table>
+  <div class="pagination" id="fills-pagination"></div>
 </div>
 
 <script>
 const $ = s => document.querySelector(s);
+
+// Pagination state per table
+const pageState = { games: { page: 0, perPage: 20 }, orders: { page: 0, perPage: 20 }, fills: { page: 0, perPage: 20 } };
+
+function paginate(items, key) {
+  const s = pageState[key];
+  const totalPages = Math.max(1, Math.ceil(items.length / s.perPage));
+  if (s.page >= totalPages) s.page = totalPages - 1;
+  const start = s.page * s.perPage;
+  return { rows: items.slice(start, start + s.perPage), page: s.page, totalPages, total: items.length, start: start + 1, end: Math.min(start + s.perPage, items.length) };
+}
+
+function renderPagination(key, info) {
+  const el = $(`#${key}-pagination`);
+  if (info.total === 0) { el.innerHTML = ''; return; }
+  el.innerHTML = `
+    <button onclick="pageState.${key}.page=0;refresh()" ${info.page === 0 ? 'disabled' : ''}>&#171;</button>
+    <button onclick="pageState.${key}.page--;refresh()" ${info.page === 0 ? 'disabled' : ''}>&#8249; Prev</button>
+    <span class="page-info">${info.start}-${info.end} of ${info.total}</span>
+    <button onclick="pageState.${key}.page++;refresh()" ${info.page >= info.totalPages - 1 ? 'disabled' : ''}>Next &#8250;</button>
+    <button onclick="pageState.${key}.page=${info.totalPages - 1};refresh()" ${info.page >= info.totalPages - 1 ? 'disabled' : ''}>&#187;</button>
+    <select onchange="pageState.${key}.perPage=+this.value;pageState.${key}.page=0;refresh()">
+      ${[10,20,50,100].map(n => `<option value="${n}" ${pageState[key].perPage === n ? 'selected' : ''}>${n}/page</option>`).join('')}
+    </select>
+  `;
+}
 
 function pnlClass(v) { return v > 0 ? 'positive' : v < 0 ? 'negative' : 'neutral'; }
 function fmt$(v) { return (v >= 0 ? '+' : '') + '$' + v.toFixed(2); }
@@ -195,19 +291,51 @@ function fmtEdge(v, side) {
   const sideLabel = side ? ` <span style="font-size:10px;opacity:0.7">${side}</span>` : '';
   return `<span class="${cls}">${v > 0 ? '+' : ''}${pct}%${sideLabel}</span>`;
 }
+// Edge with dollar amount: edge (prob space) * count = dollar edge
+function fmtEdgeWithDollars(v, count) {
+  if (v == null) return '-';
+  const pct = (v * 100).toFixed(1);
+  const dollars = Math.abs(v) * count;
+  const cls = v > 0 ? 'edge-pos' : v < 0 ? 'edge-neg' : '';
+  return `<span class="${cls}">${v > 0 ? '+' : ''}${pct}% <span style="font-size:11px;opacity:0.7">($${dollars.toFixed(2)})</span></span>`;
+}
+// Edge from bps with dollar amount
+function fmtEdgeBps(bps, count) {
+  if (bps == null) return '-';
+  const dollars = (bps / 10000) * count;
+  const cls = bps > 0 ? 'edge-pos' : bps < 0 ? 'edge-neg' : '';
+  return `<span class="${cls}">${bps.toFixed(0)} bps <span style="font-size:11px;opacity:0.7">($${dollars.toFixed(2)})</span></span>`;
+}
+// Translate order side+action into a position-style team label
+// Buy YES on home market = long home team, Buy NO on home market = long away team, etc.
+function fmtPosition(o) {
+  if (o.is_home == null || !o.home_team) return `<span class="${o.side.toLowerCase() === 'yes' ? 'side-yes' : 'side-no'}">${o.count} ${o.side.toUpperCase()}</span>`;
+  const isYes = o.side.toLowerCase() === 'yes';
+  const isBuy = o.action.toLowerCase() === 'buy';
+  // Buy YES or Sell NO = long the YES team; Buy NO or Sell YES = long the NO team
+  const longYesTeam = (isBuy === isYes);
+  const team = (longYesTeam === o.is_home) ? o.home_team : o.away_team;
+  const sideLabel = isYes ? 'YES' : 'NO';
+  const direction = isBuy ? 'Buy' : 'Sell';
+  return `<span class="pos-badge pos-neutral">${o.count} ${direction} ${sideLabel} <span style="font-size:10px;opacity:0.7">${team}</span></span>`;
+}
+function parseTS(ts) {
+  if (!ts) return null;
+  // Handle both "2026-03-10 16:00:25" (SQLite datetime) and "2026-03-10T16:00:17.672893Z" (ISO)
+  const s = ts.includes('T') ? ts : ts.replace(' ', 'T') + 'Z';
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
 function shortTime(ts) {
-  if (!ts) return '-';
-  try { return new Date(ts + 'Z').toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
-  catch { return ts.slice(11, 16); }
+  const d = parseTS(ts);
+  return d ? d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '-';
 }
 function shortDateTime(ts) {
-  if (!ts) return '-';
-  try {
-    const d = new Date(ts + 'Z');
-    const date = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
-    const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    return `${date} ${time}`;
-  } catch { return ts.slice(0, 16); }
+  const d = parseTS(ts);
+  if (!d) return '-';
+  const date = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return `${date} ${time}`;
 }
 function gameDateTime(epochSecs) {
   if (!epochSecs) return { display: '-', date: '', sortKey: Infinity };
@@ -224,12 +352,11 @@ async function fetchJson(url) {
 }
 
 async function refresh() {
-  const [risk, games, orders, fills, edge] = await Promise.all([
+  const [risk, games, orders, fills] = await Promise.all([
     fetchJson('/api/risk'),
     fetchJson('/api/games'),
     fetchJson('/api/orders'),
     fetchJson('/api/fills'),
-    fetchJson('/api/edge'),
   ]);
 
   // Risk bar
@@ -254,32 +381,6 @@ async function refresh() {
       <div class="risk-item">
         <span class="risk-label">Status</span>
         <span class="risk-value ${risk.halted ? 'halted' : risk.dry_run ? 'neutral' : 'positive'}">${risk.halted ? 'HALTED' : risk.dry_run ? 'DRY RUN' : 'LIVE'}</span>
-      </div>
-    `;
-  }
-
-  // Edge summary
-  if (edge) {
-    $('#edge-bar').innerHTML = `
-      <div class="risk-item">
-        <span class="risk-label">Today's Edge</span>
-        <span class="risk-value ${pnlClass(edge.today_edge_dollars)}">${fmt$(edge.today_edge_dollars)}</span>
-      </div>
-      <div class="risk-item">
-        <span class="risk-label">Today Fills</span>
-        <span class="risk-value neutral">${edge.today_fills}</span>
-      </div>
-      <div class="risk-item">
-        <span class="risk-label">All-Time Edge</span>
-        <span class="risk-value ${pnlClass(edge.total_edge_dollars)}">${fmt$(edge.total_edge_dollars)}</span>
-      </div>
-      <div class="risk-item">
-        <span class="risk-label">All-Time Fills</span>
-        <span class="risk-value neutral">${edge.total_fills}</span>
-      </div>
-      <div class="risk-item">
-        <span class="risk-label">Avg Edge</span>
-        <span class="risk-value ${pnlClass(edge.avg_edge_bps)}">${edge.avg_edge_bps.toFixed(0)} bps</span>
       </div>
     `;
   }
@@ -310,14 +411,28 @@ async function refresh() {
     // Enrich and filter
     const enriched = games.map(g => {
       const hm = g.markets.find(m => m.is_home) || g.markets[0];
-      const mid = hm ? hm.yes_mid : null;
+      const bid = hm ? hm.yes_bid : null;
+      const ask = hm ? hm.yes_ask : null;
       const edge = hm ? hm.edge : null;
-      const edgeSide = hm ? hm.edge_side : null;
+      // Translate YES/NO edge side to the team name using the market's is_home flag
+      const edgeSideRaw = hm ? hm.edge_side : null;
+      const hmIsHome = hm ? hm.is_home : true;
+      const yesTeam = hmIsHome ? g.home_team : g.away_team;
+      const noTeam = hmIsHome ? g.away_team : g.home_team;
+      const edgeSide = edgeSideRaw === 'YES' ? yesTeam : edgeSideRaw === 'NO' ? noTeam : null;
       const vol = g.markets.reduce((s, m) => s + (m.volume || 0), 0);
       const hasOrder = g.markets.some(m => m.has_resting_order);
-      const pos = g.markets.reduce((s, m) => s + (m.position || 0), 0);
+      // Build position labels with contract team (YES side of ticker) and side held
+      const posLabels = g.markets.filter(m => m.position !== 0).map(m => {
+        const qty = Math.abs(m.position);
+        // positive position = holding YES contracts, negative = holding NO contracts
+        const side = m.position > 0 ? 'YES' : 'NO';
+        // Show the contract's YES team (the team this ticker represents)
+        const contractTeam = m.is_home ? g.home_team : g.away_team;
+        return { qty, side, contractTeam, cls: m.position > 0 ? 'pos-yes' : 'pos-no' };
+      });
       const dt = gameDateTime(g.start_time_ts);
-      return { ...g, _hm: hm, _mid: mid, _edge: edge, _edgeSide: edgeSide, _vol: vol, _hasOrder: hasOrder, _pos: pos, _dt: dt };
+      return { ...g, _hm: hm, _bid: bid, _ask: ask, _edge: edge, _edgeSide: edgeSide, _vol: vol, _hasOrder: hasOrder, _posLabels: posLabels, _dt: dt };
     }).filter(g => {
       if (fPhase && g.phase !== fPhase) return false;
       if (fDate && g._dt.date !== fDate) return false;
@@ -328,87 +443,111 @@ async function refresh() {
       return true;
     });
 
+    const gp = paginate(enriched, 'games');
     if (enriched.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="11" class="empty">No games match filters</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="10" class="empty">No games match filters</td></tr>';
     } else {
-      tbody.innerHTML = enriched.map(g => {
+      tbody.innerHTML = gp.rows.map(g => {
         const score = g.home_score != null ? `${g.away_score}-${g.home_score}` : '-';
         return `<tr>
           <td style="font-size:11px">${g._dt.display}</td>
           <td>${g.away_team} @ ${g.home_team}</td>
           <td class="num">${score}</td>
-          <td><span class="phase phase-${g.phase}">${g.phase}</span></td>
-          <td>${g.status_detail || '-'}</td>
+          <td><span class="phase phase-${g.phase}">${g.status_detail || g.phase}</span></td>
           <td class="num">${fmtPct(g.espn_home_win_prob)}</td>
-          <td class="num">${g._mid != null ? g._mid.toFixed(0) + '¢' : '-'}</td>
-          <td class="num">${fmtEdge(g._edge, g._edgeSide)}</td>
+          <td class="num">${g._bid != null || g._ask != null ? (g._bid != null ? g._bid.toFixed(0) : '-') + ' / ' + (g._ask != null ? g._ask.toFixed(0) : '-') : '-'}</td>
+          <td class="num">${fmtEdge(g._edge)}</td>
           <td class="num">${g._vol > 0 ? g._vol.toLocaleString() : '-'}</td>
-          <td>${g._pos > 0 ? `<span class="pos-badge pos-yes">${g._pos} YES</span>` : g._pos < 0 ? `<span class="pos-badge pos-no">${Math.abs(g._pos)} NO</span>` : '-'}</td>
+          <td>${g._posLabels.length > 0 ? g._posLabels.map(p => `<span class="pos-badge ${p.cls}">${p.qty} ${p.side} ${p.contractTeam}</span>`).join(' ') : '-'}</td>
           <td>${g._hasOrder ? '<span class="order-dot"></span>' : ''}</td>
         </tr>`;
       }).join('');
     }
+    renderPagination('games', gp);
   }
 
   // Orders
   if (orders) {
     const tbody = $('#orders-table tbody');
-    if (orders.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="10" class="empty">No orders yet</td></tr>';
+    const fOStrat = $('#filter-order-strategy').value;
+    const fOSide = $('#filter-order-side').value;
+    const fOStatus = $('#filter-order-status').value;
+    const fOGame = ($('#filter-order-game').value || '').toLowerCase();
+    const filtered = orders.filter(o => {
+      if (fOStrat === '__synced__' && o.strategy) return false;
+      if (fOStrat && fOStrat !== '__synced__' && o.strategy !== fOStrat) return false;
+      if (fOSide && o.side.toLowerCase() !== fOSide) return false;
+      if (fOStatus && o.status !== fOStatus) return false;
+      if (fOGame && !(o.game_name || o.ticker).toLowerCase().includes(fOGame)) return false;
+      return true;
+    });
+    const op = paginate(filtered, 'orders');
+    if (filtered.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="9" class="empty">No orders match filters</td></tr>';
     } else {
-      tbody.innerHTML = orders.map(o => {
-        const stratCls = o.strategy ? `strat strat-${o.strategy}` : '';
+      tbody.innerHTML = op.rows.map(o => {
+        const stratCls = o.strategy ? `strat strat-${o.strategy}` : 'strat strat-synced';
+        const stratLabel = o.strategy || 'synced';
         const statusCls = `status status-${o.status}`;
-        const sideCls = o.side.toLowerCase() === 'yes' ? 'side-yes' : 'side-no';
         const gameLabel = o.game_name || o.ticker;
         const cost = (o.price_cents * o.count / 100).toFixed(2);
         return `<tr>
-          <td>${shortTime(o.created_at)}</td>
-          <td><span class="${stratCls}">${o.strategy || '-'}</span></td>
+          <td style="font-size:11px">${shortDateTime(o.created_at)}</td>
+          <td><span class="${stratCls}">${stratLabel}</span></td>
           <td><div class="ticker-cell"><span>${gameLabel}</span>${o.game_name ? `<span class="game-name">${o.ticker}</span>` : ''}</div></td>
-          <td><span class="${sideCls}">${o.side}</span></td>
-          <td>${o.action}</td>
-          <td class="num">${o.price_cents}¢</td>
-          <td class="num">${fmtEdge(o.edge)}</td>
+          <td>${fmtPosition(o)}</td>
           <td class="num">${o.count}</td>
+          <td class="num">${o.price_cents}¢</td>
+          <td class="num">${fmtEdgeWithDollars(o.edge, o.count)}</td>
           <td class="num">$${cost}</td>
           <td><span class="${statusCls}">${o.status}</span></td>
         </tr>`;
       }).join('');
     }
+    renderPagination('orders', op);
   }
 
   // Fills
   if (fills) {
     const tbody = $('#fills-table tbody');
-    if (fills.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="11" class="empty">No fills yet</td></tr>';
+    const fFStrat = $('#filter-fill-strategy').value;
+    const fFSide = $('#filter-fill-side').value;
+    const fFAction = $('#filter-fill-action').value;
+    const fFGame = ($('#filter-fill-game').value || '').toLowerCase();
+    const filtered = fills.filter(f => {
+      if (fFStrat && f.strategy !== fFStrat) return false;
+      if (fFSide && f.side.toLowerCase() !== fFSide) return false;
+      if (fFAction && f.action.toLowerCase() !== fFAction) return false;
+      if (fFGame && !(f.game_name || f.ticker).toLowerCase().includes(fFGame)) return false;
+      return true;
+    });
+    const fp = paginate(filtered, 'fills');
+    if (filtered.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="10" class="empty">No fills match filters</td></tr>';
     } else {
-      tbody.innerHTML = fills.map(f => {
-        const stratCls = f.strategy ? `strat strat-${f.strategy}` : '';
-        const sideCls = f.side.toLowerCase() === 'yes' ? 'side-yes' : 'side-no';
+      tbody.innerHTML = fp.rows.map(f => {
+        const stratCls = f.strategy ? `strat strat-${f.strategy}` : 'strat strat-synced';
+        const stratLabel = f.strategy || 'synced';
         const gameLabel = f.game_name || f.ticker;
         const cost = (f.price_cents * f.count / 100).toFixed(2);
         const fee = f.fee_cents / 100;
         const net = (f.action === 'buy' ? -1 : 1) * (f.price_cents * f.count / 100) - fee;
         const netCls = net > 0 ? 'edge-pos' : net < 0 ? 'edge-neg' : '';
-        const edgeBps = f.edge_bps != null ? f.edge_bps.toFixed(0) : '-';
-        const edgeCls = f.edge_bps > 0 ? 'edge-pos' : f.edge_bps < 0 ? 'edge-neg' : '';
         return `<tr>
-          <td>${shortTime(f.filled_at)}</td>
-          <td><span class="${stratCls}">${f.strategy || '-'}</span></td>
+          <td style="font-size:11px">${shortDateTime(f.filled_at)}</td>
+          <td><span class="${stratCls}">${stratLabel}</span></td>
           <td><div class="ticker-cell"><span>${gameLabel}</span>${f.game_name ? `<span class="game-name">${f.ticker}</span>` : ''}</div></td>
-          <td><span class="${sideCls}">${f.side}</span></td>
-          <td>${f.action}</td>
-          <td class="num">${f.price_cents}¢</td>
-          <td class="num"><span class="${edgeCls}">${edgeBps}${f.edge_bps != null ? ' bps' : ''}</span></td>
+          <td>${fmtPosition(f)}</td>
           <td class="num">${f.count}</td>
+          <td class="num">${f.price_cents}¢</td>
+          <td class="num">${fmtEdgeBps(f.edge_bps, f.count)}</td>
           <td class="num">$${cost}</td>
           <td class="num">${f.fee_cents.toFixed(0)}¢</td>
           <td class="num"><span class="${netCls}">${net >= 0 ? '+' : ''}$${net.toFixed(2)}</span></td>
         </tr>`;
       }).join('');
     }
+    renderPagination('fills', fp);
   }
 
   $('#updated').textContent = 'Last updated: ' + new Date().toLocaleTimeString();

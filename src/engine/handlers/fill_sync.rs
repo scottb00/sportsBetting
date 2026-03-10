@@ -1,22 +1,15 @@
 use std::sync::Arc;
 
-use crate::engine::bot::SharedState;
+use crate::engine::bot::{SharedState, SharedLogger};
 use crate::kalshi::rest::KalshiRestClient;
-
-/// Convert an ISO timestamp to a unix timestamp string for the Kalshi API.
-fn iso_to_unix_ts(iso: &str) -> Option<String> {
-    chrono::DateTime::parse_from_rfc3339(iso)
-        .ok()
-        .map(|dt| dt.timestamp().to_string())
-}
 
 /// Sync fills from Kalshi REST API into the local SQLite database.
 /// Uses a high-water mark (latest fill timestamp) to only fetch new fills.
-pub async fn sync_fills(state: &SharedState, kalshi_rest: &Arc<KalshiRestClient>) {
-    // Read high-water mark from state, convert ISO to unix ts for Kalshi API
+pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest: &Arc<KalshiRestClient>) {
+    // Read high-water mark from OrderManager (stored as unix seconds)
     let min_ts = {
         let s = state.lock().await;
-        s.last_fill_sync_ts.as_deref().and_then(iso_to_unix_ts)
+        s.order_manager.last_fill_sync_ts().map(|ts| ts.to_string())
     };
 
     let fills = match kalshi_rest
@@ -34,65 +27,81 @@ pub async fn sync_fills(state: &SharedState, kalshi_rest: &Arc<KalshiRestClient>
         return;
     }
 
-    let mut s = state.lock().await;
-    let mut new_count = 0;
+    // Process fills under state lock — log to SQLite, update order manager
+    let new_count = {
+        let mut s = state.lock().await;
+        let log = logger.lock().unwrap();
+        let mut new_count = 0;
 
-    for fill in &fills {
-        // Determine the price for the side being traded
-        let price_cents = if fill.side == "yes" {
-            fill.yes_price
-        } else {
-            fill.no_price
-        };
-        let fee_cents = fill.fee_cost.unwrap_or(0.0);
+        for fill in &fills {
+            let price_cents = if fill.side == "yes" {
+                fill.yes_price
+            } else {
+                fill.no_price
+            };
+            let fee_cents = fill.fee_cost.unwrap_or(0.0);
+            let game_info = crate::engine::logger::GameInfo::from_game_state(&s.game_state, &fill.ticker);
+            let strategy = s.order_manager.get_strategy(&fill.order_id).map(|s| s.to_string());
 
-        // Backfill a stub order row if this order isn't in the DB yet
-        // (e.g. placed in a previous session before current DB was created)
-        let _ = s.logger.log_order_if_missing(
-            &fill.order_id,
-            &fill.ticker,
-            &fill.action,
-            &fill.side,
-            price_cents,
-            fill.count,
-            "filled",
-            Some(&fill.created_time),
-        );
-
-        // INSERT OR IGNORE: returns true if new row inserted, false if duplicate
-        match s.logger.log_fill(
-            &fill.trade_id,
-            &fill.order_id,
-            &fill.ticker,
-            &fill.side,
-            &fill.action,
-            price_cents,
-            fill.count,
-            fee_cents,
-            Some(&fill.created_time),
-        ) {
-            Ok(true) => {
-                new_count += 1;
-                // Update in-memory order tracking (decrement remaining qty)
-                s.order_manager.record_fill(&fill.order_id, fill.count);
+            // Backfill stub order row
+            let _ = log.log_order_if_missing(
+                &fill.order_id,
+                &fill.ticker,
+                &fill.action,
+                &fill.side,
+                price_cents,
+                fill.count,
+                "filled",
+                Some(&fill.created_time),
+                game_info.as_ref(),
+            );
+            if let Some(ref strat) = strategy {
+                let _ = log.update_order_strategy(&fill.order_id, strat);
             }
-            Ok(false) => {} // duplicate trade_id — already logged
-            Err(e) => tracing::warn!("Failed to log fill {}: {:?}", fill.trade_id, e),
+
+            // INSERT OR IGNORE: returns true if new row inserted, false if duplicate
+            match log.log_fill(
+                &fill.trade_id,
+                &fill.order_id,
+                &fill.ticker,
+                &fill.side,
+                &fill.action,
+                price_cents,
+                fill.count,
+                fee_cents,
+                Some(&fill.created_time),
+            ) {
+                Ok(true) => {
+                    new_count += 1;
+                    s.order_manager.record_fill(&fill.order_id, fill.count);
+                    s.risk.record_fill(
+                        &fill.ticker, &fill.action, &fill.side,
+                        price_cents, fill.count,
+                    );
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!("Failed to log fill {}: {:?}", fill.trade_id, e);
+                }
+            }
+
+            let order_status = if s.order_manager.has_resting_order(&fill.ticker) {
+                "partial_fill"
+            } else {
+                "filled"
+            };
+            let _ = log.update_order_status(&fill.order_id, order_status);
         }
 
-        // Update order status: check if order is fully filled or partial
-        let status = if s.order_manager.has_resting_order(&fill.ticker) {
-            "partial_fill"
-        } else {
-            "filled"
-        };
-        let _ = s.logger.update_order_status(&fill.order_id, status);
-    }
+        // Update high-water mark
+        if let Some(latest) = fills.iter().map(|f| &f.created_time).max()
+            && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(latest)
+        {
+            s.order_manager.set_last_fill_sync_ts(dt.timestamp());
+        }
 
-    // Update high-water mark to the latest fill's created_time
-    if let Some(latest) = fills.iter().map(|f| &f.created_time).max() {
-        s.last_fill_sync_ts = Some(latest.clone());
-    }
+        new_count
+    };
 
     if new_count > 0 {
         tracing::info!("Fill sync: logged {} new fills from Kalshi REST", new_count);

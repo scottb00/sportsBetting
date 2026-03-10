@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::engine::bot::{BotState, SharedState, StrategyRegistry};
+use crate::engine::bot::{BotState, SharedState, SharedLogger, StrategyRegistry};
 use crate::engine::order_manager::{OrderManager, OrderSignal};
 use crate::kalshi::rest::KalshiRestClient;
 
@@ -35,13 +35,13 @@ pub fn evaluate_strategies(
 
         // Skip extreme prices — check if any market has mid in tradeable range
         let has_tradeable_mid = game.kalshi_markets.iter().any(|m| {
-            m.yes_mid.is_some_and(|mid| {
+            state.book_prices(&m.ticker).mid.is_some_and(|mid| {
                 (registry.min_price_cents..=registry.max_price_cents).contains(&mid)
             })
         });
         if !has_tradeable_mid {
             let mids: Vec<_> = game.kalshi_markets.iter()
-                .map(|m| format!("{}={:?}", m.ticker, m.yes_mid))
+                .map(|m| format!("{}={:?}", m.ticker, state.book_prices(&m.ticker).mid))
                 .collect();
             if game.phase.is_live_or_break() || game.phase == crate::espn::types::GamePhase::PreGame {
                 tracing::debug!(
@@ -66,7 +66,7 @@ pub fn evaluate_strategies(
             .map(|m| {
                 let contracts = state.order_manager.committed_contracts(&m.ticker);
                 // Approximate exposure: contracts * average price (use 0.50 as fallback)
-                let avg_price = m.yes_mid.map(|mid| mid / 100.0).unwrap_or(0.50);
+                let avg_price = state.book_prices(&m.ticker).mid.map(|mid| mid / 100.0).unwrap_or(0.50);
                 contracts as f64 * avg_price
             })
             .sum();
@@ -77,14 +77,15 @@ pub fn evaluate_strategies(
             let away_score = game.away_score.unwrap_or(0);
             for market in &game.kalshi_markets {
                 let fair = game.fair_value_for_market(market);
-                let kalshi_mid = market.yes_mid.map(|m| m / 100.0);
+                let prices = state.book_prices(&market.ticker);
+                let kalshi_mid = prices.mid.map(|m| m / 100.0);
                 tracing::info!(
                     "BREAK: {} v {} | {} | score {}-{} | {} YES={} bid={:?} ask={:?} mid={:?} | espn_fair={:?} | vol={:?}",
                     game.away_team, game.home_team, game.status_detail,
                     away_score, home_score,
                     market.ticker,
                     if market.is_home { "home" } else { "away" },
-                    market.yes_bid, market.yes_ask, kalshi_mid,
+                    prices.bid, prices.ask, kalshi_mid,
                     fair, market.volume,
                 );
             }
@@ -105,7 +106,7 @@ pub fn evaluate_strategies(
                 continue;
             }
 
-            if let Some(mut signal) = strategy.evaluate(game, &state.risk, current_exposure) {
+            if let Some(mut signal) = strategy.evaluate(game, &state.risk, current_exposure, &state.order_books) {
                 // Set expiration for non-CLV strategies (CLV sets its own in evaluate())
                 if signal.expiration_ts.is_none() {
                     let expire_at = chrono::Utc::now().timestamp() + registry.order_ttl.as_secs() as i64;
@@ -147,6 +148,7 @@ pub struct PlacedOrder {
 pub async fn execute_signal(
     signal: OrderSignal,
     state: &SharedState,
+    logger: &SharedLogger,
     kalshi_rest: &Arc<KalshiRestClient>,
     dry_run: bool,
     live_strategies: &[String],
@@ -251,17 +253,24 @@ pub async fn execute_signal(
             {
                 let mut s = state.lock().await;
                 let edge_bps = Some(signal.edge_after_fees * 10000.0);
-                let _ = s.logger.log_order(
-                    &resp.order.order_id,
-                    &signal.kalshi_ticker,
-                    &signal.strategy,
-                    &format!("{:?}", order_req.action),
-                    &format!("{:?}", order_req.side),
-                    price_cents,
-                    order_req.count,
-                    &resp.order.status,
-                    edge_bps,
-                );
+                let game_info = crate::engine::logger::GameInfo::from_game_state(&s.game_state, &signal.kalshi_ticker);
+
+                // Log under separate logger lock
+                {
+                    let log = logger.lock().unwrap();
+                    let _ = log.log_order(
+                        &resp.order.order_id,
+                        &signal.kalshi_ticker,
+                        &signal.strategy,
+                        &format!("{:?}", order_req.action),
+                        &format!("{:?}", order_req.side),
+                        price_cents,
+                        order_req.count,
+                        &resp.order.status,
+                        edge_bps,
+                        game_info.as_ref(),
+                    );
+                }
 
                 // Track CLV orders for closing-line validation
                 if signal.strategy == "clv_hunter" {
@@ -273,7 +282,7 @@ pub async fn execute_signal(
                     );
                 }
 
-                s.order_manager.record_placed_order(resp.order, order_req.count);
+                s.order_manager.record_placed_order(resp.order, order_req.count, &signal.strategy);
             } // lock dropped
 
             tracing::info!("Order placed successfully");

@@ -6,11 +6,12 @@ use tracing_subscriber::EnvFilter;
 
 use sports_betting::config::Config;
 use sports_betting::engine::bot::{
-    self, SharedState, create_bot_state, create_strategies,
+    self, SharedState, SharedLogger, SharedMapper, create_bot_state, create_strategies,
     populate_game_states, fetch_summaries_for_games,
 };
 use sports_betting::engine::dashboard;
 use sports_betting::engine::handlers;
+use sports_betting::engine::market_mapper::MarketMapper;
 use sports_betting::engine::market_prep::{
     self, build_espn_for_matching, build_kalshi_for_matching,
     build_kalshi_volume, filter_events_for_dates, today_and_tomorrow_tags,
@@ -51,28 +52,32 @@ async fn main() -> Result<()> {
         Notifier::new(nc)
     });
 
-    let mut bot_state = create_bot_state(&config)?;
+    let (mut bot_state, trade_logger, mut market_mapper) = create_bot_state(&config)?;
+    let logger: SharedLogger = Arc::new(std::sync::Mutex::new(trade_logger));
     let strategies = create_strategies(&config);
 
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    if !bot_state.market_mapper.load_cache(&today) {
+    if !market_mapper.load_cache(&today) {
         tracing::info!("No cached mappings for today, will resolve after fetching markets");
     }
 
     // --- Initial market discovery & mapping ---
     fetch_initial_markets(
-        &espn_poller, &poly_client, &kalshi_rest, &today, &mut bot_state,
+        &espn_poller, &poly_client, &kalshi_rest, &today,
+        &mut bot_state, &mut market_mapper,
     ).await?;
 
     let state: SharedState = Arc::new(Mutex::new(bot_state));
+    let mapper: SharedMapper = Arc::new(Mutex::new(market_mapper));
 
     // Start dashboard web server
     {
         let dashboard_state = state.clone();
+        let dashboard_logger = logger.clone();
         let db_path = config.logging.db_path.clone();
         let dashboard_dry_run = config.kalshi.dry_run;
         tokio::spawn(async move {
-            if let Err(e) = dashboard::serve(dashboard_state, &db_path, 3030, dashboard_dry_run).await {
+            if let Err(e) = dashboard::serve(dashboard_state, dashboard_logger, &db_path, 3030, dashboard_dry_run).await {
                 tracing::error!("Dashboard server failed: {:?}", e);
             }
         });
@@ -113,30 +118,22 @@ async fn main() -> Result<()> {
                 s.risk.seed_positions(&pos.ticker, "no", avg_price, abs_pos);
             }
         }
-        // Store positions for dashboard display
-        for pos in positions {
-            s.positions.insert(pos.ticker.clone(), pos);
-        }
-        tracing::info!("Loaded {} positions from Kalshi", s.positions.len());
+        tracing::info!("Loaded positions from Kalshi, seeded risk manager");
     }
-    handlers::sync_orders(&state, &kalshi_rest).await;
+    handlers::sync_orders(&state, &logger, &kalshi_rest).await;
     // Backfill fills from Kalshi REST (catches any missed WS fill events)
-    handlers::sync_fills(&state, &kalshi_rest).await;
+    handlers::sync_fills(&state, &logger, &kalshi_rest).await;
 
     // --- Connect WebSockets ---
-    let (mut kalshi_rx, kalshi_ws_handle) = connect_kalshi_ws(&auth, &config, &state).await?;
+    let (mut kalshi_rx, kalshi_ws_handle) = connect_kalshi_ws(&auth, &config, &mapper).await?;
     let mut poly_rx = connect_poly_ws(&state).await?;
 
     // --- Main event loop ---
     let mut game_tracker = GameTracker::new();
     let mut scoreboard_interval =
         tokio::time::interval(tokio::time::Duration::from_secs(config.polling.scoreboard_interval_secs));
-    let mut cleanup_interval =
-        tokio::time::interval(tokio::time::Duration::from_secs(config.intervals.cleanup_secs));
-    let mut discovery_interval =
-        tokio::time::interval(tokio::time::Duration::from_secs(config.intervals.discovery_secs));
-    let mut order_sync_interval =
-        tokio::time::interval(tokio::time::Duration::from_secs(config.intervals.order_sync_secs));
+    let mut maintenance_interval =
+        tokio::time::interval(tokio::time::Duration::from_secs(config.intervals.maintenance_interval_secs));
     let mut current_day = today;
     let dry_run = config.kalshi.dry_run;
 
@@ -153,24 +150,16 @@ async fn main() -> Result<()> {
                     current_day = now_day;
                 }
                 handlers::handle_scoreboard_tick(
-                    &espn_poller, &state, &mut game_tracker,
+                    &espn_poller, &state, &logger, &mut game_tracker,
                     &strategies, &kalshi_rest, dry_run,
                     notifier.as_ref(),
                 ).await;
             }
-            _ = cleanup_interval.tick() => {
-                handlers::cleanup_finished_games(&state, &kalshi_rest, dry_run).await;
-            }
-            _ = discovery_interval.tick() => {
-                handlers::discover_new_markets(
-                    &kalshi_rest, &espn_poller, &state,
-                    kalshi_ws_handle.as_ref(),
+            _ = maintenance_interval.tick() => {
+                handlers::handle_maintenance_tick(
+                    &state, &logger, &kalshi_rest, &espn_poller,
+                    &mapper, kalshi_ws_handle.as_ref(),
                 ).await;
-            }
-            _ = order_sync_interval.tick() => {
-                handlers::sync_orders(&state, &kalshi_rest).await;
-                handlers::sync_fills(&state, &kalshi_rest).await;
-                handlers::sync_positions(&state, &kalshi_rest).await;
             }
             Some(event) = async {
                 match &mut kalshi_rx {
@@ -178,7 +167,7 @@ async fn main() -> Result<()> {
                     None => std::future::pending().await,
                 }
             } => {
-                handlers::handle_kalshi_event(event, &state, notifier.as_ref()).await;
+                handlers::handle_kalshi_event(event, &state, &logger).await;
             }
             Some(event) = async {
                 match &mut poly_rx {
@@ -199,6 +188,7 @@ async fn fetch_initial_markets(
     kalshi_rest: &Arc<KalshiRestClient>,
     today: &str,
     bot_state: &mut bot::BotState,
+    market_mapper: &mut MarketMapper,
 ) -> Result<()> {
     tracing::info!("Fetching initial market data...");
     let espn_games = espn_poller.fetch_scoreboard().await?;
@@ -250,7 +240,7 @@ async fn fetch_initial_markets(
         espn_for_matching.len(), kalshi_for_matching.len(), poly_for_matching.len(), today, tomorrow
     );
 
-    if let Err(e) = bot_state.market_mapper.resolve_deterministic(
+    if let Err(e) = market_mapper.resolve_deterministic(
         &espn_for_matching,
         &kalshi_for_matching,
         &poly_for_matching,
@@ -259,7 +249,7 @@ async fn fetch_initial_markets(
         tracing::error!("Market mapping failed: {:?}", e);
     }
 
-    populate_game_states(bot_state, &espn_games, Some(&kalshi_volume));
+    populate_game_states(bot_state, market_mapper, &espn_games, Some(&kalshi_volume));
 
     Ok(())
 }
@@ -268,11 +258,11 @@ async fn fetch_initial_markets(
 async fn connect_kalshi_ws(
     auth: &KalshiAuth,
     config: &Config,
-    state: &SharedState,
+    mapper: &SharedMapper,
 ) -> Result<(Option<tokio::sync::mpsc::UnboundedReceiver<sports_betting::kalshi::websocket::KalshiWsEvent>>, Option<KalshiWsHandle>)> {
     let kalshi_tickers: Vec<String> = {
-        let s = state.lock().await;
-        s.market_mapper.all_mapped_kalshi_tickers()
+        let m = mapper.lock().await;
+        m.all_mapped_kalshi_tickers()
     };
 
     let kalshi_ws = KalshiWsClient::new(auth.clone(), config.kalshi.demo);

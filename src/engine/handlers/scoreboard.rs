@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::engine::bot::{SharedState, StrategyRegistry, BotState, fetch_and_apply_summary};
+use crate::engine::bot::{SharedState, SharedLogger, StrategyRegistry, BotState, fetch_and_apply_summary};
 use crate::engine::executor::{evaluate_strategies, execute_signal};
 use crate::engine::notifier::Notifier;
 use crate::espn::poller::{EspnPoller, GameTracker};
@@ -10,6 +10,7 @@ use crate::kalshi::rest::KalshiRestClient;
 pub async fn handle_scoreboard_tick(
     espn_poller: &EspnPoller,
     state: &SharedState,
+    logger: &SharedLogger,
     game_tracker: &mut GameTracker,
     registry: &StrategyRegistry,
     kalshi_rest: &Arc<KalshiRestClient>,
@@ -54,7 +55,7 @@ pub async fn handle_scoreboard_tick(
     }
 
     // CLV validation: check pre-game orders when game goes live
-    validate_clv_orders(&mut s, &pregame_to_live);
+    validate_clv_orders(&s, logger, &pregame_to_live);
 
     // Log break detection with context
     for event_id in &new_breaks {
@@ -77,7 +78,9 @@ pub async fn handle_scoreboard_tick(
     }
 
     // Re-acquire lock for strategy evaluation and logging
-    let s = state.lock().await;
+    let mut s = state.lock().await;
+    // Clear in-flight at tick start — its only purpose is preventing double-sends within a tick
+    s.order_manager.clear_all_in_flight();
     log_game_summary(&s);
 
     let signals = evaluate_strategies(&s, registry);
@@ -86,7 +89,7 @@ pub async fn handle_scoreboard_tick(
     let mut placed = Vec::new();
     for signal in signals {
         if let Some(order) = execute_signal(
-            signal, state, kalshi_rest, dry_run,
+            signal, state, logger, kalshi_rest, dry_run,
             &registry.live_strategies,
             registry.max_contracts_per_game,
         ).await {
@@ -94,7 +97,7 @@ pub async fn handle_scoreboard_tick(
         }
     }
 
-    // Send notifications only for break_ev orders
+    // Send notifications for break_ev orders only
     if let Some(n) = notifier {
         let break_ev_orders: Vec<_> = placed.into_iter()
             .filter(|o| o.strategy == "break_ev")
@@ -104,7 +107,7 @@ pub async fn handle_scoreboard_tick(
 }
 
 /// Validate CLV orders when games transition from pre-game to live.
-fn validate_clv_orders(s: &mut BotState, pregame_to_live: &[String]) {
+fn validate_clv_orders(s: &BotState, logger: &SharedLogger, pregame_to_live: &[String]) {
     for event_id in pregame_to_live {
         if let Some(gs) = s.game_state.get(event_id) {
             let tickers: Vec<&str> = gs.kalshi_tickers();
@@ -127,7 +130,8 @@ fn validate_clv_orders(s: &mut BotState, pregame_to_live: &[String]) {
                         clv_order.ticker, clv_order.order_id,
                         clv_order.price_cents, mid, clv, captured,
                     );
-                    let _ = s.logger.log_clv_check(
+                    let log = logger.lock().unwrap();
+                    let _ = log.log_clv_check(
                         &clv_order.order_id,
                         &clv_order.ticker,
                         &clv_order.side,

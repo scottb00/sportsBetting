@@ -9,29 +9,42 @@ use crate::config::Config;
 use crate::engine::game_state::{GameStateManager, KalshiMarketState};
 use crate::engine::logger::TradeLogger;
 use crate::engine::market_mapper::MarketMapper;
+use crate::engine::market_prep::{BookPrices, extract_book_prices};
 use crate::engine::order_manager::OrderManager;
 use crate::engine::risk::RiskManager;
 use crate::espn::poller::EspnPoller;
 use crate::espn::types::GameInfo;
 use crate::kalshi::orderbook::LocalOrderBook;
-use crate::kalshi::types::Position;
 use crate::strategies::Strategy;
 
 /// All shared mutable state for the bot.
 pub struct BotState {
     pub game_state: GameStateManager,
-    pub market_mapper: MarketMapper,
     pub order_books: HashMap<String, LocalOrderBook>,
     pub risk: RiskManager,
     pub order_manager: OrderManager,
-    pub logger: TradeLogger,
-    /// High-water mark for fill sync: latest fill `created_time` we've seen from REST.
-    pub last_fill_sync_ts: Option<String>,
-    /// Live positions from Kalshi, keyed by ticker.
-    pub positions: HashMap<String, Position>,
+}
+
+impl BotState {
+    /// Derive bid/ask/mid prices from the order book for a ticker.
+    /// Returns default (all None) if no book exists yet.
+    pub fn book_prices(&self, ticker: &str) -> BookPrices {
+        self.order_books
+            .get(ticker)
+            .map(extract_book_prices)
+            .unwrap_or(BookPrices { bid: None, ask: None, mid: None })
+    }
 }
 
 pub type SharedState = Arc<Mutex<BotState>>;
+
+/// Thread-safe trade logger, independent of BotState to reduce lock contention.
+/// Uses std::sync::Mutex since all operations are fast (single SQLite INSERT).
+pub type SharedLogger = Arc<std::sync::Mutex<TradeLogger>>;
+
+/// Thread-safe market mapper, independent of BotState.
+/// Uses tokio::sync::Mutex since discovery may hold the lock across async calls.
+pub type SharedMapper = Arc<Mutex<MarketMapper>>;
 
 /// Holds registered strategies and shared filter parameters.
 pub struct StrategyRegistry {
@@ -46,16 +59,16 @@ pub struct StrategyRegistry {
     pub max_contracts_per_game: i64,
 }
 
-/// Build initial BotState from config.
-pub fn create_bot_state(config: &Config) -> Result<BotState> {
+/// Build initial BotState, TradeLogger, and MarketMapper from config.
+/// Logger and mapper are returned separately so they can be wrapped in their own locks.
+pub fn create_bot_state(config: &Config) -> Result<(BotState, TradeLogger, MarketMapper)> {
     let logger = TradeLogger::new(&config.logging.db_path)?;
     tracing::info!("Trade logger initialized at {}", config.logging.db_path);
 
     let market_mapper = MarketMapper::new(&config.logging.cache_path);
 
-    Ok(BotState {
+    let state = BotState {
         game_state: GameStateManager::new(),
-        market_mapper,
         order_books: HashMap::new(),
         risk: RiskManager::new(
             config.risk.max_position_per_game,
@@ -65,10 +78,8 @@ pub fn create_bot_state(config: &Config) -> Result<BotState> {
             config.risk.min_edge_threshold,
         ),
         order_manager: OrderManager::new(),
-        logger,
-        last_fill_sync_ts: None,
-        positions: HashMap::new(),
-    })
+    };
+    Ok((state, logger, market_mapper))
 }
 
 /// Build the strategy registry from config.
@@ -97,13 +108,14 @@ pub fn create_strategies(config: &Config) -> StrategyRegistry {
 /// Populate game states from ESPN data, optionally setting Kalshi volume.
 pub fn populate_game_states(
     s: &mut BotState,
+    mapper: &MarketMapper,
     games: &[GameInfo],
     kalshi_volume: Option<&HashMap<String, i64>>,
 ) {
     for game in games {
-        let kalshi_market_infos: Vec<_> = s.market_mapper.kalshi_markets_for_game(&game.event_id).to_vec();
-        let poly_token = s.market_mapper.polymarket_token(&game.event_id).map(|t| t.to_string());
-        let poly_is_home = s.market_mapper.polymarket_is_home_team(&game.event_id);
+        let kalshi_market_infos: Vec<_> = mapper.kalshi_markets_for_game(&game.event_id).to_vec();
+        let poly_token = mapper.polymarket_token(&game.event_id).map(|t| t.to_string());
+        let poly_is_home = mapper.polymarket_is_home_team(&game.event_id);
 
         let gs = s.game_state.upsert(
             game.event_id.clone(),

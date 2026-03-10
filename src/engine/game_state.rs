@@ -3,12 +3,10 @@ use std::collections::HashMap;
 use crate::espn::types::GamePhase;
 
 /// Book state for a single Kalshi market ticker.
+/// Prices (bid/ask/mid) live in LocalOrderBook, not here — use BotState::book_prices().
 #[derive(Debug, Clone)]
 pub struct KalshiMarketState {
     pub ticker: String,
-    pub yes_bid: Option<f64>,
-    pub yes_ask: Option<f64>,
-    pub yes_mid: Option<f64>,
     pub volume: Option<i64>,
     /// true if YES on this ticker = home team wins
     pub is_home: bool,
@@ -18,18 +16,9 @@ impl KalshiMarketState {
     pub fn new(ticker: String, is_home: bool) -> Self {
         Self {
             ticker,
-            yes_bid: None,
-            yes_ask: None,
-            yes_mid: None,
             volume: None,
             is_home,
         }
-    }
-
-    pub fn update_prices(&mut self, bid: Option<f64>, ask: Option<f64>, mid: Option<f64>) {
-        self.yes_bid = bid;
-        self.yes_ask = ask;
-        self.yes_mid = mid;
     }
 }
 
@@ -94,11 +83,6 @@ impl GameState {
         } else {
             Some(1.0 - home_fair)
         }
-    }
-
-    /// Get mutable Kalshi market state for a given ticker.
-    pub fn kalshi_market_mut(&mut self, ticker: &str) -> Option<&mut KalshiMarketState> {
-        self.kalshi_markets.iter_mut().find(|m| m.ticker == ticker)
     }
 
     /// Get all Kalshi tickers for this game.

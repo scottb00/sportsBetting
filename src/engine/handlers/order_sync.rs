@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use crate::engine::bot::SharedState;
+use crate::engine::bot::{SharedState, SharedLogger};
 use crate::kalshi::rest::KalshiRestClient;
 
 /// Sync resting orders from Kalshi API into the local OrderManager cache.
 /// Fetches orders OUTSIDE the lock, then applies under the lock to avoid
 /// blocking the event loop during the HTTP call.
-pub async fn sync_orders(state: &SharedState, kalshi_rest: &Arc<KalshiRestClient>) {
+pub async fn sync_orders(state: &SharedState, logger: &SharedLogger, kalshi_rest: &Arc<KalshiRestClient>) {
     // Fetch from Kalshi without holding the lock
     let orders = match kalshi_rest.get_orders(None).await {
         Ok(resp) => resp.orders,
@@ -16,53 +16,67 @@ pub async fn sync_orders(state: &SharedState, kalshi_rest: &Arc<KalshiRestClient
         }
     };
 
-    // Apply under lock (fast, no I/O)
-    let mut s = state.lock().await;
-
-    // Persist resting orders to SQLite so the dashboard can show them
-    // (uses INSERT OR IGNORE to avoid overwriting orders with real strategy/edge data)
-    for order in &orders {
-        let price_cents = order.yes_price.or(order.no_price).unwrap_or(0);
-        let _ = s.logger.log_order_if_missing(
-            &order.order_id,
-            &order.ticker,
-            &format!("{:?}", order.action),
-            &format!("{:?}", order.side),
-            price_cents,
-            order.remaining_count,
-            &order.status,
-            Some(&order.created_time),
-        );
+    // Collect data for logging under state lock, then log under logger lock
+    struct OrderLogEntry {
+        order_id: String,
+        ticker: String,
+        action: String,
+        side: String,
+        price_cents: i64,
+        remaining_count: i64,
+        status: String,
+        created_time: String,
+        game_info: Option<crate::engine::logger::GameInfo>,
+        strategy: Option<String>,
     }
 
-    s.order_manager.apply_synced_orders(orders);
-}
-
-/// Sync positions from Kalshi API into BotState for dashboard display.
-pub async fn sync_positions(state: &SharedState, kalshi_rest: &Arc<KalshiRestClient>) {
-    let positions = match kalshi_rest.get_positions().await {
-        Ok(resp) => resp.market_positions,
-        Err(e) => {
-            tracing::warn!("Position sync failed: {:?}", e);
-            return;
-        }
+    let (log_entries, orders_for_cache) = {
+        let s = state.lock().await;
+        let entries: Vec<OrderLogEntry> = orders.iter().map(|order| {
+            let price_cents = match order.side {
+                crate::kalshi::types::OrderSide::Yes => order.yes_price.unwrap_or(0),
+                crate::kalshi::types::OrderSide::No => order.no_price.unwrap_or(0),
+            };
+            let game_info = crate::engine::logger::GameInfo::from_game_state(&s.game_state, &order.ticker);
+            let strategy = s.order_manager.get_strategy(&order.order_id).map(|s| s.to_string());
+            OrderLogEntry {
+                order_id: order.order_id.clone(),
+                ticker: order.ticker.clone(),
+                action: format!("{:?}", order.action),
+                side: format!("{:?}", order.side),
+                price_cents,
+                remaining_count: order.remaining_count,
+                status: order.status.clone(),
+                created_time: order.created_time.clone(),
+                game_info,
+                strategy,
+            }
+        }).collect();
+        (entries, orders)
     };
 
-    let with_holdings: Vec<_> = positions.iter()
-        .filter(|p| p.position != 0)
-        .collect();
-    if !with_holdings.is_empty() {
-        for p in &with_holdings {
-            tracing::info!(
-                "Position holding: {} | position={} exposure={} traded={}",
-                p.ticker, p.position, p.market_exposure, p.total_traded
+    // Log under logger lock (no state lock held)
+    {
+        let log = logger.lock().unwrap();
+        for entry in &log_entries {
+            let _ = log.log_order_if_missing(
+                &entry.order_id,
+                &entry.ticker,
+                &entry.action,
+                &entry.side,
+                entry.price_cents,
+                entry.remaining_count,
+                &entry.status,
+                Some(&entry.created_time),
+                entry.game_info.as_ref(),
             );
+            if let Some(strategy) = &entry.strategy {
+                let _ = log.update_order_strategy(&entry.order_id, strategy);
+            }
         }
     }
 
+    // Apply to order manager under state lock
     let mut s = state.lock().await;
-    s.positions.clear();
-    for pos in positions {
-        s.positions.insert(pos.ticker.clone(), pos);
-    }
+    s.order_manager.apply_synced_orders(orders_for_cache);
 }

@@ -174,6 +174,16 @@ impl RiskManager {
         }
     }
 
+    /// Net position for a ticker: positive = YES contracts, negative = NO contracts.
+    /// Computed from the internal "ticker:yes" and "ticker:no" entries.
+    pub fn net_position(&self, ticker: &str) -> i64 {
+        let yes = self.positions.get(&format!("{}:yes", ticker))
+            .map(|e| e.contracts).unwrap_or(0);
+        let no = self.positions.get(&format!("{}:no", ticker))
+            .map(|e| e.contracts).unwrap_or(0);
+        yes - no
+    }
+
     /// Reset daily P&L (call at start of trading day).
     pub fn reset_daily(&mut self) {
         self.daily_pnl = 0.0;

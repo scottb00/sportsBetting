@@ -2,9 +2,12 @@ pub mod break_ev;
 pub mod clv_hunter;
 pub mod common;
 
+use std::collections::HashMap;
+
 use crate::engine::game_state::GameState;
 use crate::engine::order_manager::OrderSignal;
 use crate::engine::risk::RiskManager;
+use crate::kalshi::orderbook::LocalOrderBook;
 
 /// Trait for all trading strategies.
 ///
@@ -23,10 +26,12 @@ pub trait Strategy: Send + Sync {
     /// Evaluate the game and optionally return an order signal.
     /// Implementations should call `can_evaluate` internally as a guard,
     /// so `evaluate` is safe to call directly without checking first.
+    /// `order_books` provides live bid/ask/mid prices (source of truth).
     fn evaluate(
         &self,
         game: &GameState,
         risk: &RiskManager,
         current_game_exposure: f64,
+        order_books: &HashMap<String, LocalOrderBook>,
     ) -> Option<OrderSignal>;
 }

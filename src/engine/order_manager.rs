@@ -49,11 +49,16 @@ pub struct OrderManager {
     /// CLV order metadata: order_id -> info. Populated when we place CLV orders.
     /// Used for closing-line validation when games go live.
     clv_orders: HashMap<String, ClvOrderInfo>,
+    /// Strategy that placed each order (order_id -> strategy name).
+    /// Populated when the executor places orders; used by sync to backfill the DB.
+    order_strategies: HashMap<String, String>,
     /// Tracks total contracts sent per ticker (resting + filled).
     /// This persists across order fills to prevent re-ordering the same game.
     committed_contracts: HashMap<String, i64>,
     /// When we last synced with Kalshi.
     pub last_sync: Option<Instant>,
+    /// High-water mark for fill sync: latest fill created_time as unix seconds.
+    last_fill_sync_ts: Option<i64>,
 }
 
 impl Default for OrderManager {
@@ -69,8 +74,10 @@ impl OrderManager {
             orders_by_ticker: HashMap::new(),
             in_flight: HashSet::new(),
             clv_orders: HashMap::new(),
+            order_strategies: HashMap::new(),
             committed_contracts: HashMap::new(),
             last_sync: None,
+            last_fill_sync_ts: None,
         }
     }
 
@@ -92,7 +99,6 @@ impl OrderManager {
                 .insert(order.order_id.clone());
             self.resting_orders.insert(order.order_id.clone(), order);
         }
-        self.in_flight.clear();
         self.last_sync = Some(Instant::now());
 
         // Clean up CLV entries for orders no longer resting
@@ -127,9 +133,16 @@ impl OrderManager {
         self.in_flight.remove(ticker);
     }
 
+    /// Clear all in-flight tickers. Called at the start of each scoreboard tick
+    /// since in_flight only needs to prevent double-sends within a single tick.
+    pub fn clear_all_in_flight(&mut self) {
+        self.in_flight.clear();
+    }
+
     /// Record a newly placed order into the cache (avoids waiting for next sync).
     /// Also tracks committed contracts so filled orders still count toward limits.
-    pub fn record_placed_order(&mut self, order: Order, contracts_sent: i64) {
+    pub fn record_placed_order(&mut self, order: Order, contracts_sent: i64, strategy: &str) {
+        self.order_strategies.insert(order.order_id.clone(), strategy.to_string());
         *self.committed_contracts.entry(order.ticker.clone()).or_default() += contracts_sent;
         tracing::info!(
             "Committed {} contracts on {} (total: {})",
@@ -214,12 +227,27 @@ impl OrderManager {
             .collect()
     }
 
+    /// Get the strategy that placed an order (if known from this session).
+    pub fn get_strategy(&self, order_id: &str) -> Option<&str> {
+        self.order_strategies.get(order_id).map(|s| s.as_str())
+    }
+
     pub fn open_order_count(&self) -> usize {
         self.resting_orders.len()
     }
 
     pub fn in_flight_count(&self) -> usize {
         self.in_flight.len()
+    }
+
+    /// Get the fill sync high-water mark (unix seconds).
+    pub fn last_fill_sync_ts(&self) -> Option<i64> {
+        self.last_fill_sync_ts
+    }
+
+    /// Set the fill sync high-water mark (unix seconds).
+    pub fn set_last_fill_sync_ts(&mut self, ts: i64) {
+        self.last_fill_sync_ts = Some(ts);
     }
 
     /// Record a partial fill: decrement remaining_count on the order.
@@ -308,7 +336,7 @@ mod tests {
     #[test]
     fn has_resting_order_from_cache() {
         let mut om = OrderManager::new();
-        om.record_placed_order(make_order("o1", "TICKER-A"), 10);
+        om.record_placed_order(make_order("o1", "TICKER-A"), 10, "test");
 
         assert!(om.has_resting_order("TICKER-A"));
         assert!(!om.has_resting_order("TICKER-B"));
@@ -327,7 +355,7 @@ mod tests {
     fn record_placed_clears_in_flight() {
         let mut om = OrderManager::new();
         om.mark_in_flight("TICKER-A");
-        om.record_placed_order(make_order("o1", "TICKER-A"), 10);
+        om.record_placed_order(make_order("o1", "TICKER-A"), 10, "test");
 
         assert!(om.has_resting_order("TICKER-A"));
         assert_eq!(om.in_flight_count(), 0);
@@ -336,7 +364,7 @@ mod tests {
     #[test]
     fn committed_contracts_tracked() {
         let mut om = OrderManager::new();
-        om.record_placed_order(make_order("o1", "TICKER-A"), 10);
+        om.record_placed_order(make_order("o1", "TICKER-A"), 10, "test");
         assert_eq!(om.committed_contracts("TICKER-A"), 10);
         assert_eq!(om.committed_contracts("TICKER-B"), 0);
     }
@@ -344,7 +372,7 @@ mod tests {
     #[test]
     fn clv_orders_tracked() {
         let mut om = OrderManager::new();
-        om.record_placed_order(make_order("o1", "TICKER-A"), 10);
+        om.record_placed_order(make_order("o1", "TICKER-A"), 10, "test");
         om.record_clv_order("o1", "TICKER-A", "Yes", 55);
 
         let clv = om.clv_orders_for_tickers(&["TICKER-A"]);
@@ -360,7 +388,7 @@ mod tests {
     #[test]
     fn remove_order_clears_all() {
         let mut om = OrderManager::new();
-        om.record_placed_order(make_order("o1", "TICKER-A"), 10);
+        om.record_placed_order(make_order("o1", "TICKER-A"), 10, "test");
         om.record_clv_order("o1", "TICKER-A", "Yes", 55);
 
         assert!(om.has_resting_order("TICKER-A"));
@@ -371,7 +399,7 @@ mod tests {
     #[test]
     fn partial_fill_keeps_order_resting() {
         let mut om = OrderManager::new();
-        om.record_placed_order(make_order("o1", "TICKER-A"), 10);
+        om.record_placed_order(make_order("o1", "TICKER-A"), 10, "test");
         assert!(om.has_resting_order("TICKER-A"));
 
         // Partial fill: 3 of 10 contracts
@@ -383,7 +411,7 @@ mod tests {
     #[test]
     fn full_fill_removes_order() {
         let mut om = OrderManager::new();
-        om.record_placed_order(make_order("o1", "TICKER-A"), 10);
+        om.record_placed_order(make_order("o1", "TICKER-A"), 10, "test");
 
         // Full fill
         om.record_fill("o1", 10);

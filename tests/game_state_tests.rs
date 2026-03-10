@@ -1,5 +1,8 @@
+use std::collections::HashMap;
+
 use sports_betting::engine::game_state::{GameState, GameStateManager, KalshiMarketState};
 use sports_betting::espn::types::GamePhase;
+use sports_betting::kalshi::orderbook::LocalOrderBook;
 use sports_betting::strategies::Strategy;
 
 /// Helper: create a basic GameState for testing
@@ -7,28 +10,36 @@ fn make_game() -> GameState {
     GameState::new("evt_001".into(), "Duke".into(), "UNC".into())
 }
 
-/// Helper: create a game with ESPN fair value and two Kalshi markets
-fn make_game_with_markets(espn_hp: Option<f64>) -> GameState {
+/// Helper: build a LocalOrderBook with given yes_bid and yes_ask (as cents).
+fn make_book(ticker: &str, yes_bid: i64, yes_ask: i64) -> LocalOrderBook {
+    let mut book = LocalOrderBook::new(ticker.to_string());
+    // YES bid at given price
+    book.yes_levels.insert(yes_bid, 100);
+    // NO bid at (100 - yes_ask) to create a YES ask at yes_ask
+    book.no_levels.insert(100 - yes_ask, 100);
+    book
+}
+
+/// Helper: create a game with ESPN fair value, two Kalshi markets, and matching order books.
+fn make_game_with_markets(espn_hp: Option<f64>) -> (GameState, HashMap<String, LocalOrderBook>) {
     let mut gs = make_game();
     gs.espn_home_win_prob = espn_hp;
 
     // Home market: YES = Duke (home)
     let mut home_mkt = KalshiMarketState::new("KXNCAAMBGAME-26MAR09-DUKE".into(), true);
-    home_mkt.yes_bid = Some(48.0);
-    home_mkt.yes_ask = Some(52.0);
-    home_mkt.yes_mid = Some(50.0);
     home_mkt.volume = Some(25000);
     gs.kalshi_markets.push(home_mkt);
 
     // Away market: YES = UNC (away)
     let mut away_mkt = KalshiMarketState::new("KXNCAAMBGAME-26MAR09-UNC".into(), false);
-    away_mkt.yes_bid = Some(48.0);
-    away_mkt.yes_ask = Some(52.0);
-    away_mkt.yes_mid = Some(50.0);
     away_mkt.volume = Some(15000);
     gs.kalshi_markets.push(away_mkt);
 
-    gs
+    let mut books = HashMap::new();
+    books.insert("KXNCAAMBGAME-26MAR09-DUKE".to_string(), make_book("KXNCAAMBGAME-26MAR09-DUKE", 48, 52));
+    books.insert("KXNCAAMBGAME-26MAR09-UNC".to_string(), make_book("KXNCAAMBGAME-26MAR09-UNC", 48, 52));
+
+    (gs, books)
 }
 
 // ============================================================
@@ -37,7 +48,7 @@ fn make_game_with_markets(espn_hp: Option<f64>) -> GameState {
 
 #[test]
 fn fair_value_for_home_market() {
-    let gs = make_game_with_markets(Some(0.65));
+    let (gs, _books) = make_game_with_markets(Some(0.65));
     let home_mkt = &gs.kalshi_markets[0];
     assert!(home_mkt.is_home);
     let fair = gs.fair_value_for_market(home_mkt).unwrap();
@@ -46,7 +57,7 @@ fn fair_value_for_home_market() {
 
 #[test]
 fn fair_value_for_away_market() {
-    let gs = make_game_with_markets(Some(0.65));
+    let (gs, _books) = make_game_with_markets(Some(0.65));
     let away_mkt = &gs.kalshi_markets[1];
     assert!(!away_mkt.is_home);
     let fair = gs.fair_value_for_market(away_mkt).unwrap();
@@ -56,7 +67,7 @@ fn fair_value_for_away_market() {
 
 #[test]
 fn fair_value_home_away_sum_to_one() {
-    let gs = make_game_with_markets(Some(0.70));
+    let (gs, _books) = make_game_with_markets(Some(0.70));
     let home_fair = gs.fair_value_for_market(&gs.kalshi_markets[0]).unwrap();
     let away_fair = gs.fair_value_for_market(&gs.kalshi_markets[1]).unwrap();
     assert!((home_fair + away_fair - 1.0).abs() < 1e-10);
@@ -64,23 +75,8 @@ fn fair_value_home_away_sum_to_one() {
 
 #[test]
 fn fair_value_none_without_espn() {
-    let gs = make_game_with_markets(None);
+    let (gs, _books) = make_game_with_markets(None);
     assert!(gs.fair_value_for_market(&gs.kalshi_markets[0]).is_none());
-}
-
-// ============================================================
-// KalshiMarketState
-// ============================================================
-
-#[test]
-fn market_state_update_prices() {
-    let mut mkt = KalshiMarketState::new("TEST-TICKER".into(), true);
-    assert!(mkt.yes_bid.is_none());
-
-    mkt.update_prices(Some(45.0), Some(55.0), Some(50.0));
-    assert_eq!(mkt.yes_bid, Some(45.0));
-    assert_eq!(mkt.yes_ask, Some(55.0));
-    assert_eq!(mkt.yes_mid, Some(50.0));
 }
 
 // ============================================================
@@ -95,13 +91,13 @@ fn has_kalshi_false_when_empty() {
 
 #[test]
 fn has_kalshi_true_with_markets() {
-    let gs = make_game_with_markets(Some(0.50));
+    let (gs, _books) = make_game_with_markets(Some(0.50));
     assert!(gs.has_kalshi());
 }
 
 #[test]
 fn kalshi_tickers_returns_all() {
-    let gs = make_game_with_markets(Some(0.50));
+    let (gs, _books) = make_game_with_markets(Some(0.50));
     let tickers = gs.kalshi_tickers();
     assert_eq!(tickers.len(), 2);
     assert!(tickers.contains(&"KXNCAAMBGAME-26MAR09-DUKE"));
@@ -110,22 +106,8 @@ fn kalshi_tickers_returns_all() {
 
 #[test]
 fn kalshi_total_volume() {
-    let gs = make_game_with_markets(Some(0.50));
+    let (gs, _books) = make_game_with_markets(Some(0.50));
     assert_eq!(gs.kalshi_total_volume(), 40000);
-}
-
-#[test]
-fn kalshi_market_mut_finds_ticker() {
-    let mut gs = make_game_with_markets(Some(0.50));
-    let mkt = gs.kalshi_market_mut("KXNCAAMBGAME-26MAR09-DUKE");
-    assert!(mkt.is_some());
-    assert!(mkt.unwrap().is_home);
-}
-
-#[test]
-fn kalshi_market_mut_returns_none_for_unknown() {
-    let mut gs = make_game_with_markets(Some(0.50));
-    assert!(gs.kalshi_market_mut("NONEXISTENT").is_none());
 }
 
 // ============================================================
@@ -202,10 +184,10 @@ fn clv_hunter_no_signal_without_espn() {
     let hunter = ClvHunter::new(0.015);
     let risk = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01);
 
-    let mut gs = make_game_with_markets(None);
+    let (mut gs, books) = make_game_with_markets(None);
     gs.phase = GamePhase::PreGame;
 
-    let signal = hunter.evaluate(&gs, &risk, 0.0);
+    let signal = hunter.evaluate(&gs, &risk, 0.0, &books);
     assert!(signal.is_none());
 }
 
@@ -218,10 +200,10 @@ fn clv_hunter_signal_with_espn() {
     let risk = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01);
 
     // ESPN says 65% home, Kalshi mid is 50c → big edge
-    let mut gs = make_game_with_markets(Some(0.65));
+    let (mut gs, books) = make_game_with_markets(Some(0.65));
     gs.phase = GamePhase::PreGame;
 
-    let signal = hunter.evaluate(&gs, &risk, 0.0);
+    let signal = hunter.evaluate(&gs, &risk, 0.0, &books);
     assert!(signal.is_some());
     let sig = signal.unwrap();
     assert_eq!(sig.strategy, "clv_hunter");
@@ -235,10 +217,10 @@ fn break_ev_no_signal_when_not_on_break() {
     let quoter = BreakEvQuoter::new(0.015);
     let risk = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01);
 
-    let mut gs = make_game_with_markets(Some(0.70));
+    let (mut gs, books) = make_game_with_markets(Some(0.70));
     gs.phase = GamePhase::Live;
 
-    assert!(quoter.evaluate(&gs, &risk, 0.0).is_none());
+    assert!(quoter.evaluate(&gs, &risk, 0.0, &books).is_none());
 }
 
 #[test]
@@ -249,10 +231,10 @@ fn break_ev_signals_on_halftime() {
     let quoter = BreakEvQuoter::new(0.01);
     let risk = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01);
 
-    let mut gs = make_game_with_markets(Some(0.70));
+    let (mut gs, books) = make_game_with_markets(Some(0.70));
     gs.phase = GamePhase::Halftime;
 
-    let signal = quoter.evaluate(&gs, &risk, 0.0);
+    let signal = quoter.evaluate(&gs, &risk, 0.0, &books);
     assert!(signal.is_some());
 }
 
@@ -264,28 +246,18 @@ fn strategy_picks_best_market() {
     let quoter = BreakEvQuoter::new(0.01);
     let risk = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01);
 
-    // ESPN says 80% home. Home market ask=52, away market ask=52.
-    // Home YES fair=0.80, price=51c → edge=0.29
-    // Away YES fair=0.20, price=51c → edge=-0.31 (no edge buying YES)
-    // Away NO fair=0.80, price=(100-48-1)=51c → edge=0.29
-    // Should pick whichever gives better edge
     let mut gs = make_game();
     gs.espn_home_win_prob = Some(0.80);
     gs.phase = GamePhase::Halftime;
 
-    let mut home_mkt = KalshiMarketState::new("HOME-TICKER".into(), true);
-    home_mkt.yes_bid = Some(48.0);
-    home_mkt.yes_ask = Some(52.0);
-    home_mkt.yes_mid = Some(50.0);
-    gs.kalshi_markets.push(home_mkt);
+    gs.kalshi_markets.push(KalshiMarketState::new("HOME-TICKER".into(), true));
+    gs.kalshi_markets.push(KalshiMarketState::new("AWAY-TICKER".into(), false));
 
-    let mut away_mkt = KalshiMarketState::new("AWAY-TICKER".into(), false);
-    away_mkt.yes_bid = Some(48.0);
-    away_mkt.yes_ask = Some(52.0);
-    away_mkt.yes_mid = Some(50.0);
-    gs.kalshi_markets.push(away_mkt);
+    let mut books = HashMap::new();
+    books.insert("HOME-TICKER".to_string(), make_book("HOME-TICKER", 48, 52));
+    books.insert("AWAY-TICKER".to_string(), make_book("AWAY-TICKER", 48, 52));
 
-    let signal = quoter.evaluate(&gs, &risk, 0.0);
+    let signal = quoter.evaluate(&gs, &risk, 0.0, &books);
     assert!(signal.is_some());
 }
 
@@ -305,16 +277,15 @@ fn alo_buy_yes_prices_at_ask_minus_one() {
     gs.espn_home_win_prob = Some(0.70);
     gs.phase = GamePhase::Halftime;
 
-    let mut mkt = KalshiMarketState::new("TEST-HOME".into(), true);
-    mkt.yes_bid = Some(55.0);
-    mkt.yes_ask = Some(60.0);
-    mkt.yes_mid = Some(57.5);
-    gs.kalshi_markets.push(mkt);
+    gs.kalshi_markets.push(KalshiMarketState::new("TEST-HOME".into(), true));
 
-    let signal = quoter.evaluate(&gs, &risk, 0.0);
+    let mut books = HashMap::new();
+    books.insert("TEST-HOME".to_string(), make_book("TEST-HOME", 55, 60));
+
+    let signal = quoter.evaluate(&gs, &risk, 0.0, &books);
     assert!(signal.is_some());
     let sig = signal.unwrap();
-    // Fair=0.70, mid=0.575 → buying YES. ALO price = ask-1 = 59
+    // Fair=0.70, mid=57.5c → buying YES. ALO price = ask-1 = 59
     assert_eq!(sig.price_cents, 59);
 }
 
@@ -330,16 +301,15 @@ fn alo_buy_no_prices_correctly() {
     gs.espn_home_win_prob = Some(0.30); // home is underdog
     gs.phase = GamePhase::Halftime;
 
-    let mut mkt = KalshiMarketState::new("TEST-HOME".into(), true);
-    mkt.yes_bid = Some(55.0);
-    mkt.yes_ask = Some(60.0);
-    mkt.yes_mid = Some(57.5);
-    gs.kalshi_markets.push(mkt);
+    gs.kalshi_markets.push(KalshiMarketState::new("TEST-HOME".into(), true));
 
-    let signal = quoter.evaluate(&gs, &risk, 0.0);
+    let mut books = HashMap::new();
+    books.insert("TEST-HOME".to_string(), make_book("TEST-HOME", 55, 60));
+
+    let signal = quoter.evaluate(&gs, &risk, 0.0, &books);
     assert!(signal.is_some());
     let sig = signal.unwrap();
-    // Fair YES=0.30, mid=0.575 → buying NO. NO ask = 100 - yes_bid = 45. Price = 45-1 = 44
+    // Fair YES=0.30, mid=57.5c → buying NO. NO ask = 100 - yes_bid = 45. Price = 45-1 = 44
     assert_eq!(sig.price_cents, 44);
 }
 
@@ -355,11 +325,11 @@ fn clv_signal_sets_expiration_to_game_start() {
     let hunter = ClvHunter::new(0.01);
     let risk = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01);
 
-    let mut gs = make_game_with_markets(Some(0.65));
+    let (mut gs, books) = make_game_with_markets(Some(0.65));
     gs.phase = GamePhase::PreGame;
     gs.start_time_ts = Some(1772996400); // game start time
 
-    let signal = hunter.evaluate(&gs, &risk, 0.0);
+    let signal = hunter.evaluate(&gs, &risk, 0.0, &books);
     assert!(signal.is_some());
     let sig = signal.unwrap();
     assert_eq!(sig.expiration_ts, Some(1772996400), "CLV expiration should match game start time");
@@ -373,11 +343,11 @@ fn clv_signal_no_expiration_without_start_time() {
     let hunter = ClvHunter::new(0.01);
     let risk = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01);
 
-    let mut gs = make_game_with_markets(Some(0.65));
+    let (mut gs, books) = make_game_with_markets(Some(0.65));
     gs.phase = GamePhase::PreGame;
     gs.start_time_ts = None;
 
-    let signal = hunter.evaluate(&gs, &risk, 0.0);
+    let signal = hunter.evaluate(&gs, &risk, 0.0, &books);
     assert!(signal.is_some());
     let sig = signal.unwrap();
     assert_eq!(sig.expiration_ts, None, "No expiration if start time unknown");
@@ -456,7 +426,7 @@ fn has_resting_order_tracks_correctly() {
         created_time: "2026-03-09T18:00:00Z".to_string(),
     };
 
-    om.record_placed_order(order, 10);
+    om.record_placed_order(order, 10, "test");
 
     assert!(om.has_resting_order("TICKER-A"));
     assert!(!om.has_resting_order("TICKER-B"));
@@ -482,7 +452,7 @@ fn resting_order_cleared_after_remove() {
         created_time: "2026-03-09T18:00:00Z".to_string(),
     };
 
-    om.record_placed_order(order, 10);
+    om.record_placed_order(order, 10, "test");
     assert!(om.has_resting_order("TICKER-A"));
 
     om.remove_order("order-1");
@@ -520,13 +490,12 @@ fn edge_calculated_from_order_price() {
     gs.espn_home_win_prob = Some(0.60);
     gs.phase = GamePhase::Halftime;
 
-    let mut mkt = KalshiMarketState::new("TEST".into(), true);
-    mkt.yes_bid = Some(50.0);
-    mkt.yes_ask = Some(58.0);
-    mkt.yes_mid = Some(54.0);
-    gs.kalshi_markets.push(mkt);
+    gs.kalshi_markets.push(KalshiMarketState::new("TEST".into(), true));
 
-    let signal = quoter.evaluate(&gs, &risk, 0.0);
+    let mut books = HashMap::new();
+    books.insert("TEST".to_string(), make_book("TEST", 50, 58));
+
+    let signal = quoter.evaluate(&gs, &risk, 0.0, &books);
     assert!(signal.is_some());
     let sig = signal.unwrap();
     assert_eq!(sig.price_cents, 57); // ask - 1

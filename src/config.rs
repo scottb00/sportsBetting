@@ -39,29 +39,19 @@ pub struct RiskConfig {
     pub min_edge_threshold: f64,
 }
 
-fn default_cleanup_secs() -> u64 { 300 }
-fn default_discovery_secs() -> u64 { 300 }
-fn default_order_sync_secs() -> u64 { 30 }
+fn default_maintenance_interval_secs() -> u64 { 30 }
 
 #[derive(Debug, Deserialize)]
 pub struct IntervalConfig {
-    /// How often to cancel orders for finished games (seconds).
-    #[serde(default = "default_cleanup_secs")]
-    pub cleanup_secs: u64,
-    /// How often to discover new Kalshi markets (seconds).
-    #[serde(default = "default_discovery_secs")]
-    pub discovery_secs: u64,
-    /// How often to sync resting orders from Kalshi (seconds).
-    #[serde(default = "default_order_sync_secs")]
-    pub order_sync_secs: u64,
+    /// How often to run the combined maintenance tick (cleanup + discovery + order/fill sync).
+    #[serde(default = "default_maintenance_interval_secs")]
+    pub maintenance_interval_secs: u64,
 }
 
 impl Default for IntervalConfig {
     fn default() -> Self {
         Self {
-            cleanup_secs: default_cleanup_secs(),
-            discovery_secs: default_discovery_secs(),
-            order_sync_secs: default_order_sync_secs(),
+            maintenance_interval_secs: default_maintenance_interval_secs(),
         }
     }
 }

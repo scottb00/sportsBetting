@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+
 use crate::engine::game_state::GameState;
 use crate::engine::order_manager::OrderSignal;
 use crate::engine::risk::RiskManager;
+use crate::kalshi::orderbook::LocalOrderBook;
 
 use super::Strategy;
 use super::common::evaluate_edge;
@@ -34,10 +37,11 @@ impl Strategy for BreakEvQuoter {
         game: &GameState,
         risk: &RiskManager,
         current_game_exposure: f64,
+        order_books: &HashMap<String, LocalOrderBook>,
     ) -> Option<OrderSignal> {
         if !self.can_evaluate(game) {
             return None;
         }
-        evaluate_edge(game, risk, current_game_exposure, self.min_edge, self.name())
+        evaluate_edge(game, risk, current_game_exposure, self.min_edge, self.name(), order_books)
     }
 }
