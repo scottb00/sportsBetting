@@ -212,6 +212,53 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Backfill game info for historical orders from Kalshi REST (for tickers no longer in live state)
+    {
+        use sports_betting::engine::logger::GameInfo;
+        use sports_betting::engine::market_mapper::MarketMapper;
+        let missing = {
+            let log = logger.lock().unwrap();
+            log.tickers_missing_game_info().unwrap_or_default()
+        };
+        if !missing.is_empty() {
+            tracing::info!("Backfilling game info for {} tickers from Kalshi REST", missing.len());
+            let mut game_info_map = std::collections::HashMap::new();
+            for ticker in &missing {
+                match kalshi_rest.get_market(ticker).await {
+                    Ok(market) => {
+                        let title = &market.title;
+                        let title_clean = title.trim_end_matches(" Winner?").trim_end_matches('?');
+                        let parts: Vec<&str> = title_clean.split(" at ").collect();
+                        if parts.len() == 2 {
+                            let away_team = parts[0].trim().to_string();
+                            let home_team = parts[1].trim().to_string();
+                            let is_home = market.yes_sub_title.as_deref()
+                                .map(|yst| MarketMapper::market_is_home_team(title, yst))
+                                .unwrap_or(true);
+                            game_info_map.insert(ticker.clone(), GameInfo {
+                                game_name: format!("{} vs {}", away_team, home_team),
+                                home_team,
+                                away_team,
+                                is_home,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("Could not fetch market {} for game info: {:?}", ticker, e);
+                    }
+                }
+            }
+            if !game_info_map.is_empty() {
+                let log = logger.lock().unwrap();
+                match log.backfill_game_info(&game_info_map) {
+                    Ok(n) if n > 0 => tracing::info!("Backfilled game info for {} order rows from REST", n),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("Failed to backfill game info from REST: {:?}", e),
+                }
+            }
+        }
+    }
+
     // --- Connect WebSockets ---
     let (mut kalshi_rx, kalshi_ws_handle) = connect_kalshi_ws(&auth, &config, &mapper).await?;
     let mut poly_rx = connect_poly_ws(&state).await?;

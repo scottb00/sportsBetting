@@ -1,4 +1,5 @@
 use crate::engine::bot::{SharedState, SharedOrderBooks, SharedLogger};
+use crate::engine::logger::GameInfo;
 use crate::espn::types::GamePhase;
 
 /// Clean up internal state for finished games.
@@ -6,7 +7,7 @@ use crate::espn::types::GamePhase;
 pub async fn cleanup_finished_games(state: &SharedState, order_books: &SharedOrderBooks, logger: &SharedLogger) {
     let mut s = state.lock().await;
 
-    // Persist settlement prices before removing games
+    // Persist settlement prices and game info before removing games
     let settlements: Vec<(String, i64)> = s.game_state.games.values()
         .filter(|g| g.phase == GamePhase::Final)
         .flat_map(|g| {
@@ -22,11 +23,33 @@ pub async fn cleanup_finished_games(state: &SharedState, order_books: &SharedOrd
         })
         .collect();
 
-    if !settlements.is_empty() {
+    // Build game info map for Final games (before state is removed)
+    let game_info_map: std::collections::HashMap<String, GameInfo> = s.game_state.games.values()
+        .filter(|g| g.phase == GamePhase::Final)
+        .flat_map(|g| {
+            g.kalshi_markets.iter().map(move |m| {
+                (m.ticker.clone(), GameInfo {
+                    game_name: format!("{} vs {}", g.away_team, g.home_team),
+                    home_team: g.home_team.clone(),
+                    away_team: g.away_team.clone(),
+                    is_home: m.is_home,
+                })
+            })
+        })
+        .collect();
+
+    if !settlements.is_empty() || !game_info_map.is_empty() {
         let log = logger.lock().unwrap();
         for (ticker, settlement) in &settlements {
             if let Err(e) = log.record_settlement(ticker, *settlement) {
                 tracing::warn!("Failed to record settlement for {}: {:?}", ticker, e);
+            }
+        }
+        if !game_info_map.is_empty() {
+            match log.backfill_game_info(&game_info_map) {
+                Ok(n) if n > 0 => tracing::info!("Backfilled game info for {} order rows during cleanup", n),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("Failed to backfill game info during cleanup: {:?}", e),
             }
         }
     }

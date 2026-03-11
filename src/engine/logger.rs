@@ -262,6 +262,17 @@ impl TradeLogger {
         Ok(count)
     }
 
+    /// Get distinct tickers from orders that have no game_name recorded.
+    pub fn tickers_missing_game_info(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT ticker FROM orders WHERE game_name IS NULL OR game_name = ''"
+        )?;
+        let tickers = stmt.query_map([], |row| row.get(0))?
+            .filter_map(Result::ok)
+            .collect();
+        Ok(tickers)
+    }
+
     /// Get distinct tickers from fills that have no settlement recorded yet.
     pub fn unsettled_tickers(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
