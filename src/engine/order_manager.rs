@@ -256,6 +256,39 @@ impl OrderManager {
         }
     }
 
+    /// Reconstruct clv_orders from resting_orders + order_strategies after restart.
+    /// Called once at startup after both apply_synced_orders and import_strategies complete.
+    pub fn recover_clv_from_resting(&mut self) {
+        let clv_ids: Vec<String> = self.resting_orders.keys()
+            .filter(|id| {
+                !self.clv_orders.contains_key(*id)
+                    && self.order_strategies.get(*id).is_some_and(|s| s == "clv_hunter")
+            })
+            .cloned()
+            .collect();
+
+        let mut recovered = 0;
+        for order_id in clv_ids {
+            if let Some(order) = self.resting_orders.get(&order_id) {
+                let side = format!("{:?}", order.side);
+                let price_cents = match order.side {
+                    OrderSide::Yes => order.yes_price.unwrap_or(0),
+                    OrderSide::No  => order.no_price.unwrap_or(0),
+                };
+                self.clv_orders.insert(order_id.clone(), ClvOrderInfo {
+                    order_id: order_id.clone(),
+                    ticker: order.ticker.clone(),
+                    side,
+                    price_cents,
+                });
+                recovered += 1;
+            }
+        }
+        if recovered > 0 {
+            tracing::info!("Recovered {} CLV order entries from resting orders", recovered);
+        }
+    }
+
     /// Get all resting order IDs (for startup strategy recovery).
     pub fn resting_order_ids(&self) -> Vec<String> {
         self.resting_orders.keys().cloned().collect()

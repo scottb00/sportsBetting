@@ -170,6 +170,8 @@ async fn main() -> Result<()> {
                 s.order_manager.import_strategies(strategies);
             }
         }
+        // Rebuild clv_orders from resting orders so refresh_stale_clv_orders works after restart.
+        s.order_manager.recover_clv_from_resting();
     }
     // Backfill fills from Kalshi REST (catches any missed WS fill events)
     handlers::sync_fills(&state, &logger, &kalshi_rest).await;
