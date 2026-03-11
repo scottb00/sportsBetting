@@ -93,7 +93,7 @@ fn evaluate_market(
     // Step 1: compute target in signed YES-units (+ = hold YES, - = hold NO)
     let target_signed: i64 = if let Some(r) = compute_edge_and_alo(yes_bid, yes_ask, fair_value) {
         if r.edge_after_fees >= min_edge {
-            let n = (r.edge_after_fees * 100.0 * contracts_per_pct_edge).floor().max(1.0) as i64;
+            let n = ((r.edge_after_fees - min_edge) * 100.0 * contracts_per_pct_edge).floor().max(1.0) as i64;
             if r.buying_yes { n } else { -n }
         } else {
             0

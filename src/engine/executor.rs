@@ -298,12 +298,18 @@ pub struct PlacedOrder {
     pub edge_after_fees: f64,
     /// Human-readable game label, e.g. "Duke at UNC"
     pub game_label: String,
-    /// Score at time of order, e.g. "42-38 (Away-Home)"
+    /// Score at time of order, e.g. "42-38" (Away-Home)
     pub score: String,
     /// Game clock/status, e.g. "Halftime" or "2nd Half, 8:23"
     pub clock: String,
     /// True if this order reduces existing game-level risk exposure.
     pub reduce_only: bool,
+    /// Team whose win resolves YES on this ticker (e.g. "Duke")
+    pub yes_team: String,
+    /// Signed YES-position before the order (+= YES contracts, -= NO contracts)
+    pub current_pos: i64,
+    /// Signed YES-position after the order (if filled)
+    pub target_pos: i64,
 }
 
 /// Execute an order signal via Kalshi REST API (or log if dry_run).
@@ -425,24 +431,53 @@ pub async fn execute_signal(
             let side_str = format!("{:?}", order_req.side);
 
             // Collect game_info and display fields under state lock, then drop before logging
-            let (game_info, game_label, score, clock) = {
+            let (game_info, game_label, score, clock, yes_team, current_pos, target_pos) = {
                 let s = state.lock().await;
                 let gi = crate::engine::logger::GameInfo::from_game_state(&s.game_state, &signal.kalshi_ticker);
-                let (label, sc, cl) = if let Some(game) = s.game_state.get_by_kalshi_ticker(&signal.kalshi_ticker) {
+                let current = s.risk.net_position(&signal.kalshi_ticker);
+                let signed_delta = if matches!(signal.side, crate::kalshi::types::OrderSide::Yes) {
+                    order_req.count
+                } else {
+                    -order_req.count
+                };
+                let target = current + signed_delta;
+                let (label, sc, cl, yes_t) = if let Some(game) = s.game_state.get_by_kalshi_ticker(&signal.kalshi_ticker) {
                     let score = if game.phase.is_live_or_break() {
                         format!("{}-{}", game.away_score.unwrap_or(0), game.home_score.unwrap_or(0))
+                    } else {
+                        String::new()
+                    };
+                    // For pre-game, show scheduled start time instead of generic "Scheduled"
+                    let cl = if game.phase == crate::espn::types::GamePhase::PreGame {
+                        if let Some(ts) = game.start_time_ts {
+                            // Eastern time: CBB season spans EST (UTC-5) and EDT (UTC-4).
+                            // Use UTC-5 as a reasonable approximation; may be off 1h post-DST.
+                            let eastern = chrono::FixedOffset::west_opt(5 * 3600).unwrap();
+                            chrono::DateTime::from_timestamp(ts, 0)
+                                .map(|dt| dt.with_timezone(&eastern).format("Starts %I:%M %p ET").to_string())
+                                .unwrap_or_else(|| game.status_detail.clone())
+                        } else {
+                            game.status_detail.clone()
+                        }
+                    } else {
+                        game.status_detail.clone()
+                    };
+                    // Determine which team is YES on this ticker
+                    let yes_t = if let Some(m) = game.kalshi_markets.iter().find(|m| m.ticker == signal.kalshi_ticker) {
+                        if m.is_home { game.home_team.clone() } else { game.away_team.clone() }
                     } else {
                         String::new()
                     };
                     (
                         format!("{} at {}", game.away_team, game.home_team),
                         score,
-                        game.status_detail.clone(),
+                        cl,
+                        yes_t,
                     )
                 } else {
-                    (signal.kalshi_ticker.clone(), String::new(), String::new())
+                    (signal.kalshi_ticker.clone(), String::new(), String::new(), String::new())
                 };
-                (gi, label, sc, cl)
+                (gi, label, sc, cl, yes_t, current, target)
             };
 
             // Log under logger lock only (no state lock held)
@@ -493,6 +528,9 @@ pub async fn execute_signal(
                 score,
                 clock,
                 reduce_only: is_reduce,
+                yes_team,
+                current_pos,
+                target_pos,
             })
         }
         Err(e) => {

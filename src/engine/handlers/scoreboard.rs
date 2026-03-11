@@ -32,6 +32,7 @@ pub async fn handle_scoreboard_tick(
 
     // Detect phase transitions BEFORE updating the tracker (needs previous phases)
     let pregame_to_live = game_tracker.pregame_to_live(&games);
+    let breaks_ended = game_tracker.breaks_ended(&games);
     let new_breaks = game_tracker.update(&games);
     let mut s = state.lock().await;
 
@@ -85,6 +86,10 @@ pub async fn handle_scoreboard_tick(
         fetch_and_apply_summary(espn_poller, state, event_id, "Break ").await;
     }
 
+    // Cancel all resting break_ev orders when play resumes from a break.
+    // Primary safety net: ensures no stale passive orders sit on the book after live play starts.
+    cancel_break_ev_orders(state, &breaks_ended, kalshi_rest, dry_run).await;
+
     // Cancel CLV orders that are no longer at the top of book (market moved away).
     // Runs before snapshot so the re-evaluation below can re-place at the new price.
     refresh_stale_clv_orders(state, order_books, kalshi_rest, dry_run).await;
@@ -117,12 +122,68 @@ pub async fn handle_scoreboard_tick(
         }
     }
 
-    // Send notifications for break_ev, clv_hunter, and any reduce orders
+    // Send notifications for break_ev trades and any risk-reducing trades
     if let Some(n) = notifier {
         let notify_orders: Vec<_> = placed.into_iter()
-            .filter(|o| o.strategy == "break_ev" || o.strategy == "clv_hunter" || o.reduce_only)
+            .filter(|o| o.strategy == "break_ev" || o.reduce_only)
             .collect();
         n.notify_orders_batch(&notify_orders).await;
+    }
+}
+
+/// Cancel all resting break_ev orders for games where a break just ended.
+///
+/// Called whenever ESPN reports a phase transition from Break/Halftime → Live.
+/// Ensures no stale passive orders remain on the book during live play.
+async fn cancel_break_ev_orders(
+    state: &SharedState,
+    ended_event_ids: &[String],
+    kalshi_rest: &Arc<KalshiRestClient>,
+    dry_run: bool,
+) {
+    if ended_event_ids.is_empty() {
+        return;
+    }
+
+    // Collect (order_id, ticker) pairs for all break_ev orders on ended games
+    let to_cancel: Vec<(String, String)> = {
+        let s = state.lock().await;
+        ended_event_ids.iter()
+            .filter_map(|event_id| s.game_state.get(event_id))
+            .flat_map(|gs| {
+                let tickers: Vec<&str> = gs.kalshi_tickers();
+                s.order_manager.break_ev_order_ids_for_tickers(&tickers)
+            })
+            .collect()
+    };
+
+    if to_cancel.is_empty() {
+        return;
+    }
+
+    for (order_id, ticker) in &to_cancel {
+        tracing::info!(
+            "Break ended: cancelling break_ev order {} on {}",
+            order_id, ticker,
+        );
+
+        if dry_run {
+            continue;
+        }
+
+        match kalshi_rest.cancel_order(order_id).await {
+            Ok(()) => {
+                let mut s = state.lock().await;
+                s.order_manager.remove_order(order_id);
+                tracing::info!("Break ended: cancelled {} on {}", order_id, ticker);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Break ended: failed to cancel {} on {}: {:?}",
+                    order_id, ticker, e,
+                );
+            }
+        }
     }
 }
 

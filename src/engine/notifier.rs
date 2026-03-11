@@ -64,6 +64,52 @@ impl Notifier {
         }
     }
 
+    /// Format a single order as a multi-line body string.
+    fn format_order(o: &PlacedOrder) -> String {
+        // Game line: "Duke at UNC | 31-34 | Halftime" (score only if available)
+        let game_line = if !o.score.is_empty() && !o.clock.is_empty() {
+            format!("{} | {} (Away-Home) | {}", o.game_label, o.score, o.clock)
+        } else if !o.clock.is_empty() {
+            format!("{} | {}", o.game_label, o.clock)
+        } else {
+            o.game_label.clone()
+        };
+
+        // What we're buying: "YES on Duke" or "NO on Duke (= YES on UNC)"
+        let side_label = if !o.yes_team.is_empty() {
+            if o.side == "Yes" {
+                format!("YES on {}", o.yes_team)
+            } else {
+                format!("NO on {}", o.yes_team)
+            }
+        } else {
+            o.side.clone()
+        };
+
+        // Position change: "0 → +5 YES" or "+3 → 0 (closed)"
+        fn pos_str(p: i64) -> String {
+            if p > 0 { format!("+{} YES", p) }
+            else if p < 0 { format!("{} YES (= {} NO)", p, p.unsigned_abs()) }
+            else { "flat".to_string() }
+        }
+        let pos_line = if o.target_pos == 0 {
+            format!("Position: {} -> flat (closed)", pos_str(o.current_pos))
+        } else {
+            format!("Position: {} -> {}", pos_str(o.current_pos), pos_str(o.target_pos))
+        };
+
+        // Risk label
+        let risk_tag = if o.reduce_only { "[RISK REDUCING] " } else { "" };
+
+        let edge_line = if o.edge_after_fees > 0.0 {
+            format!("{}{} {}ct @ {}c | ${:.2} | Edge {:.1}% | {}", risk_tag, side_label, o.count, o.price_cents, o.size_dollars, o.edge_after_fees * 100.0, o.strategy)
+        } else {
+            format!("{}{} {}ct @ {}c | ${:.2} | {} (close)", risk_tag, side_label, o.count, o.price_cents, o.size_dollars, o.strategy)
+        };
+
+        format!("{}\n{}\n{}", game_line, edge_line, pos_line)
+    }
+
     /// Send a single batched notification for multiple placed orders.
     pub async fn notify_orders_batch(&self, orders: &[PlacedOrder]) {
         if orders.is_empty() {
@@ -72,24 +118,19 @@ impl Notifier {
 
         if orders.len() == 1 {
             let o = &orders[0];
-            let title = format!("Order: {} {}", o.ticker, o.side);
-            let body = format!(
-                "{} {} contracts @ {}c\nSize: ${:.2}\nEdge: {:.1}%\nStrategy: {}",
-                o.side, o.count, o.price_cents,
-                o.size_dollars, o.edge_after_fees * 100.0, o.strategy,
-            );
+            let risk_tag = if o.reduce_only { "RISK REDUCING | " } else { "" };
+            let title = format!("{}Order: {} {} {}ct", risk_tag, o.game_label, o.side, o.count);
+            let body = Self::format_order(o);
             self.send(&title, &body).await;
             return;
         }
 
         let total_size: f64 = orders.iter().map(|o| o.size_dollars).sum();
-        let title = format!("{} Orders Placed", orders.len());
-        let mut lines: Vec<String> = orders.iter().map(|o| format!(
-            "{} {} {}ct @ {}c ${:.2} (edge {:.1}%)",
-            o.side, o.ticker, o.count, o.price_cents,
-            o.size_dollars, o.edge_after_fees * 100.0,
-        )).collect();
-        lines.push(format!("Total: ${:.2}", total_size));
+        let title = format!("{} Orders | ${:.2} total", orders.len(), total_size);
+        let mut lines: Vec<String> = orders.iter().map(|o| {
+            format!("---\n{}", Self::format_order(o))
+        }).collect();
+        lines.push(format!("---\nTotal: ${:.2}", total_size));
 
         self.send(&title, &lines.join("\n")).await;
     }

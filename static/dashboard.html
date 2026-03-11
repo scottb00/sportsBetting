@@ -580,14 +580,6 @@ async function refresh() {
         <span class="risk-value ${pnlClass(risk.daily_pnl)}">${fmt$(risk.daily_pnl)}</span>
       </div>
       <div class="risk-item">
-        <span class="risk-label">Exposure</span>
-        <span class="risk-value neutral">$${risk.current_total_exposure.toFixed(2)} / $${risk.max_total_exposure.toFixed(0)}</span>
-      </div>
-      <div class="risk-item">
-        <span class="risk-label">Loss Limit</span>
-        <span class="risk-value neutral">$${risk.daily_loss_limit.toFixed(0)}</span>
-      </div>
-      <div class="risk-item">
         <span class="risk-label">Open Orders</span>
         <span class="risk-value neutral">${risk.open_orders}${risk.in_flight ? ` (+${risk.in_flight})` : ''}</span>
       </div>

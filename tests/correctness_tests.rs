@@ -331,11 +331,22 @@ fn e2e_break_ev_only_break_phases() {
             "Break EV should not fire on phase {:?}", phase);
     }
 
-    for phase in [GamePhase::Halftime, GamePhase::Break] {
-        let (gs, books) = make_game_with_book(0.70, phase.clone(), 48.0, 52.0);
-        assert!(quoter.can_evaluate(&gs) && quoter.evaluate(&gs, &risk, 0.0, &books).is_some(),
-            "Break EV should fire on phase {:?}", phase);
-    }
+    // Halftime always tradeable
+    let (gs, books) = make_game_with_book(0.70, GamePhase::Halftime, 48.0, 52.0);
+    assert!(quoter.can_evaluate(&gs) && quoter.evaluate(&gs, &risk, 0.0, &books).is_some(),
+        "Break EV should fire on Halftime");
+
+    // TV timeout (Break phase + last_play_type containing "Official TV Timeout") is tradeable
+    let (mut gs, books) = make_game_with_book(0.70, GamePhase::Break, 48.0, 52.0);
+    gs.last_play_type = Some("OfficialTVTimeOut".into());
+    gs.break_started_at = Some(std::time::Instant::now());
+    assert!(quoter.can_evaluate(&gs) && quoter.evaluate(&gs, &risk, 0.0, &books).is_some(),
+        "Break EV should fire on TV timeout Break");
+
+    // Team timeout (Break phase, no TV indicator) is NOT tradeable
+    let (gs, _books) = make_game_with_book(0.70, GamePhase::Break, 48.0, 52.0);
+    assert!(!quoter.can_evaluate(&gs),
+        "Break EV should NOT fire on team timeout Break");
 }
 
 #[test]

@@ -31,7 +31,7 @@ impl Strategy for BreakEvQuoter {
     }
 
     fn can_evaluate(&self, game: &GameState) -> bool {
-        game.phase.is_break()
+        game.is_tradeable_break() && !game.is_final_minutes(5.0)
     }
 
     fn evaluate(
@@ -41,9 +41,16 @@ impl Strategy for BreakEvQuoter {
         current_game_exposure: f64,
         order_books: &HashMap<String, LocalOrderBook>,
     ) -> Option<OrderSignal> {
-        evaluate_edge(
+        let mut signal = evaluate_edge(
             game, risk, current_game_exposure, self.min_edge, self.name(), order_books,
             self.contracts_per_pct_edge, self.min_trade_contracts,
-        )
+        )?;
+        // Set expiration tied to estimated break end.
+        // 45s safety buffer: TV timeout orders get ~90s TTL (135-45), team timeout
+        // orders get ~1s (30-45 clamped to 1) — effectively immediate, which is fine
+        // since a 30s team timeout is nearly over by the time we even detect it.
+        // Falls back to config TTL if break_started_at is not set (e.g. bot restart mid-break).
+        signal.expiration_ts = game.break_expiration_ts();
+        Some(signal)
     }
 }

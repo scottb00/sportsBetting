@@ -215,6 +215,22 @@ impl OrderManager {
         self.committed_contracts.get(ticker).copied().unwrap_or(0)
     }
 
+    /// Return (order_id, ticker) pairs for resting break_ev orders on the given tickers.
+    pub fn break_ev_order_ids_for_tickers(&self, tickers: &[&str]) -> Vec<(String, String)> {
+        tickers.iter()
+            .flat_map(|ticker| {
+                self.orders_by_ticker
+                    .get(*ticker)
+                    .into_iter()
+                    .flatten()
+                    .filter(|id| {
+                        self.order_strategies.get(*id).map(|s| s == "break_ev").unwrap_or(false)
+                    })
+                    .map(|id| (id.clone(), (*ticker).to_string()))
+            })
+            .collect()
+    }
+
     /// Get order IDs for a market ticker (for cancellation).
     pub fn order_ids_for_market(&self, ticker: &str) -> Vec<String> {
         self.orders_by_ticker

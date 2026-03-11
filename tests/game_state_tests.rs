@@ -517,9 +517,9 @@ fn make_halftime_game(espn_hp: f64) -> (GameState, HashMap<String, LocalOrderBoo
     (gs, books)
 }
 
-/// Linear sizing: edge * 100 * contracts_per_pct_edge should equal contract count.
-/// Fair=0.70, YES ALO=51c, edge_raw=0.19, fee=0.01, edge_after_fees=0.18
-/// With N=10: target = floor(0.18 * 100 * 10) = 18 contracts.
+/// Linear sizing: (edge - min_edge) * 100 * contracts_per_pct_edge = contract count.
+/// Fair=0.70, YES ALO=51c, edge_raw=0.19, fee≈0.01, edge_after_fees≈0.1799
+/// With N=1, min_edge=0.01: target = floor((0.1799 - 0.01) * 100 * 1) = floor(16.99) = 16 contracts.
 #[test]
 fn target_sizing_linear_from_edge() {
     use sports_betting::strategies::break_ev::BreakEvQuoter;
@@ -529,14 +529,13 @@ fn target_sizing_linear_from_edge() {
     let risk = RiskManager::new();
 
     let (gs, books) = make_halftime_game(0.70);
-    // fair=0.70, YES ALO=51c, edge_after_fees≈0.18 (FP: ~0.1799...), N=1 → target=floor(17.99...)=17
     let signal = quoter.evaluate(&gs, &risk, 0.0, &books).unwrap();
     let order = sports_betting::engine::order_manager::OrderManager::signal_to_order(&signal).unwrap();
-    assert_eq!(order.count, 17, "17 contracts at ~18% edge with N=1");
+    assert_eq!(order.count, 16, "16 contracts at ~17% above-threshold edge with N=1");
 }
 
 /// When already below target, add to fill the gap.
-/// Fair=0.70 → target=17. Seed 5 YES → delta=12 → add 12 YES.
+/// Fair=0.70 → target=16. Seed 5 YES → delta=11 → add 11 YES.
 #[test]
 fn target_adds_toward_target_when_below() {
     use sports_betting::strategies::break_ev::BreakEvQuoter;
@@ -547,15 +546,15 @@ fn target_adds_toward_target_when_below() {
     let mut risk = RiskManager::new();
     risk.seed_positions("TEST-HOME", "yes", 51, 5); // hold 5 YES
 
-    let (gs, books) = make_halftime_game(0.70); // target=17
+    let (gs, books) = make_halftime_game(0.70); // target=16
     let signal = quoter.evaluate(&gs, &risk, 0.0, &books).unwrap();
     assert!(matches!(signal.side, OrderSide::Yes), "should add YES");
     let order = sports_betting::engine::order_manager::OrderManager::signal_to_order(&signal).unwrap();
-    assert_eq!(order.count, 12, "add 12 to reach target of 17 from 5");
+    assert_eq!(order.count, 11, "add 11 to reach target of 16 from 5");
 }
 
 /// Anti-scalp guard: delta < min_trade_contracts → no signal.
-/// Fair=0.70 → target=17. Seed 16 YES → delta=1 < min_trade_contracts=5 → None.
+/// Fair=0.70 → target=16. Seed 16 YES → delta=0 < min_trade_contracts=5 → None.
 #[test]
 fn target_no_signal_when_delta_below_min_trade() {
     use sports_betting::strategies::break_ev::BreakEvQuoter;
@@ -563,7 +562,7 @@ fn target_no_signal_when_delta_below_min_trade() {
 
     let quoter = BreakEvQuoter::new(0.01, 1.0, 5); // min_trade_contracts=5
     let mut risk = RiskManager::new();
-    risk.seed_positions("TEST-HOME", "yes", 51, 16); // hold 16, target=17, delta=1 < 5
+    risk.seed_positions("TEST-HOME", "yes", 51, 16); // hold 16, target=16, delta=0 < 5
 
     let (gs, books) = make_halftime_game(0.70);
     let signal = quoter.evaluate(&gs, &risk, 0.0, &books);
@@ -571,7 +570,7 @@ fn target_no_signal_when_delta_below_min_trade() {
 }
 
 /// No trimming: when above target but still have edge, do nothing.
-/// Fair=0.70 → target=17. Seed 30 YES (above target) → no signal emitted.
+/// Fair=0.70 → target=16. Seed 30 YES (above target) → no signal emitted.
 #[test]
 fn target_no_trim_when_above_target() {
     use sports_betting::strategies::break_ev::BreakEvQuoter;
@@ -579,7 +578,7 @@ fn target_no_trim_when_above_target() {
 
     let quoter = BreakEvQuoter::new(0.01, 1.0, 1);
     let mut risk = RiskManager::new();
-    risk.seed_positions("TEST-HOME", "yes", 51, 30); // hold 30, target=17, delta=-13 (above target)
+    risk.seed_positions("TEST-HOME", "yes", 51, 30); // hold 30, target=16, delta=-14 (above target)
 
     let (gs, books) = make_halftime_game(0.70);
     let signal = quoter.evaluate(&gs, &risk, 0.0, &books);
@@ -622,8 +621,8 @@ fn target_no_signal_when_flat_and_no_edge() {
 }
 
 /// When edge favors NO, target is negative (hold NO contracts).
-/// Fair=0.30 → buying NO at (100-48-1)=51c. edge_raw≈0.19, N=1 → target≈-17.
-/// From flat → add NO 17.
+/// Fair=0.30 → buying NO at (100-48-1)=51c. edge_raw≈0.19, N=1 → target≈-16.
+/// From flat → add NO 16.
 #[test]
 fn target_sizes_correctly_for_no_side() {
     use sports_betting::strategies::break_ev::BreakEvQuoter;
@@ -637,5 +636,5 @@ fn target_sizes_correctly_for_no_side() {
     let signal = quoter.evaluate(&gs, &risk, 0.0, &books).unwrap();
     assert!(matches!(signal.side, OrderSide::No), "should buy NO");
     let order = sports_betting::engine::order_manager::OrderManager::signal_to_order(&signal).unwrap();
-    assert_eq!(order.count, 17, "17 NO contracts with N=1 and ~0.18 edge");
+    assert_eq!(order.count, 16, "16 NO contracts with N=1 and ~17% above-threshold edge");
 }

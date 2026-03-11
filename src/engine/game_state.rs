@@ -44,12 +44,19 @@ pub struct GameState {
     pub start_time_ts: Option<i64>,
     /// Status detail from ESPN, e.g. "Halftime", "8:42 - 2nd Half"
     pub status_detail: String,
+    /// Display clock from ESPN, e.g. "8:42" (minutes:seconds remaining in period)
+    pub display_clock: Option<String>,
+    /// Period number from ESPN (1 = 1st half, 2 = 2nd half for CBB; 3+ = OT)
+    pub period: Option<i32>,
     /// Last play text, e.g. "Official TV Timeout"
     pub last_play: Option<String>,
     /// Last play type, e.g. "OfficialTVTimeOut"
     pub last_play_type: Option<String>,
 
     pub last_updated: std::time::Instant,
+    /// Wall-clock time when the current break started. Set on phase transition into break.
+    /// Used to compute per-break-type order TTLs.
+    pub break_started_at: Option<std::time::Instant>,
 }
 
 impl GameState {
@@ -67,10 +74,31 @@ impl GameState {
             espn_home_win_prob: None,
             start_time_ts: None,
             status_detail: String::new(),
+            display_clock: None,
+            period: None,
             last_play: None,
             last_play_type: None,
             last_updated: std::time::Instant::now(),
+            break_started_at: None,
         }
+    }
+
+    /// Parse display_clock ("8:42") into minutes remaining as f64.
+    pub fn minutes_remaining(&self) -> Option<f64> {
+        let clock = self.display_clock.as_deref()?;
+        let (m, s) = clock.split_once(':')?;
+        let mins: f64 = m.parse().ok()?;
+        let secs: f64 = s.parse().ok()?;
+        Some(mins + secs / 60.0)
+    }
+
+    /// Returns true if we're in the 2nd half (or OT) with fewer than `threshold_mins` remaining.
+    /// Used to suppress trading in the final minutes of the game.
+    pub fn is_final_minutes(&self, threshold_mins: f64) -> bool {
+        if self.period.unwrap_or(0) < 2 {
+            return false;
+        }
+        self.minutes_remaining().is_some_and(|m| m < threshold_mins)
     }
 
     /// Get fair value aligned with a specific Kalshi market's YES side.
@@ -100,12 +128,57 @@ impl GameState {
         self.kalshi_markets.iter().filter_map(|m| m.volume).sum()
     }
 
+    /// True only for breaks worth trading: halftime and TV/media timeouts.
+    /// Team timeouts (~30s) are too short — a passive order can't fill meaningfully.
+    pub fn is_tradeable_break(&self) -> bool {
+        match self.phase {
+            GamePhase::Halftime => true,
+            GamePhase::Break => {
+                [self.last_play_type.as_deref(), self.last_play.as_deref()]
+                    .iter()
+                    .filter_map(|f| *f)
+                    .any(|t| {
+                        let l = t.to_lowercase();
+                        l.contains("tv") || l.contains("official")
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// Compute expiration unix timestamp (seconds) for a break_ev order.
+    /// Halftime: 840s TTL (60s safety buffer). TV timeout: 90s TTL (45s buffer).
+    /// Returns None if break timing is unknown (executor will use the config fallback TTL).
+    pub fn break_expiration_ts(&self) -> Option<i64> {
+        let started = self.break_started_at?;
+        let (duration, safety_buffer): (u64, u64) = match self.phase {
+            GamePhase::Halftime => (900, 60),
+            GamePhase::Break => (135, 45), // TV timeouts only — team timeouts not traded
+            _ => return None,
+        };
+        let elapsed = started.elapsed().as_secs();
+        let ttl = duration
+            .saturating_sub(elapsed)
+            .saturating_sub(safety_buffer)
+            .max(1);
+        Some(chrono::Utc::now().timestamp() + ttl as i64)
+    }
+
     /// Update game state fields from an ESPN scoreboard poll.
     pub fn update_from_espn(&mut self, game: &crate::espn::types::GameInfo) {
+        let was_break = self.phase.is_break();
         self.phase = game.game_phase.clone();
+        // Track break start time for per-break-type order TTL computation
+        if self.phase.is_break() && !was_break {
+            self.break_started_at = Some(std::time::Instant::now());
+        } else if !self.phase.is_break() {
+            self.break_started_at = None;
+        }
         self.home_score = game.home_score;
         self.away_score = game.away_score;
         self.status_detail = game.status_detail.clone();
+        self.display_clock = game.display_clock.clone();
+        self.period = game.period;
         self.last_play = game.last_play.clone();
         self.last_play_type = game.last_play_type.clone();
         if game.start_time_ts.is_some() {

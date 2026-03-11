@@ -160,6 +160,10 @@ pub struct GameInfo {
     pub start_time_ts: Option<i64>,
     /// Status description, e.g. "Halftime", "8:42 - 2nd Half"
     pub status_detail: String,
+    /// Display clock, e.g. "8:42" (minutes:seconds remaining in period)
+    pub display_clock: Option<String>,
+    /// Period number (1 = 1st half, 2 = 2nd half for CBB; 3+ = OT)
+    pub period: Option<i32>,
     /// Last play text from situation (e.g. "Official TV Timeout")
     pub last_play: Option<String>,
     /// Last play type id (e.g. "580" for OfficialTVTimeOut)
