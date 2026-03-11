@@ -508,7 +508,8 @@ fn query_daily_chart(db_path: &str) -> anyhow::Result<Vec<DailyChartPoint>> {
     let conn = open_read_only(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT f.filled_at,
-                CASE WHEN o.edge_bps IS NOT NULL THEN o.edge_bps / 10000.0 * f.price_cents * f.count / 100.0 ELSE NULL END AS fill_edge
+                CASE WHEN o.edge_bps IS NOT NULL THEN o.edge_bps / 10000.0 * f.price_cents * f.count / 100.0 ELSE NULL END AS fill_edge,
+                f.fill_pnl
          FROM fills f
          LEFT JOIN orders o ON f.order_id = o.order_id
          WHERE date(f.filled_at) = date('now')
@@ -518,7 +519,7 @@ fn query_daily_chart(db_path: &str) -> anyhow::Result<Vec<DailyChartPoint>> {
         Ok(DailyChartPoint {
             ts: row.get(0)?,
             fill_edge: row.get(1)?,
-            fill_pnl: None,
+            fill_pnl: row.get(2)?,
         })
     })?.filter_map(|r| r.ok()).collect();
     Ok(points)

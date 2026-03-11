@@ -99,6 +99,7 @@ impl TradeLogger {
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN home_team TEXT");
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN away_team TEXT");
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN is_home INTEGER");
+        let _ = conn.execute_batch("ALTER TABLE fills ADD COLUMN fill_pnl REAL");
 
         Ok(Self { conn })
     }
@@ -153,6 +154,28 @@ impl TradeLogger {
             rusqlite::params![trade_id, order_id, ticker, side, action, price_cents, count, fee_cents, filled_at],
         )?;
         Ok(rows > 0)
+    }
+
+    /// Backfill settlement PnL for all fills on a settled market.
+    /// `result` should be "yes" or "no" (Kalshi market result).
+    /// Only updates fills where `fill_pnl IS NULL` (idempotent).
+    /// Returns the number of fills updated.
+    pub fn settle_fills(&self, ticker: &str, result: &str) -> Result<usize> {
+        let rows = self.conn.execute(
+            "UPDATE fills SET fill_pnl =
+               CASE
+                 WHEN action = 'Buy' THEN
+                   (CASE WHEN (side = 'Yes' AND ?2 = 'yes') OR (side = 'No' AND ?2 = 'no') THEN 100 ELSE 0 END
+                    - price_cents) * count / 100.0 - COALESCE(fee_cents, 0)
+                 ELSE
+                   (price_cents -
+                    CASE WHEN (side = 'Yes' AND ?2 = 'yes') OR (side = 'No' AND ?2 = 'no') THEN 100 ELSE 0 END
+                   ) * count / 100.0 - COALESCE(fee_cents, 0)
+               END
+             WHERE ticker = ?1 AND fill_pnl IS NULL",
+            rusqlite::params![ticker, result],
+        )?;
+        Ok(rows)
     }
 
     pub fn log_pnl_snapshot(
