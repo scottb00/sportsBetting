@@ -30,6 +30,7 @@ const CBB_SERIES: &[&str] = &[
     "KXNCAAMBMWC",
     "KXNCAAMBAAC",
     "KXNCAAMBSLAND",
+    "KXNCAAMBSLC",
     "KXNCAAMBOVC",
     "KXNCAAMBMAAC",
     "KXNCAAMBASUN",
