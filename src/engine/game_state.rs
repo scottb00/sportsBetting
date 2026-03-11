@@ -174,6 +174,13 @@ impl GameStateManager {
             .unwrap_or_default()
     }
 
+    /// Get all Kalshi markets (with is_home flags) for the game containing the given ticker.
+    pub fn game_markets_for(&self, ticker: &str) -> Vec<KalshiMarketState> {
+        self.get_by_kalshi_ticker(ticker)
+            .map(|g| g.kalshi_markets.clone())
+            .unwrap_or_default()
+    }
+
     /// Find game mutably by any Kalshi ticker (O(1) via reverse index).
     pub fn get_mut_by_kalshi_ticker(&mut self, ticker: &str) -> Option<&mut GameState> {
         let event_id = self.ticker_to_event.get(ticker)?.clone();

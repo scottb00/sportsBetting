@@ -772,6 +772,302 @@ fn fill_dedup_double_buffer_rotation() {
 // 16. Stress Test: Many Games, Repeated Evaluations
 // ============================================================
 
+// ============================================================
+// 17. net_game_home_risk: Signed Game-Level Exposure Helper
+// ============================================================
+
+#[test]
+fn net_game_home_risk_returns_zero_when_flat() {
+    let risk = test_risk();
+    let markets = vec![
+        KalshiMarketState::new("HOME".into(), true),
+        KalshiMarketState::new("AWAY".into(), false),
+    ];
+    assert_eq!(risk.net_game_home_risk(&markets), 0);
+}
+
+#[test]
+fn net_game_home_risk_long_home_is_positive() {
+    let mut risk = test_risk();
+    risk.seed_positions("HOME", "yes", 50, 5);
+    let markets = vec![
+        KalshiMarketState::new("HOME".into(), true),
+        KalshiMarketState::new("AWAY".into(), false),
+    ];
+    assert_eq!(risk.net_game_home_risk(&markets), 5);
+}
+
+#[test]
+fn net_game_home_risk_long_away_is_negative() {
+    let mut risk = test_risk();
+    risk.seed_positions("AWAY", "yes", 50, 5);
+    let markets = vec![
+        KalshiMarketState::new("HOME".into(), true),
+        KalshiMarketState::new("AWAY".into(), false),
+    ];
+    // YES on away ticker = long away team = negative home-aligned exposure
+    assert_eq!(risk.net_game_home_risk(&markets), -5);
+}
+
+#[test]
+fn net_game_home_risk_partial_hedge() {
+    let mut risk = test_risk();
+    risk.seed_positions("HOME", "yes", 50, 5); // +5 home units
+    risk.seed_positions("AWAY", "yes", 50, 3); // -3 home units (long away)
+    let markets = vec![
+        KalshiMarketState::new("HOME".into(), true),
+        KalshiMarketState::new("AWAY".into(), false),
+    ];
+    assert_eq!(risk.net_game_home_risk(&markets), 2);
+}
+
+// ============================================================
+// 18. is_reduce_order: Reduce Direction Detection
+// ============================================================
+
+#[test]
+fn is_reduce_no_on_home_ticker_when_long_home() {
+    let mut risk = test_risk();
+    risk.seed_positions("HOME", "yes", 50, 7);
+    let markets = vec![
+        KalshiMarketState::new("HOME".into(), true),
+        KalshiMarketState::new("AWAY".into(), false),
+    ];
+    // Buying NO on HOME when long YES on HOME = reduce (same-ticker)
+    assert!(risk.is_reduce_order(&markets, "HOME", &OrderSide::No));
+}
+
+#[test]
+fn is_reduce_yes_on_away_ticker_when_long_home() {
+    let mut risk = test_risk();
+    risk.seed_positions("HOME", "yes", 50, 7);
+    let markets = vec![
+        KalshiMarketState::new("HOME".into(), true),
+        KalshiMarketState::new("AWAY".into(), false),
+    ];
+    // Buying YES on AWAY when long HOME = cross-ticker reduce (backing opposing team)
+    assert!(risk.is_reduce_order(&markets, "AWAY", &OrderSide::Yes));
+}
+
+#[test]
+fn is_not_reduce_yes_on_home_when_long_home() {
+    let mut risk = test_risk();
+    risk.seed_positions("HOME", "yes", 50, 7);
+    let markets = vec![
+        KalshiMarketState::new("HOME".into(), true),
+        KalshiMarketState::new("AWAY".into(), false),
+    ];
+    // Buying more YES on HOME = adding exposure, not reducing
+    assert!(!risk.is_reduce_order(&markets, "HOME", &OrderSide::Yes));
+}
+
+#[test]
+fn is_not_reduce_no_on_away_when_long_home() {
+    let mut risk = test_risk();
+    risk.seed_positions("HOME", "yes", 50, 7);
+    let markets = vec![
+        KalshiMarketState::new("HOME".into(), true),
+        KalshiMarketState::new("AWAY".into(), false),
+    ];
+    // NO on AWAY = backing home (away loses) = adding home exposure, not reducing
+    assert!(!risk.is_reduce_order(&markets, "AWAY", &OrderSide::No));
+}
+
+#[test]
+fn is_not_reduce_flat_position() {
+    let risk = test_risk();
+    let markets = vec![
+        KalshiMarketState::new("HOME".into(), true),
+        KalshiMarketState::new("AWAY".into(), false),
+    ];
+    // No position → nothing to reduce regardless of direction
+    assert!(!risk.is_reduce_order(&markets, "HOME", &OrderSide::No));
+    assert!(!risk.is_reduce_order(&markets, "AWAY", &OrderSide::Yes));
+}
+
+// ============================================================
+// 19. Reduce Order Integration Tests
+// ============================================================
+
+/// Build a single halftime game with custom books, seeding `risk` with any pre-existing
+/// positions already recorded.
+fn make_single_game(
+    home_prob: f64,
+    home_book: (i64, i64),
+    away_book: (i64, i64),
+    risk: RiskManager,
+) -> (BotState, HashMap<String, LocalOrderBook>) {
+    let mut gsm = GameStateManager::new();
+    let mut books = HashMap::new();
+
+    let gs = gsm.upsert("evt_0".into(), "Home0".into(), "Away0".into());
+    gs.espn_home_win_prob = Some(home_prob);
+    gs.phase = GamePhase::Halftime;
+
+    let mut home_mkt = KalshiMarketState::new("T0-HOME".into(), true);
+    home_mkt.volume = Some(50000);
+    gs.kalshi_markets.push(home_mkt);
+
+    let mut away_mkt = KalshiMarketState::new("T0-AWAY".into(), false);
+    away_mkt.volume = Some(50000);
+    gs.kalshi_markets.push(away_mkt);
+
+    gsm.register_ticker("T0-HOME", "evt_0");
+    gsm.register_ticker("T0-AWAY", "evt_0");
+
+    books.insert("T0-HOME".to_string(), make_book("T0-HOME", home_book.0, home_book.1));
+    books.insert("T0-AWAY".to_string(), make_book("T0-AWAY", away_book.0, away_book.1));
+
+    let state = BotState {
+        game_state: gsm,
+        risk,
+        order_manager: OrderManager::new(),
+    };
+    (state, books)
+}
+
+#[test]
+fn same_ticker_reduce_signal_fires() {
+    // Setup: originally long 7 YES on home. Home prob drops to 30% (away now favored).
+    // With home market at 48/52, fair_home=30 < mid=50 → strategy generates NO on T0-HOME.
+    // NO on T0-HOME when we're long YES on T0-HOME = reduce. Should fire.
+    let mut risk = test_risk();
+    risk.seed_positions("T0-HOME", "yes", 70, 7);
+
+    let (state, books) = make_single_game(0.30, (48, 52), (48, 52), risk);
+    let registry = make_registry(20);
+    let snapshot = build_eval_snapshot(&state);
+    let mut break_log = VecDeque::new();
+    let signals = evaluate_strategies(&snapshot, &books, &mut break_log, &registry);
+
+    assert!(!signals.is_empty(), "Reduce signal on T0-HOME should fire when home prob drops");
+
+    // The signal must be a reduce direction (NO on home, or YES on away)
+    let signal = &signals[0];
+    let is_reduce = snapshot.risk.is_reduce_order(
+        &snapshot.games["evt_0"].kalshi_markets,
+        &signal.kalshi_ticker,
+        &signal.side,
+    );
+    assert!(is_reduce, "Signal {:?} {:?} should be a reduce order", signal.kalshi_ticker, signal.side);
+}
+
+#[test]
+fn reduce_signal_capped_at_net_position_not_regular_remaining() {
+    // 7 YES on home. Regular cap=20 → regular_remaining=13.
+    // Reduce signal should be capped at 7 (reduce_cap = net position), not 13.
+    let mut risk = test_risk();
+    risk.seed_positions("T0-HOME", "yes", 70, 7);
+
+    let (state, books) = make_single_game(0.30, (48, 52), (48, 52), risk);
+    let registry = make_registry(20);
+    let snapshot = build_eval_snapshot(&state);
+    let mut break_log = VecDeque::new();
+    let signals = evaluate_strategies(&snapshot, &books, &mut break_log, &registry);
+
+    assert!(!signals.is_empty(), "Should produce a reduce signal");
+    for signal in &signals {
+        let is_reduce = snapshot.risk.is_reduce_order(
+            &snapshot.games["evt_0"].kalshi_markets,
+            &signal.kalshi_ticker,
+            &signal.side,
+        );
+        if is_reduce {
+            assert_eq!(
+                signal.max_contracts.unwrap_or(0), 7,
+                "Reduce max_contracts should be 7 (net position), not regular_remaining=13"
+            );
+        }
+    }
+}
+
+#[test]
+fn reduce_fires_even_when_at_regular_cap() {
+    // 10 YES on home, regular cap = 10 (exactly at cap).
+    // regular_remaining = 0, but reduce_cap = 10 → reduce signal should still fire.
+    let mut risk = test_risk();
+    risk.seed_positions("T0-HOME", "yes", 70, 10);
+
+    let (state, books) = make_single_game(0.30, (48, 52), (48, 52), risk);
+    let registry = make_registry(10); // exactly at cap
+    let snapshot = build_eval_snapshot(&state);
+    let mut break_log = VecDeque::new();
+    let signals = evaluate_strategies(&snapshot, &books, &mut break_log, &registry);
+
+    assert!(
+        !signals.is_empty(),
+        "Reduce signal should fire even when regular contract cap is exhausted"
+    );
+    let signal = &signals[0];
+    assert_eq!(
+        signal.max_contracts.unwrap_or(0), 10,
+        "Reduce cap should equal the existing position (10)"
+    );
+}
+
+#[test]
+fn cross_ticker_reduce_bypasses_resting_on_other_market() {
+    // Setup: 7 YES on T0-HOME. Resting YES order on T0-HOME.
+    // Home prob drops to 30%. T0-HOME book 29/31 → NO on home has 0 raw edge (no signal).
+    // T0-AWAY book 65/69 → YES on away has edge 0.70 - 0.68 = 0.02.
+    // Strategy returns YES on T0-AWAY (cross-ticker reduce).
+    // The resting order on T0-HOME should NOT block a signal on T0-AWAY.
+    let mut risk = test_risk();
+    risk.seed_positions("T0-HOME", "yes", 70, 7);
+
+    // T0-HOME (1, 99): extreme spread → NO ALO = 98, edge_raw = 0.70 - 0.98 = -0.28 < 0,
+    //   evaluate_market returns None. Mid = 50c still passes game-level tradeable filter.
+    // T0-AWAY (60, 66): YES ALO = 65, edge_raw = 0.70 - 0.65 = 0.05,
+    //   edge_after_fees = 0.04 >> 0.01. Clear signal.
+    let (mut state, books) = make_single_game(0.30, (1, 99), (60, 66), risk);
+
+    // Add resting YES order on T0-HOME
+    state.order_manager.record_placed_order(
+        make_order("resting-home-yes", "T0-HOME", 5), 5, "break_ev",
+    );
+
+    let registry = make_registry(20);
+    let snapshot = build_eval_snapshot(&state);
+    let mut break_log = VecDeque::new();
+    let signals = evaluate_strategies(&snapshot, &books, &mut break_log, &registry);
+
+    assert!(
+        !signals.is_empty(),
+        "Cross-ticker reduce on T0-AWAY should fire despite resting YES order on T0-HOME"
+    );
+    let signal = &signals[0];
+    assert_eq!(signal.kalshi_ticker, "T0-AWAY", "Should be a T0-AWAY signal");
+    assert!(matches!(signal.side, OrderSide::Yes), "Should be YES on T0-AWAY (away team)");
+    assert_eq!(
+        signal.max_contracts.unwrap_or(0), 7,
+        "Reduce cap should be 7 (net game home risk)"
+    );
+}
+
+#[test]
+fn regular_signal_still_blocked_when_no_position_to_reduce() {
+    // No position → reduce_cap = 0. Resting order on game → regular also blocked.
+    // This ensures existing resting-order-blocks-regular-orders behavior is preserved.
+    let risk = test_risk();
+    let (mut state, books) = make_bot_state_with_games(1, risk);
+    let registry = make_registry(100);
+
+    state.order_manager.record_placed_order(
+        make_order("resting-1", "T0-HOME", 5), 5, "break_ev",
+    );
+
+    let snapshot = build_eval_snapshot(&state);
+    let mut break_log = VecDeque::new();
+    let signals = evaluate_strategies(&snapshot, &books, &mut break_log, &registry);
+
+    // No position → reduce_cap = 0, and resting blocks regular → no signals
+    assert!(
+        signals.is_empty(),
+        "Regular signal should be blocked by resting order when no reduce position exists, got {} signals",
+        signals.len()
+    );
+}
+
 #[test]
 fn stress_many_games_never_exceed_exposure() {
     let risk = RiskManager::new(50.0, 500.0, 300.0, 0.5, 0.01);

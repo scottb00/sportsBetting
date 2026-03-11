@@ -46,14 +46,23 @@ pub fn build_eval_snapshot(
     EvalSnapshot { games, risk, resting_tickers, resting_contracts }
 }
 
+/// Availability of contracts for a game: how many can be added (regular) and how many
+/// can be used to reduce existing exposure (reduce_cap).
+struct ContractAvailability {
+    /// Contracts available for new (risk-adding) orders. Zero if at cap.
+    regular_remaining: i64,
+    /// Max contracts for a reduce order: the absolute signed net game risk.
+    reduce_cap: i64,
+}
+
 /// Check whether a game should be skipped for strategy evaluation.
-/// Returns `Some(contracts_remaining)` if the game is eligible, `None` if it should be skipped.
+/// Returns `Some(ContractAvailability)` if the game is eligible, `None` if it should be skipped.
 fn game_contracts_remaining(
     game: &GameState,
     snapshot: &EvalSnapshot,
     order_books: &HashMap<String, LocalOrderBook>,
     registry: &StrategyRegistry,
-) -> Option<i64> {
+) -> Option<ContractAvailability> {
     if !game.has_kalshi() {
         return None;
     }
@@ -89,7 +98,10 @@ fn game_contracts_remaining(
         return None;
     }
 
-    // Check hard contract cap: abs(filled position) + resting orders
+    // Compute signed net game risk (home-team aligned) and absolute committed contracts.
+    let net_game_risk = snapshot.risk.net_game_home_risk(&game.kalshi_markets);
+    let reduce_cap = net_game_risk.unsigned_abs() as i64;
+
     let game_committed: i64 = game.kalshi_markets.iter()
         .map(|m| {
             let position = snapshot.risk.net_position(&m.ticker).unsigned_abs() as i64;
@@ -97,11 +109,14 @@ fn game_contracts_remaining(
             position + resting
         })
         .sum();
-    if game_committed >= registry.max_contracts_per_game {
+    let regular_remaining = (registry.max_contracts_per_game - game_committed).max(0);
+
+    // Skip only when there's nothing to trade (no cap space AND nothing to reduce).
+    if regular_remaining == 0 && reduce_cap == 0 {
         return None;
     }
 
-    Some(registry.max_contracts_per_game - game_committed)
+    Some(ContractAvailability { regular_remaining, reduce_cap })
 }
 
 /// Run all strategies and collect order signals.
@@ -122,8 +137,8 @@ pub fn evaluate_strategies(
     }
 
     for game in snapshot.games.values() {
-        let contracts_remaining = match game_contracts_remaining(game, snapshot, order_books, registry) {
-            Some(r) => r,
+        let avail = match game_contracts_remaining(game, snapshot, order_books, registry) {
+            Some(a) => a,
             None => continue,
         };
 
@@ -196,26 +211,44 @@ pub fn evaluate_strategies(
                 continue;
             }
 
-            // Skip if any market in this game already has a resting order or in-flight
-            let has_resting = game.kalshi_markets.iter().any(|m| {
-                snapshot.resting_tickers.contains(&m.ticker)
-            });
-            if has_resting {
-                if is_break {
-                    tracing::info!(
-                        "BREAK SKIP: {} v {} | {} blocked by resting order",
-                        game.away_team, game.home_team, strategy.name(),
-                    );
-                }
-                continue;
-            }
-
             if let Some(mut signal) = strategy.evaluate(game, &snapshot.risk, current_exposure, order_books) {
+                // Determine if this signal reduces existing game-level exposure.
+                let is_reduce = snapshot.risk.is_reduce_order(
+                    &game.kalshi_markets, &signal.kalshi_ticker, &signal.side,
+                );
+
+                // Resting-order check:
+                // - Regular orders: blocked if ANY market in the game has a resting order.
+                // - Reduce orders: only blocked if the SAME ticker already has a resting order
+                //   (a resting order on the other team's market doesn't conflict).
+                let blocked_by_resting = if is_reduce {
+                    snapshot.resting_tickers.contains(&signal.kalshi_ticker)
+                } else {
+                    game.kalshi_markets.iter().any(|m| snapshot.resting_tickers.contains(&m.ticker))
+                };
+                if blocked_by_resting {
+                    if is_break {
+                        tracing::info!(
+                            "BREAK SKIP: {} v {} | {} blocked by resting order (reduce={})",
+                            game.away_team, game.home_team, strategy.name(), is_reduce,
+                        );
+                    }
+                    continue;
+                }
+
+                // Apply contract cap: reduce orders use reduce_cap, regular use regular_remaining.
+                let max_contracts = if is_reduce { avail.reduce_cap } else { avail.regular_remaining };
+                if max_contracts == 0 {
+                    continue;
+                }
+
                 // Set expiration for non-CLV strategies (CLV sets its own in evaluate())
                 if signal.expiration_ts.is_none() {
                     let expire_at = chrono::Utc::now().timestamp() + registry.order_ttl.as_secs() as i64;
                     signal.expiration_ts = Some(expire_at);
                 }
+
+                signal.max_contracts = Some(max_contracts);
 
                 if best_signal.as_ref().is_none_or(|b| signal.edge_after_fees > b.edge_after_fees) {
                     best_signal = Some(signal);
@@ -223,8 +256,7 @@ pub fn evaluate_strategies(
             }
         }
 
-        if let Some(mut signal) = best_signal {
-            signal.max_contracts = Some(contracts_remaining);
+        if let Some(signal) = best_signal {
             if is_break {
                 break_log.push_front(BreakEvalLog {
                     timestamp: chrono::Utc::now().to_rfc3339(),
@@ -295,7 +327,13 @@ pub async fn execute_signal(
     // This closes the TOCTOU gap: state may have changed since evaluate_strategies ran.
     let signal = {
         let s = state.lock().await;
-        if !s.risk.can_trade(signal.size_dollars) {
+
+        // Get game markets for reduce detection and cap computation.
+        let game_markets = s.game_state.game_markets_for(&signal.kalshi_ticker);
+        let is_reduce = s.risk.is_reduce_order(&game_markets, &signal.kalshi_ticker, &signal.side);
+
+        // Reduce orders bypass exposure/risk checks — they decrease risk, not increase it.
+        if !is_reduce && !s.risk.can_trade(signal.size_dollars) {
             tracing::warn!(
                 "Risk check failed for {} signal on {}",
                 signal.strategy,
@@ -304,7 +342,9 @@ pub async fn execute_signal(
             return None;
         }
 
-        // Re-check has_resting_order (a fill may have been partially processed)
+        // Re-check resting order (a fill may have been partially processed).
+        // For reduce orders, only block if the same ticker has a resting order (same-side conflict).
+        // For regular orders, block on any same-ticker resting order (same behaviour as before).
         if s.order_manager.has_resting_order(&signal.kalshi_ticker) {
             tracing::info!(
                 "Skipping {} signal on {}: resting order appeared since evaluation",
@@ -313,21 +353,23 @@ pub async fn execute_signal(
             return None;
         }
 
-        // Re-compute contract cap: abs(filled position) + resting orders
-        let game_tickers = s.game_state.game_tickers_for(&signal.kalshi_ticker);
-        let game_committed: i64 = game_tickers.iter()
-            .map(|t| {
-                let position = s.risk.net_position(t).unsigned_abs() as i64;
-                let resting = s.order_manager.resting_contracts_for_tickers(&[t.as_str()]);
+        // Re-compute contract cap.
+        let net_game_risk = s.risk.net_game_home_risk(&game_markets);
+        let reduce_cap = net_game_risk.unsigned_abs() as i64;
+        let game_committed: i64 = game_markets.iter()
+            .map(|m| {
+                let position = s.risk.net_position(&m.ticker).unsigned_abs() as i64;
+                let resting = s.order_manager.resting_contracts_for_tickers(&[m.ticker.as_str()]);
                 position + resting
             })
             .sum();
-        let contracts_remaining = (max_contracts_per_game - game_committed).max(0);
+        let regular_remaining = (max_contracts_per_game - game_committed).max(0);
+
+        let contracts_remaining = if is_reduce { reduce_cap } else { regular_remaining };
         if contracts_remaining <= 0 {
             tracing::info!(
-                "Skipping {} signal on {}: contract limit reached ({}/{})",
-                signal.strategy, signal.kalshi_ticker,
-                game_committed, max_contracts_per_game
+                "Skipping {} signal on {}: contract limit reached (reduce={}, reduce_cap={}, regular_remaining={})",
+                signal.strategy, signal.kalshi_ticker, is_reduce, reduce_cap, regular_remaining
             );
             return None;
         }

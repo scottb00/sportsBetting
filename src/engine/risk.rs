@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 
+use crate::engine::game_state::KalshiMarketState;
+use crate::kalshi::types::OrderSide;
+
 /// Tracks average entry price and size for a position (keyed by "ticker:side").
 #[derive(Debug, Clone, Default)]
 struct PositionEntry {
@@ -202,6 +205,30 @@ impl RiskManager {
         let no = self.positions.get(&format!("{}:no", ticker))
             .map(|e| e.contracts).unwrap_or(0);
         yes - no
+    }
+
+    /// Signed net game exposure in home-team units.
+    /// Positive = net long home team, negative = net long away team.
+    /// Accounts for both YES/NO positions and cross-ticker hedges.
+    pub fn net_game_home_risk(&self, markets: &[KalshiMarketState]) -> i64 {
+        markets.iter().map(|m| {
+            let net = self.net_position(&m.ticker);
+            if m.is_home { net } else { -net }
+        }).sum()
+    }
+
+    /// Returns true if placing `side` on `ticker` would reduce game-level risk.
+    /// Handles both same-ticker (buy NO when long YES) and cross-ticker (buy YES on away
+    /// when long home) cases.
+    pub fn is_reduce_order(&self, markets: &[KalshiMarketState], ticker: &str, side: &OrderSide) -> bool {
+        let net = self.net_game_home_risk(markets);
+        if net == 0 { return false; }
+        let Some(market) = markets.iter().find(|m| m.ticker == ticker) else { return false; };
+        let signal_home_direction: i64 = match (market.is_home, side) {
+            (true, OrderSide::Yes) | (false, OrderSide::No) => 1,
+            _ => -1,
+        };
+        net * signal_home_direction < 0
     }
 
     /// Reset daily P&L (call at start of trading day).
