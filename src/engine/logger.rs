@@ -119,8 +119,8 @@ impl TradeLogger {
         game_info: Option<&GameInfo>,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps, game_name, home_team, away_team, is_home)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT OR REPLACE INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps, game_name, home_team, away_team, is_home, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
             rusqlite::params![
                 order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps,
                 game_info.map(|g| g.game_name.as_str()),

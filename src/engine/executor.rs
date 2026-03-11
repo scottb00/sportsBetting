@@ -483,7 +483,7 @@ pub async fn execute_signal(
             // Log under logger lock only (no state lock held)
             {
                 let log = logger.lock().unwrap();
-                let _ = log.log_order(
+                if let Err(e) = log.log_order(
                     &resp.order.order_id,
                     &signal.kalshi_ticker,
                     &signal.strategy,
@@ -494,7 +494,9 @@ pub async fn execute_signal(
                     &resp.order.status,
                     edge_bps,
                     game_info.as_ref(),
-                );
+                ) {
+                    tracing::warn!("Failed to log order {}: {:?}", resp.order.order_id, e);
+                }
             }
 
             // Apply state updates under state lock only (no logger lock)

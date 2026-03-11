@@ -34,6 +34,9 @@ struct GameView {
     espn_home_win_prob: Option<f64>,
     /// Game start time as unix seconds (from ESPN).
     start_time_ts: Option<i64>,
+    /// Net game risk: positive = long home team winning, negative = long away team winning.
+    /// Aggregates across all markets (YES-DUKE and NO-UNC count as the same exposure).
+    net_game_contracts: i64,
     markets: Vec<MarketView>,
 }
 
@@ -144,6 +147,7 @@ struct GameSnapshot {
     status_detail: String,
     espn_home_win_prob: Option<f64>,
     start_time_ts: Option<i64>,
+    net_game_contracts: i64,
     markets: Vec<MarketSnapshot>,
 }
 
@@ -182,6 +186,7 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
                     status_detail: g.status_detail.clone(),
                     espn_home_win_prob: g.espn_home_win_prob,
                     start_time_ts: g.start_time_ts,
+                    net_game_contracts: s.risk.net_game_home_risk(&g.kalshi_markets),
                     markets,
                 }
             })
@@ -229,6 +234,7 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
             status_detail: g.status_detail,
             espn_home_win_prob: g.espn_home_win_prob,
             start_time_ts: g.start_time_ts,
+            net_game_contracts: g.net_game_contracts,
             markets,
         }
     }).collect();
@@ -407,7 +413,7 @@ fn query_orders(db_path: &str) -> anyhow::Result<Vec<OrderRow>> {
     let conn = open_read_only(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT order_id, ticker, COALESCE(strategy,''), action, side, price_cents, count, status, created_at, game_name, home_team, away_team, is_home
-         FROM orders ORDER BY created_at DESC LIMIT 50"
+         FROM orders ORDER BY datetime(created_at) DESC LIMIT 50"
     )?;
     let rows = stmt.query_map([], |row| {
         let is_home_int: Option<i32> = row.get(12)?;

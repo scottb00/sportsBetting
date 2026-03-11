@@ -113,6 +113,25 @@ impl RiskManager {
         }).sum()
     }
 
+    /// Effective net position for a specific market, accounting for equivalent exposure across
+    /// ALL markets in the game. YES-DUKE and NO-UNC are the same "Duke wins" bet and should
+    /// reduce each other's effective position.
+    ///
+    /// Returns: positive = net long YES on this market, negative = net long NO on this market.
+    /// Falls back to ticker-specific net_position if the ticker isn't in the provided markets slice.
+    pub fn effective_net_for_market(
+        &self,
+        markets: &[crate::engine::game_state::KalshiMarketState],
+        ticker: &str,
+    ) -> i64 {
+        let net_home = self.net_game_home_risk(markets);
+        match markets.iter().find(|m| m.ticker == ticker) {
+            Some(m) if m.is_home => net_home,
+            Some(_) => -net_home,
+            None => self.net_position(ticker),
+        }
+    }
+
     /// Determine whether placing an order on `ticker` with `side` reduces game-level exposure.
     pub fn is_reduce_order(
         &self,
@@ -145,6 +164,50 @@ impl RiskManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_market(ticker: &str, is_home: bool) -> crate::engine::game_state::KalshiMarketState {
+        crate::engine::game_state::KalshiMarketState {
+            ticker: ticker.to_string(),
+            is_home,
+            volume: None,
+        }
+    }
+
+    #[test]
+    fn effective_net_single_market() {
+        let mut rm = RiskManager::new();
+        rm.seed_positions("DUKE", "yes", 50, 5);
+        let markets = vec![make_market("DUKE", true)];
+        assert_eq!(rm.effective_net_for_market(&markets, "DUKE"), 5);
+    }
+
+    #[test]
+    fn effective_net_cross_market_suppresses_unc() {
+        // 5 YES-DUKE (home). Evaluating UNC (away) should see net = -5.
+        let mut rm = RiskManager::new();
+        rm.seed_positions("DUKE", "yes", 50, 5);
+        let markets = vec![make_market("DUKE", true), make_market("UNC", false)];
+        assert_eq!(rm.effective_net_for_market(&markets, "DUKE"), 5);
+        assert_eq!(rm.effective_net_for_market(&markets, "UNC"), -5);
+    }
+
+    #[test]
+    fn effective_net_partial_cross_market_allows_delta() {
+        // 3 YES-DUKE. Target for NO-UNC = -7. Effective net for UNC = -3.
+        // delta = -7 - (-3) = -4 → should add 4 NO-UNC.
+        let mut rm = RiskManager::new();
+        rm.seed_positions("DUKE", "yes", 50, 3);
+        let markets = vec![make_market("DUKE", true), make_market("UNC", false)];
+        assert_eq!(rm.effective_net_for_market(&markets, "UNC"), -3);
+    }
+
+    #[test]
+    fn effective_net_no_positions() {
+        let rm = RiskManager::new();
+        let markets = vec![make_market("DUKE", true), make_market("UNC", false)];
+        assert_eq!(rm.effective_net_for_market(&markets, "DUKE"), 0);
+        assert_eq!(rm.effective_net_for_market(&markets, "UNC"), 0);
+    }
 
     #[test]
     fn test_maker_fee() {

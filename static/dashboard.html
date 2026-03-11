@@ -91,7 +91,6 @@
 <body>
 <div class="container">
   <h1>Sports Betting Bot Dashboard</h1>
-  <div id="risk-bar" class="risk-bar"></div>
   <div class="updated" id="updated"></div>
 
   <h2>Today's Performance</h2>
@@ -401,7 +400,7 @@ function gameDateTime(epochSecs) {
   return { display: `${date} ${time}`, date: dateKey, sortKey: epochSecs };
 }
 
-function renderDailyChart(data) {
+function renderDailyChart(data, risk) {
   const points = data ? data.points : [];
 
   // Compute aggregate stats
@@ -428,6 +427,11 @@ function renderDailyChart(data) {
   function statCard(label, value, cls) {
     return `<div class="risk-item"><span class="risk-label">${label}</span><span class="risk-value ${cls}">${value}</span></div>`;
   }
+  const riskCards = risk ? [
+    statCard('Open Orders', `${risk.open_orders}${risk.in_flight ? ` (+${risk.in_flight})` : ''}`, 'neutral'),
+    statCard('Status', risk.halted ? 'HALTED' : risk.dry_run ? 'DRY RUN' : 'LIVE', risk.halted ? 'negative' : risk.dry_run ? 'neutral' : 'positive'),
+    statCard('Deployed', `<span title="${risk.started_at}">${fmtAge(risk.started_at)}</span>`, 'neutral'),
+  ] : [];
   cardsEl.innerHTML = [
     statCard('Theor. Edge', fmt$(totalEdge), pnlClass(totalEdge)),
     statCard('Realized P&L', fmt$(totalPnl), pnlClass(totalPnl)),
@@ -435,6 +439,7 @@ function renderDailyChart(data) {
     statCard('P&L Std Dev', '$' + pnlStdDev.toFixed(2), 'neutral'),
     statCard('Sharpe-like', sharpe != null ? sharpe.toFixed(2) : '-', sharpe != null ? pnlClass(sharpe) : 'neutral'),
     statCard('Fills', `${settledFills} settled / ${totalFills} total`, 'neutral'),
+    ...riskCards,
   ].join('');
 
   // Render canvas chart
@@ -572,29 +577,7 @@ async function refresh() {
     fetchJson('/api/daily_chart'),
   ]);
 
-  // Risk bar
-  if (risk) {
-    $('#risk-bar').innerHTML = `
-      <div class="risk-item">
-        <span class="risk-label">Daily P&L</span>
-        <span class="risk-value ${pnlClass(risk.daily_pnl)}">${fmt$(risk.daily_pnl)}</span>
-      </div>
-      <div class="risk-item">
-        <span class="risk-label">Open Orders</span>
-        <span class="risk-value neutral">${risk.open_orders}${risk.in_flight ? ` (+${risk.in_flight})` : ''}</span>
-      </div>
-      <div class="risk-item">
-        <span class="risk-label">Status</span>
-        <span class="risk-value ${risk.halted ? 'halted' : risk.dry_run ? 'neutral' : 'positive'}">${risk.halted ? 'HALTED' : risk.dry_run ? 'DRY RUN' : 'LIVE'}</span>
-      </div>
-      <div class="risk-item">
-        <span class="risk-label">Deployed</span>
-        <span class="risk-value neutral" title="${risk.started_at}">${fmtAge(risk.started_at)}</span>
-      </div>
-    `;
-  }
-
-  renderDailyChart(dailyChart);
+  renderDailyChart(dailyChart, risk);
 
   // Games
   if (games) {

@@ -102,16 +102,20 @@ fn evaluate_market(
         0
     };
 
-    // Step 2: current signed position for this ticker
-    let net = risk.net_position(&market.ticker);
+    // Step 2a: game-level net aligned to this market's YES direction.
+    // Accounts for equivalent exposure on other markets (YES-DUKE and NO-UNC are the same bet).
+    let net_game_aligned = risk.effective_net_for_market(&game.kalshi_markets, &market.ticker);
+
+    // Step 2b: ticker-specific position for close logic (Case B only).
+    let net_ticker = risk.net_position(&market.ticker);
 
     // Step 3: decide action
     if target_signed != 0 {
         // Case A: we have a target — only ADD toward it, never trim.
-        // delta = target_signed - net (signed: positive means need more YES, negative means need more NO)
-        // We should only add if delta has the same sign as target_signed (we're short of target).
-        // If signs differ (we're already past target), do nothing — trimming is negative EV.
-        let delta = target_signed - net;
+        // delta = target_signed - net_game_aligned: positive = need more YES, negative = need more NO.
+        // Only add if delta has same sign as target (we're short). If signs differ, we're already
+        // at or past target via equivalent positions on another market — don't double-up.
+        let delta = target_signed - net_game_aligned;
         if delta == 0 || delta.signum() != target_signed.signum() {
             return None; // at or past target, don't trim
         }
@@ -147,9 +151,9 @@ fn evaluate_market(
         let fair_for_log = if matches!(side, OrderSide::Yes) { fair_value } else { 1.0 - fair_value };
         let mid_for_log = if matches!(side, OrderSide::Yes) { mid } else { 1.0 - mid };
         tracing::info!(
-            "{} ADD signal: {} {:?} at {}c, {} contracts (target={} net={}), edge {:.4}, fair {:.4}, mid {:.4}",
+            "{} ADD signal: {} {:?} at {}c, {} contracts (target={} net_game={}), edge {:.4}, fair {:.4}, mid {:.4}",
             strategy_name, market.ticker, side, alo, contracts,
-            target_signed, net, edge, fair_for_log, mid_for_log
+            target_signed, net_game_aligned, edge, fair_for_log, mid_for_log
         );
 
         Some(OrderSignal {
@@ -164,9 +168,10 @@ fn evaluate_market(
             edge_after_fees: edge,
             max_contracts: None,
         })
-    } else if net != 0 {
-        // Case B: no edge, but we have a position — close it
-        let (side, action, alo) = if net > 0 {
+    } else if net_ticker != 0 {
+        // Case B: no edge, but we have a ticker-specific position — close it.
+        // Uses ticker-specific net (not game-aligned) since we can only close what we hold on this ticker.
+        let (side, action, alo) = if net_ticker > 0 {
             // Long YES → close by buying NO
             let alo = (100 - yes_bid - 1).max(1);
             (OrderSide::No, OrderAction::Buy, alo)
@@ -176,12 +181,12 @@ fn evaluate_market(
             (OrderSide::Yes, OrderAction::Buy, alo)
         };
 
-        let contracts = net.unsigned_abs() as i64;
+        let contracts = net_ticker.unsigned_abs() as i64;
         let size_dollars = contracts as f64 * alo as f64 / 100.0;
 
         tracing::info!(
-            "{} CLOSE signal: {} {:?} at {}c, {} contracts (net={}, target=0, no edge), fair {:.4}",
-            strategy_name, market.ticker, side, alo, contracts, net, fair_value
+            "{} CLOSE signal: {} {:?} at {}c, {} contracts (net_ticker={}, target=0, no edge), fair {:.4}",
+            strategy_name, market.ticker, side, alo, contracts, net_ticker, fair_value
         );
 
         Some(OrderSignal {
