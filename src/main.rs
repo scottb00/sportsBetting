@@ -1,4 +1,3 @@
-use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -15,7 +14,7 @@ use sports_betting::engine::handlers;
 use sports_betting::engine::market_mapper::MarketMapper;
 use sports_betting::engine::market_prep::{
     self, build_espn_for_matching, build_kalshi_for_matching,
-    build_kalshi_volume, filter_events_for_dates, active_date_tags,
+    build_kalshi_volume, filter_events_for_dates, today_and_tomorrow_tags,
 };
 use sports_betting::engine::notifier::Notifier;
 use sports_betting::espn::poller::{EspnPoller, GameTracker};
@@ -69,20 +68,19 @@ async fn main() -> Result<()> {
     ).await?;
 
     let state: SharedState = Arc::new(Mutex::new(bot_state));
-    let order_books: SharedOrderBooks = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
-    let break_log: SharedBreakLog = Arc::new(std::sync::Mutex::new(VecDeque::new()));
     let mapper: SharedMapper = Arc::new(Mutex::new(market_mapper));
+    let order_books: SharedOrderBooks = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    let break_log: SharedBreakLog = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
 
     // Start dashboard web server
     {
-        let dash_state = state.clone();
-        let dash_books = order_books.clone();
-        let dash_blog = break_log.clone();
-        let dash_logger = logger.clone();
+        let dashboard_state = state.clone();
+        let dashboard_books = order_books.clone();
+        let dashboard_logger = logger.clone();
         let db_path = config.logging.db_path.clone();
-        let dash_dry_run = config.kalshi.dry_run;
+        let dashboard_dry_run = config.kalshi.dry_run;
         tokio::spawn(async move {
-            if let Err(e) = dashboard::serve(dash_state, dash_books, dash_blog, dash_logger, &db_path, 3030, dash_dry_run).await {
+            if let Err(e) = dashboard::serve(dashboard_state, dashboard_books, dashboard_logger, &db_path, 3030, dashboard_dry_run).await {
                 tracing::error!("Dashboard server failed: {:?}", e);
             }
         });
@@ -90,36 +88,6 @@ async fn main() -> Result<()> {
 
     // Fetch initial ESPN win probs
     fetch_summaries_for_games(&espn_poller, &state).await;
-
-    // Backfill game info for historical orders missing game_name
-    {
-        use sports_betting::engine::logger::GameInfo;
-        let game_info_map: std::collections::HashMap<String, GameInfo> = {
-            let s = state.lock().await;
-            s.game_state.games.values()
-                .flat_map(|g| {
-                    g.kalshi_markets.iter().map(move |m| {
-                        (m.ticker.clone(), GameInfo {
-                            game_name: format!("{} vs {}", g.away_team, g.home_team),
-                            home_team: g.home_team.clone(),
-                            away_team: g.away_team.clone(),
-                            is_home: m.is_home,
-                            edge_bps: None,
-                            espn_fair: g.fair_value_for_market(m),
-                        })
-                    })
-                })
-                .collect()
-        };
-        if !game_info_map.is_empty() {
-            let log = logger.lock().unwrap();
-            match log.backfill_game_info(&game_info_map) {
-                Ok(n) if n > 0 => tracing::info!("Backfilled game info for {} order rows", n),
-                Ok(_) => {}
-                Err(e) => tracing::warn!("Failed to backfill game info: {:?}", e),
-            }
-        }
-    }
 
     // --- Load existing positions and sync resting orders from Kalshi on startup ---
     {
@@ -133,7 +101,8 @@ async fn main() -> Result<()> {
         };
         let mut s = state.lock().await;
         for pos in &positions {
-            if pos.position != 0 {
+            if pos.total_traded > 0 {
+                s.order_manager.record_startup_position(&pos.ticker, pos.total_traded);
                 tracing::info!(
                     "Position: {} | traded={} position={} exposure={} pnl={}",
                     pos.ticker, pos.total_traded, pos.position,
@@ -155,133 +124,12 @@ async fn main() -> Result<()> {
         tracing::info!("Loaded positions from Kalshi, seeded risk manager");
     }
     handlers::sync_orders(&state, &logger, &kalshi_rest).await;
-    // Recover strategies for resting orders from DB
-    {
-        let mut s = state.lock().await;
-        // Recover strategies for resting orders from DB
-        let order_ids: Vec<String> = s.order_manager.resting_order_ids();
-        if !order_ids.is_empty() {
-            let strategies = {
-                let log = logger.lock().unwrap();
-                log.get_order_strategies(&order_ids)
-            };
-            if !strategies.is_empty() {
-                tracing::info!("Recovered {} strategies from DB for resting orders", strategies.len());
-                s.order_manager.import_strategies(strategies);
-            }
-        }
-        // Rebuild clv_orders from resting orders so refresh_stale_clv_orders works after restart.
-        s.order_manager.recover_clv_from_resting();
-    }
     // Backfill fills from Kalshi REST (catches any missed WS fill events)
     handlers::sync_fills(&state, &logger, &kalshi_rest).await;
 
-    // Backfill settlement prices for historical fills missing them
-    {
-        let unsettled = {
-            let log = logger.lock().unwrap();
-            log.unsettled_tickers().unwrap_or_default()
-        };
-        if !unsettled.is_empty() {
-            tracing::info!("Backfilling settlement for {} tickers with unsettled fills", unsettled.len());
-            let mut settled_count = 0;
-            for ticker in &unsettled {
-                match kalshi_rest.get_market(ticker).await {
-                    Ok(market) => {
-                        // Only record settlement for markets with an explicit "yes" or "no" result.
-                        // Kalshi may return result: "" for active markets — skip those.
-                        match market.result.as_deref() {
-                            Some("yes") | Some("no") => {
-                                let result = market.result.as_deref().unwrap();
-                                let settlement = if result == "yes" { 100 } else { 0 };
-                                let log = logger.lock().unwrap();
-                                if let Ok(n) = log.record_settlement(ticker, settlement) {
-                                    if n > 0 {
-                                        settled_count += n;
-                                        tracing::info!("Backfilled settlement for {}: {} ({})", ticker, result, settlement);
-                                    }
-                                }
-                            }
-                            _ => {} // Market still active or unknown result, skip
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!("Could not fetch market {}: {:?}", ticker, e);
-                    }
-                }
-            }
-            if settled_count > 0 {
-                tracing::info!("Backfilled settlement for {} fills total", settled_count);
-            }
-        }
-    }
-
-    // Backfill game info for historical orders from Kalshi REST (for tickers no longer in live state)
-    {
-        use sports_betting::engine::logger::GameInfo;
-        use sports_betting::engine::market_mapper::MarketMapper;
-        let missing = {
-            let log = logger.lock().unwrap();
-            log.tickers_missing_game_info().unwrap_or_default()
-        };
-        if !missing.is_empty() {
-            tracing::info!("Backfilling game info for {} tickers from Kalshi REST", missing.len());
-            let mut game_info_map = std::collections::HashMap::new();
-            for ticker in &missing {
-                match kalshi_rest.get_market(ticker).await {
-                    Ok(market) => {
-                        let title = &market.title;
-                        let title_clean = title.trim_end_matches(" Winner?").trim_end_matches('?');
-                        let parts: Vec<&str> = title_clean.split(" at ").collect();
-                        if parts.len() == 2 {
-                            let away_team = parts[0].trim().to_string();
-                            let home_team = parts[1].trim().to_string();
-                            let is_home = market.yes_sub_title.as_deref()
-                                .map(|yst| MarketMapper::market_is_home_team(title, yst))
-                                .unwrap_or(true);
-                            game_info_map.insert(ticker.clone(), GameInfo {
-                                game_name: format!("{} vs {}", away_team, home_team),
-                                home_team,
-                                away_team,
-                                is_home,
-                                edge_bps: None,
-                                espn_fair: None,
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!("Could not fetch market {} for game info: {:?}", ticker, e);
-                    }
-                }
-            }
-            if !game_info_map.is_empty() {
-                let log = logger.lock().unwrap();
-                match log.backfill_game_info(&game_info_map) {
-                    Ok(n) if n > 0 => tracing::info!("Backfilled game info for {} order rows from REST", n),
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!("Failed to backfill game info from REST: {:?}", e),
-                }
-            }
-        }
-    }
-
     // --- Connect WebSockets ---
-    // WS failures are non-fatal: discovery/maintenance will retry, and the event loop
-    // already handles None receivers via std::future::pending().
-    let (mut kalshi_rx, kalshi_ws_handle) = match connect_kalshi_ws(&auth, &config, &mapper).await {
-        Ok(pair) => pair,
-        Err(e) => {
-            tracing::warn!("Kalshi WS connection failed on startup (will retry via discovery): {:?}", e);
-            (None, None)
-        }
-    };
-    let mut poly_rx = match connect_poly_ws(&state).await {
-        Ok(rx) => rx,
-        Err(e) => {
-            tracing::warn!("Polymarket WS connection failed on startup: {:?}", e);
-            None
-        }
-    };
+    let (mut kalshi_rx, kalshi_ws_handle) = connect_kalshi_ws(&auth, &config, &mapper).await?;
+    let mut poly_rx = connect_poly_ws(&state).await?;
 
     // --- Main event loop ---
     let mut game_tracker = GameTracker::new();
@@ -291,7 +139,6 @@ async fn main() -> Result<()> {
         tokio::time::interval(tokio::time::Duration::from_secs(config.intervals.maintenance_interval_secs));
     let mut current_day = today;
     let dry_run = config.kalshi.dry_run;
-    let mut unmapped_tickers = std::collections::HashSet::<String>::new();
 
     tracing::info!("Entering main event loop");
 
@@ -303,7 +150,6 @@ async fn main() -> Result<()> {
                     tracing::info!("New trading day: {} -> {}", current_day, now_day);
                     let mut s = state.lock().await;
                     s.risk.reset_daily();
-                    unmapped_tickers.clear();
                     current_day = now_day;
                 }
                 handlers::handle_scoreboard_tick(
@@ -316,7 +162,6 @@ async fn main() -> Result<()> {
                 handlers::handle_maintenance_tick(
                     &state, &order_books, &logger, &kalshi_rest, &espn_poller,
                     &mapper, kalshi_ws_handle.as_ref(),
-                    &mut unmapped_tickers,
                 ).await;
             }
             Some(event) = async {
@@ -325,15 +170,7 @@ async fn main() -> Result<()> {
                     None => std::future::pending().await,
                 }
             } => {
-                // On WS reconnect, immediately sync fills and reconcile positions
-                // to close the drift window from any fills missed during disconnect.
-                let is_reconnect = matches!(&event, sports_betting::kalshi::websocket::KalshiWsEvent::Connected);
                 handlers::handle_kalshi_event(event, &state, &order_books, &logger).await;
-                if is_reconnect {
-                    tracing::info!("WS reconnected — running immediate fill sync + position reconciliation");
-                    handlers::sync_fills(&state, &logger, &kalshi_rest).await;
-                    handlers::reconcile_positions(&state, &kalshi_rest).await;
-                }
             }
             Some(event) = async {
                 match &mut poly_rx {
@@ -366,7 +203,7 @@ async fn fetch_initial_markets(
     });
     tracing::info!("Found {} Polymarket events", poly_events.len());
 
-    let (_, tomorrow, date_tags) = active_date_tags();
+    let (_, tomorrow, date_tags) = today_and_tomorrow_tags();
     let mut kalshi_events = market_prep::fetch_all_kalshi_cbb_events(kalshi_rest).await;
     let before = kalshi_events.events.len();
     filter_events_for_dates(&mut kalshi_events, &date_tags);
@@ -379,23 +216,18 @@ async fn fetch_initial_markets(
     let kalshi_for_matching = build_kalshi_for_matching(&kalshi_events);
     let kalshi_volume = build_kalshi_volume(&kalshi_events);
 
+    let is_today_or_tomorrow = |s: &str| s.starts_with(today) || s.starts_with(&tomorrow);
     let poly_for_matching: Vec<(String, String)> = poly_events
         .iter()
         .filter(|e| {
-            match &e.event_date {
-                Some(d) => d.starts_with(today) || d.starts_with(&tomorrow),
-                None => e.markets.iter().any(|m| {
-                    m.game_start_time.as_ref().is_some_and(|t| {
-                        t.starts_with(today) || t.starts_with(&tomorrow)
-                    })
-                }),
-            }
+            e.event_date.as_deref().map_or_else(
+                || e.markets.iter().any(|m| m.game_start_time.as_deref().is_some_and(is_today_or_tomorrow)),
+                is_today_or_tomorrow,
+            )
         })
         .flat_map(|e| {
             e.markets.iter().filter_map(|m| {
-                if m.sports_market_type.as_deref() != Some("moneyline") {
-                    return None;
-                }
+                if m.sports_market_type.as_deref() != Some("moneyline") { return None; }
                 let token_id = m.parsed_token_ids().map(|(yes, _)| yes)?;
                 Some((token_id, m.question.clone()))
             })

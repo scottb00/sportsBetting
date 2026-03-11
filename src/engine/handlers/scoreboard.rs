@@ -95,7 +95,7 @@ pub async fn handle_scoreboard_tick(
         let mut s = state.lock().await;
         // Prune stale in-flight entries (older than 60s) instead of blanket clearing,
         // so API calls still in progress from a previous tick keep their guard.
-        s.order_manager.prune_stale_in_flight(std::time::Duration::from_secs(60));
+        s.order_manager.clear_all_in_flight();
         log_game_summary(&s);
         build_eval_snapshot(&s)
     };

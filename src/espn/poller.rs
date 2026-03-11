@@ -349,30 +349,24 @@ mod tests {
         let event = EspnEvent {
             id: "1".to_string(),
             name: "A at B".to_string(),
-            short_name: "A @ B".to_string(),
             date: Some("2026-03-08T19:00Z".to_string()),
             competitions: vec![Competition {
-                id: "1".to_string(),
                 competitors: vec![
                     Competitor {
-                        id: "1".to_string(),
-                        team: Team { id: "1".to_string(), display_name: "Home".to_string(), abbreviation: "HM".to_string() },
+                        team: Team { display_name: "Home".to_string(), abbreviation: "HM".to_string() },
                         home_away: "home".to_string(),
                         score: None,
                     },
                     Competitor {
-                        id: "2".to_string(),
-                        team: Team { id: "2".to_string(), display_name: "Away".to_string(), abbreviation: "AW".to_string() },
+                        team: Team { display_name: "Away".to_string(), abbreviation: "AW".to_string() },
                         home_away: "away".to_string(),
                         score: None,
                     },
                 ],
-                odds: None,
                 situation: None,
             }],
             status: EventStatus {
                 status_type: StatusType {
-                    id: "1".to_string(),
                     name: "STATUS_SCHEDULED".to_string(),
                     state: "pre".to_string(),
                     description: "Scheduled".to_string(),

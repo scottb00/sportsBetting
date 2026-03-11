@@ -9,8 +9,6 @@ pub struct ScoreboardResponse {
 pub struct EspnEvent {
     pub id: String,
     pub name: String,
-    #[serde(rename = "shortName")]
-    pub short_name: String,
     /// ISO-8601 game start time (e.g. "2026-03-09T23:00Z")
     #[serde(default)]
     pub date: Option<String>,
@@ -20,10 +18,7 @@ pub struct EspnEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Competition {
-    pub id: String,
     pub competitors: Vec<Competitor>,
-    #[serde(default)]
-    pub odds: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     pub situation: Option<Situation>,
 }
@@ -46,7 +41,6 @@ pub struct LastPlay {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayType {
-    pub id: String,
     pub text: String,
 }
 
@@ -58,7 +52,6 @@ pub struct PlayProbability {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Competitor {
-    pub id: String,
     pub team: Team,
     #[serde(rename = "homeAway")]
     pub home_away: String,
@@ -67,7 +60,6 @@ pub struct Competitor {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Team {
-    pub id: String,
     #[serde(rename = "displayName")]
     pub display_name: String,
     pub abbreviation: String,
@@ -87,7 +79,6 @@ pub struct EventStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusType {
-    pub id: String,
     pub name: String,
     pub state: String,
     pub description: String,
@@ -95,7 +86,6 @@ pub struct StatusType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
-    pub id: String,
     pub name: String,
 }
 
@@ -115,13 +105,10 @@ pub struct SummaryResponse {
 pub struct Predictor {
     #[serde(rename = "homeTeam")]
     pub home_team: Option<PredictorTeam>,
-    #[serde(rename = "awayTeam")]
-    pub away_team: Option<PredictorTeam>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PredictorTeam {
-    pub id: String,
     #[serde(rename = "gameProjection", deserialize_with = "string_to_f64")]
     pub game_projection: f64,
 }
@@ -138,18 +125,11 @@ where
 pub struct WinProbability {
     #[serde(rename = "homeWinPercentage")]
     pub home_win_percentage: f64,
-    #[serde(rename = "tiePercentage")]
-    pub tie_percentage: f64,
-    #[serde(rename = "playId")]
-    pub play_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PickcenterEntry {
     pub provider: Option<Provider>,
-    pub spread: Option<f64>,
-    #[serde(rename = "overUnder")]
-    pub over_under: Option<f64>,
     // Moneyline: home/away with close/open/live sub-objects
     pub moneyline: Option<serde_json::Value>,
     // homeTeamOdds/awayTeamOdds have moneyLine as integer
@@ -161,12 +141,8 @@ pub struct PickcenterEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamOdds {
-    pub favorite: Option<bool>,
-    pub underdog: Option<bool>,
     #[serde(rename = "moneyLine")]
     pub money_line: Option<f64>,
-    #[serde(rename = "spreadOdds")]
-    pub spread_odds: Option<f64>,
 }
 
 /// Parsed game state from ESPN data.

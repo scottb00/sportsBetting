@@ -21,9 +21,6 @@ pub struct GammaEvent {
     pub active: bool,
     pub closed: bool,
     pub markets: Vec<GammaMarket>,
-    /// Series slug identifying the sport/league, e.g. "ncaa-cbb".
-    #[serde(rename = "seriesSlug", default)]
-    pub series_slug: Option<String>,
     /// Date of the event in YYYY-MM-DD format.
     #[serde(rename = "eventDate", default)]
     pub event_date: Option<String>,
@@ -39,16 +36,8 @@ pub struct GammaMarket {
     pub best_bid: Option<f64>,
     #[serde(rename = "bestAsk", default, deserialize_with = "string_or_f64")]
     pub best_ask: Option<f64>,
-    #[serde(default, deserialize_with = "string_or_f64")]
-    pub spread: Option<f64>,
     #[serde(rename = "lastTradePrice", default, deserialize_with = "string_or_f64")]
     pub last_trade_price: Option<f64>,
-    #[serde(default, deserialize_with = "string_or_f64")]
-    pub volume: Option<f64>,
-    #[serde(rename = "volume24hr", default, deserialize_with = "string_or_f64")]
-    pub volume_24hr: Option<f64>,
-    #[serde(default, deserialize_with = "string_or_f64")]
-    pub liquidity: Option<f64>,
     #[serde(rename = "clobTokenIds")]
     pub clob_token_ids: Option<String>, // JSON string like "[\"token1\",\"token2\"]"
     pub active: bool,
@@ -59,9 +48,6 @@ pub struct GammaMarket {
     /// Game start time, e.g. "2026-03-08 23:30:00+00".
     #[serde(rename = "gameStartTime", default)]
     pub game_start_time: Option<String>,
-    /// Outcome labels as JSON string, e.g. "[\"Team A\", \"Team B\"]".
-    #[serde(default)]
-    pub outcomes: Option<String>,
 }
 
 impl GammaMarket {

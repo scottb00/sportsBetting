@@ -1,10 +1,7 @@
 use std::collections::HashMap;
 
-use crate::engine::game_state::KalshiMarketState;
-use crate::kalshi::types::OrderSide;
-
 /// Tracks average entry price and size for a position (keyed by "ticker:side").
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct PositionEntry {
     avg_price: f64, // in dollars (0.0–1.0)
     contracts: i64,
@@ -107,11 +104,6 @@ impl RiskManager {
         Self::kalshi_fee(0.0175, contracts, price_cents)
     }
 
-    /// Calculate Kalshi taker fee in cents (7% rate).
-    pub fn taker_fee(contracts: i64, price_cents: i64) -> f64 {
-        Self::kalshi_fee(0.07, contracts, price_cents)
-    }
-
     /// Kalshi fee formula: ceil(rate * contracts * price * (1 - price))
     fn kalshi_fee(rate: f64, contracts: i64, price_cents: i64) -> f64 {
         let p = price_cents as f64 / 100.0;
@@ -140,13 +132,14 @@ impl RiskManager {
                 entry.avg_price = total_cost / entry.contracts as f64;
             }
         } else {
-            // Sell: decrease exposure by entry cost (not sell price), realize PnL
+            // Sell: decrease exposure by avg entry cost (not sell price), realize PnL
             if let Some(entry) = self.positions.get_mut(&key) {
-                let entry_cost = entry.avg_price * contracts as f64;
-                self.current_total_exposure = (self.current_total_exposure - entry_cost).max(0.0);
                 let avg_entry_cents = entry.avg_price * 100.0;
                 let realized_pnl = (price - entry.avg_price) * contracts as f64;
                 self.daily_pnl += realized_pnl;
+                // Reduce exposure by the original cost basis of the contracts being sold
+                let cost_basis = entry.avg_price * contracts as f64;
+                self.current_total_exposure = (self.current_total_exposure - cost_basis).max(0.0);
                 entry.contracts -= contracts;
                 if entry.contracts <= 0 {
                     self.positions.remove(&key);
@@ -156,7 +149,7 @@ impl RiskManager {
                     ticker, side, realized_pnl, contracts, price_cents, avg_entry_cents,
                 );
             } else {
-                // No position entry — best effort: subtract sell notional
+                // No position tracked — just reduce by notional as fallback
                 self.current_total_exposure = (self.current_total_exposure - notional).max(0.0);
             }
         }
@@ -171,6 +164,7 @@ impl RiskManager {
     }
 
     /// Seed position tracking from Kalshi positions (call on startup).
+    /// Accumulates — does NOT clear existing entries for the ticker first.
     pub fn seed_positions(&mut self, ticker: &str, side: &str, avg_price_cents: i64, contracts: i64) {
         if contracts > 0 && avg_price_cents > 0 {
             let key = format!("{}:{}", ticker, side);
@@ -182,19 +176,27 @@ impl RiskManager {
         }
     }
 
-    /// Reset and re-seed position for a ticker from Kalshi API data.
-    /// Used by position reconciliation to correct drift from missed fills.
+    /// Re-seed position for a ticker from the source of truth (position reconciliation).
+    /// Clears ALL existing position entries for this ticker first, then sets the new value.
+    /// Used when Kalshi API reports a position mismatch with local state.
     pub fn reseed_position(&mut self, ticker: &str, side: &str, avg_price_cents: i64, contracts: i64) {
-        // Remove old entries for both sides of this ticker
-        for s in ["yes", "no"] {
+        // Remove all sides for this ticker and subtract their exposure
+        for s in &["yes", "no"] {
             let key = format!("{}:{}", ticker, s);
-            if let Some(old) = self.positions.remove(&key) {
-                self.current_total_exposure -= old.avg_price * old.contracts as f64;
+            if let Some(entry) = self.positions.remove(&key) {
+                let exposure = entry.avg_price * entry.contracts as f64;
+                self.current_total_exposure = (self.current_total_exposure - exposure).max(0.0);
             }
         }
-        self.current_total_exposure = self.current_total_exposure.max(0.0);
-        // Re-seed with current position
-        self.seed_positions(ticker, side, avg_price_cents, contracts);
+        // Set new position
+        if contracts > 0 && avg_price_cents > 0 {
+            let key = format!("{}:{}", ticker, side);
+            self.positions.insert(key, PositionEntry {
+                avg_price: avg_price_cents as f64 / 100.0,
+                contracts,
+            });
+            self.current_total_exposure += contracts as f64 * avg_price_cents as f64 / 100.0;
+        }
     }
 
     /// Net position for a ticker: positive = YES contracts, negative = NO contracts.
@@ -207,28 +209,41 @@ impl RiskManager {
         yes - no
     }
 
-    /// Signed net game exposure in home-team units.
-    /// Positive = net long home team, negative = net long away team.
-    /// Accounts for both YES/NO positions and cross-ticker hedges.
-    pub fn net_game_home_risk(&self, markets: &[KalshiMarketState]) -> i64 {
+    /// Compute the signed net game-level risk across all markets in the game, home-team aligned.
+    /// Positive = net long the home team winning, negative = net long the away team winning.
+    /// Uses the `is_home` flag on each market to align signs.
+    pub fn net_game_home_risk(&self, markets: &[crate::engine::game_state::KalshiMarketState]) -> i64 {
         markets.iter().map(|m| {
             let net = self.net_position(&m.ticker);
             if m.is_home { net } else { -net }
         }).sum()
     }
 
-    /// Returns true if placing `side` on `ticker` would reduce game-level risk.
-    /// Handles both same-ticker (buy NO when long YES) and cross-ticker (buy YES on away
-    /// when long home) cases.
-    pub fn is_reduce_order(&self, markets: &[KalshiMarketState], ticker: &str, side: &OrderSide) -> bool {
+    /// Determine whether placing an order on `ticker` with `side` reduces the game-level exposure.
+    /// A reduce order offsets existing risk: e.g. if net_game_home_risk > 0, buying NO on the home
+    /// ticker or buying YES on the away ticker reduces exposure.
+    pub fn is_reduce_order(
+        &self,
+        markets: &[crate::engine::game_state::KalshiMarketState],
+        ticker: &str,
+        side: &crate::kalshi::types::OrderSide,
+    ) -> bool {
         let net = self.net_game_home_risk(markets);
-        if net == 0 { return false; }
-        let Some(market) = markets.iter().find(|m| m.ticker == ticker) else { return false; };
-        let signal_home_direction: i64 = match (market.is_home, side) {
-            (true, OrderSide::Yes) | (false, OrderSide::No) => 1,
-            _ => -1,
+        if net == 0 {
+            return false;
+        }
+        // Find the market for this ticker
+        let market = match markets.iter().find(|m| m.ticker == ticker) {
+            Some(m) => m,
+            None => return false,
         };
-        net * signal_home_direction < 0
+        // A YES order on this market is "long home" if is_home, "long away" if !is_home
+        let order_is_long_home = match side {
+            crate::kalshi::types::OrderSide::Yes => market.is_home,
+            crate::kalshi::types::OrderSide::No => !market.is_home,
+        };
+        // Reduces exposure when order direction opposes current net risk
+        (net > 0 && !order_is_long_home) || (net < 0 && order_is_long_home)
     }
 
     /// Reset daily P&L (call at start of trading day).

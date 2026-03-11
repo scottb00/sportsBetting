@@ -28,7 +28,6 @@ pub struct GameState {
     pub espn_event_id: String,
     /// All Kalshi markets for this game (typically 2: one per team)
     pub kalshi_markets: Vec<KalshiMarketState>,
-    // TODO: reserved for future Polymarket strategy integration
     pub polymarket_token_id: Option<String>,
     pub polymarket_is_home: bool, // true if polymarket YES token is for the home team
 
@@ -170,11 +169,11 @@ impl GameStateManager {
     /// Get all Kalshi tickers (as owned Strings) for the game containing the given ticker.
     pub fn game_tickers_for(&self, ticker: &str) -> Vec<String> {
         self.get_by_kalshi_ticker(ticker)
-            .map(|g| g.kalshi_tickers().into_iter().map(ToString::to_string).collect())
+            .map(|g| g.kalshi_tickers().into_iter().map(|t| t.to_string()).collect())
             .unwrap_or_default()
     }
 
-    /// Get all Kalshi markets (with is_home flags) for the game containing the given ticker.
+    /// Get all Kalshi market states for the game containing the given ticker.
     pub fn game_markets_for(&self, ticker: &str) -> Vec<KalshiMarketState> {
         self.get_by_kalshi_ticker(ticker)
             .map(|g| g.kalshi_markets.clone())
@@ -195,6 +194,19 @@ impl GameStateManager {
     /// Get all games currently in a break state.
     pub fn games_on_break(&self) -> Vec<&GameState> {
         self.games.values().filter(|g| g.phase.is_break()).collect()
+    }
+
+    /// Get all pre-game games (for CLV).
+    pub fn pre_game_games(&self) -> Vec<&GameState> {
+        self.games.values().filter(|g| g.phase == GamePhase::PreGame).collect()
+    }
+
+    /// Get all live games (for arb scanning).
+    pub fn live_games(&self) -> Vec<&GameState> {
+        self.games
+            .values()
+            .filter(|g| matches!(g.phase, GamePhase::Live | GamePhase::Halftime | GamePhase::Break))
+            .collect()
     }
 
     /// Remove finished games.

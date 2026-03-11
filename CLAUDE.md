@@ -41,6 +41,7 @@ src/
 │   ├── notifier.rs      — Telegram push notifications
 │   ├── dashboard.rs     — Web dashboard (axum, port 3030)
 │   └── handlers/
+│       ├── mod.rs           — Re-exports + handle_maintenance_tick() orchestration
 │       ├── scoreboard.rs    — ESPN poll → strategy evaluation → order signals
 │       ├── kalshi_ws.rs     — Kalshi WebSocket event handler
 │       ├── polymarket_ws.rs — Polymarket WebSocket event handler
@@ -156,6 +157,7 @@ ssh root@165.227.117.108 'chown bot:bot /home/bot/app/config.toml && chmod 600 /
 
 - `tests/correctness_tests.rs` — Property-based tests (proptest) for direction invariants + e2e scenarios
 - `tests/game_state_tests.rs` — GameState unit tests
+- `tests/risk_constraint_tests.rs` — Risk constraint and CLV order tests
 - Run with `cargo test` — no external services needed (all mocked/unit)
 
 ## Common Patterns

@@ -94,6 +94,10 @@
   <div id="risk-bar" class="risk-bar"></div>
   <div class="updated" id="updated"></div>
 
+  <h2>Today's Performance</h2>
+  <div id="daily-stats-cards" class="risk-bar" style="margin-bottom:8px"></div>
+  <canvas id="daily-chart" width="1368" height="200" style="width:100%;height:200px;background:#161b22;border:1px solid #30363d;border-radius:6px;display:block;margin-bottom:16px"></canvas>
+
   <h2>Tracked Games</h2>
   <div class="filters" id="game-filters">
     <div class="filter-group">
@@ -397,18 +401,175 @@ function gameDateTime(epochSecs) {
   return { display: `${date} ${time}`, date: dateKey, sortKey: epochSecs };
 }
 
+function renderDailyChart(data) {
+  const points = data ? data.points : [];
+
+  // Compute aggregate stats
+  const edgeVals = points.map(p => p.fill_edge).filter(v => v != null);
+  const pnlVals = points.map(p => p.fill_pnl).filter(v => v != null);
+  const totalEdge = edgeVals.reduce((s, v) => s + v, 0);
+  const totalPnl = pnlVals.reduce((s, v) => s + v, 0);
+  const totalFills = points.length;
+  const settledFills = pnlVals.length;
+
+  function stddev(arr) {
+    if (arr.length < 2) return 0;
+    const mean = arr.reduce((s, v) => s + v, 0) / arr.length;
+    const meanSq = arr.reduce((s, v) => s + v * v, 0) / arr.length;
+    return Math.sqrt(Math.max(0, meanSq - mean * mean));
+  }
+  const edgeStdDev = stddev(edgeVals);
+  const pnlStdDev = stddev(pnlVals);
+  const meanEdge = edgeVals.length > 0 ? totalEdge / edgeVals.length : 0;
+  const sharpe = edgeStdDev > 0 ? meanEdge / edgeStdDev : null;
+
+  // Render stat cards
+  const cardsEl = document.getElementById('daily-stats-cards');
+  function statCard(label, value, cls) {
+    return `<div class="risk-item"><span class="risk-label">${label}</span><span class="risk-value ${cls}">${value}</span></div>`;
+  }
+  cardsEl.innerHTML = [
+    statCard('Theor. Edge', fmt$(totalEdge), pnlClass(totalEdge)),
+    statCard('Realized P&L', fmt$(totalPnl), pnlClass(totalPnl)),
+    statCard('Edge Std Dev', '$' + edgeStdDev.toFixed(2), 'neutral'),
+    statCard('P&L Std Dev', '$' + pnlStdDev.toFixed(2), 'neutral'),
+    statCard('Sharpe-like', sharpe != null ? sharpe.toFixed(2) : '-', sharpe != null ? pnlClass(sharpe) : 'neutral'),
+    statCard('Fills', `${settledFills} settled / ${totalFills} total`, 'neutral'),
+  ].join('');
+
+  // Render canvas chart
+  const canvas = document.getElementById('daily-chart');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.clientWidth || 1368;
+  const cssH = canvas.clientHeight || 200;
+  canvas.width = cssW * dpr;
+  canvas.height = cssH * dpr;
+  ctx.scale(dpr, dpr);
+
+  // Clear
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  if (points.length === 0) {
+    ctx.fillStyle = '#484f58';
+    ctx.font = '13px -apple-system, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('No fills today', cssW / 2, cssH / 2);
+    return;
+  }
+
+  const PAD = { top: 16, right: 72, bottom: 28, left: 56 };
+
+  // Build cumulative series
+  let cumEdge = 0, cumPnl = 0;
+  const edgeSeries = [], pnlSeries = [];
+  for (const p of points) {
+    const d = parseTS(p.ts);
+    if (p.fill_edge != null) cumEdge += p.fill_edge;
+    if (p.fill_pnl != null) cumPnl += p.fill_pnl;
+    edgeSeries.push({ t: d, y: cumEdge });
+    pnlSeries.push({ t: d, y: cumPnl });
+  }
+
+  // X axis bounds
+  const allTimes = edgeSeries.map(p => p.t).filter(Boolean);
+  const tMin = allTimes[0];
+  const tMax = allTimes[allTimes.length - 1];
+  const tRange = Math.max(tMax - tMin, 60000);
+
+  // Y axis bounds (include 0)
+  const allY = [...edgeSeries.map(p => p.y), ...pnlSeries.map(p => p.y), 0];
+  const yMin = Math.min(...allY);
+  const yMax = Math.max(...allY);
+  const yPad = Math.max((yMax - yMin) * 0.15, 0.05);
+  const yLo = yMin - yPad, yHi = yMax + yPad;
+
+  function toX(t) { return PAD.left + (t - tMin) / tRange * (cssW - PAD.left - PAD.right); }
+  function toY(v) { return PAD.top + (1 - (v - yLo) / (yHi - yLo)) * (cssH - PAD.top - PAD.bottom); }
+
+  // Horizontal grid + y labels
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  const ySteps = 4;
+  for (let i = 0; i <= ySteps; i++) {
+    const v = yLo + (yHi - yLo) * i / ySteps;
+    const y = toY(v);
+    ctx.strokeStyle = '#21262d';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(cssW - PAD.right, y); ctx.stroke();
+    ctx.fillStyle = '#484f58';
+    ctx.fillText((v >= 0 ? '+' : '') + '$' + Math.abs(v).toFixed(2), PAD.left - 4, y);
+  }
+
+  // Zero line
+  ctx.strokeStyle = '#30363d';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(PAD.left, toY(0)); ctx.lineTo(cssW - PAD.right, toY(0)); ctx.stroke();
+
+  // X axis time labels
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#484f58';
+  const xSteps = Math.min(8, allTimes.length);
+  for (let i = 0; i <= xSteps; i++) {
+    const t = new Date(tMin.getTime() + tRange * i / xSteps);
+    const x = toX(t);
+    ctx.strokeStyle = '#21262d';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, PAD.top); ctx.lineTo(x, cssH - PAD.bottom); ctx.stroke();
+    ctx.fillText(t.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}), x, cssH - PAD.bottom + 4);
+  }
+
+  // Draw a line series with dots
+  function drawLine(series, color) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    let first = true;
+    for (const pt of series) {
+      if (!pt.t) continue;
+      const x = toX(pt.t), y = toY(pt.y);
+      if (first) { ctx.moveTo(x, y); first = false; } else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.fillStyle = color;
+    for (const pt of series) {
+      if (!pt.t) continue;
+      ctx.beginPath(); ctx.arc(toX(pt.t), toY(pt.y), 3, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  drawLine(pnlSeries, totalPnl >= 0 ? '#3fb950' : '#f85149');
+  drawLine(edgeSeries, '#58a6ff');
+
+  // Legend
+  const lx = cssW - PAD.right + 6, ly = PAD.top;
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#58a6ff';
+  ctx.beginPath(); ctx.arc(lx + 4, ly + 5, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.fillText('Edge', lx + 11, ly);
+  ctx.fillStyle = totalPnl >= 0 ? '#3fb950' : '#f85149';
+  ctx.beginPath(); ctx.arc(lx + 4, ly + 19, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.fillText('P&L', lx + 11, ly + 14);
+}
+
 async function fetchJson(url) {
   try { const r = await fetch(url); return await r.json(); }
   catch { return null; }
 }
 
 async function refresh() {
-  const [risk, games, orders, fills, breakEvals] = await Promise.all([
+  const [risk, games, orders, fills, breakEvals, dailyChart] = await Promise.all([
     fetchJson('/api/risk'),
     fetchJson('/api/games'),
     fetchJson('/api/orders'),
     fetchJson('/api/fills'),
     fetchJson('/api/break_evals'),
+    fetchJson('/api/daily_chart'),
   ]);
 
   // Risk bar
@@ -440,6 +601,8 @@ async function refresh() {
       </div>
     `;
   }
+
+  renderDailyChart(dailyChart);
 
   // Games
   if (games) {

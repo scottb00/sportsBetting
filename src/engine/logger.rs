@@ -8,25 +8,9 @@ pub struct GameInfo {
     pub home_team: String,
     pub away_team: String,
     pub is_home: bool,
-    /// Edge in basis points at the time of order creation (positive = favorable)
-    pub edge_bps: Option<f64>,
-    /// ESPN fair value (probability, 0-1) for this ticker's YES side
-    pub espn_fair: Option<f64>,
 }
 
 impl GameInfo {
-    /// Compute signed edge in basis points from this game's fair value.
-    /// Returns positive for favorable edge (buying below fair / selling above fair).
-    pub fn compute_edge_bps(&self, price_cents: i64, side: &str, action: &str) -> Option<f64> {
-        let fv = self.espn_fair?;
-        let order_prob = price_cents as f64 / 100.0;
-        let is_yes = side.eq_ignore_ascii_case("yes");
-        let fair_for_side = if is_yes { fv } else { 1.0 - fv };
-        let is_buy = action.eq_ignore_ascii_case("buy");
-        let raw_edge = fair_for_side - order_prob;
-        Some((if is_buy { raw_edge } else { -raw_edge }) * 10000.0)
-    }
-
     /// Look up game info from the live game state for a given Kalshi ticker.
     pub fn from_game_state(
         game_state: &crate::engine::game_state::GameStateManager,
@@ -34,14 +18,11 @@ impl GameInfo {
     ) -> Option<Self> {
         let game = game_state.get_by_kalshi_ticker(ticker)?;
         let market = game.kalshi_markets.iter().find(|m| m.ticker == ticker)?;
-        let fair_value = game.fair_value_for_market(market);
         Some(GameInfo {
             game_name: format!("{} vs {}", game.away_team, game.home_team),
             home_team: game.home_team.clone(),
             away_team: game.away_team.clone(),
             is_home: market.is_home,
-            edge_bps: None,  // Caller computes if needed
-            espn_fair: fair_value,
         })
     }
 }
@@ -88,6 +69,15 @@ impl TradeLogger {
 
             CREATE UNIQUE INDEX IF NOT EXISTS idx_fills_trade_id ON fills(trade_id);
 
+            CREATE TABLE IF NOT EXISTS pnl_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                strategy TEXT,
+                unrealized_pnl REAL,
+                realized_pnl REAL,
+                total_exposure REAL,
+                snapshot_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE IF NOT EXISTS clv_checks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 order_id TEXT NOT NULL,
@@ -109,14 +99,6 @@ impl TradeLogger {
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN home_team TEXT");
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN away_team TEXT");
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN is_home INTEGER");
-        let _ = conn.execute_batch("ALTER TABLE fills ADD COLUMN settlement_cents INTEGER");
-        let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN espn_fair REAL");
-
-        // One-time backfill: set empty strategies to "clv_hunter" (only strategy that has placed orders)
-        let _ = conn.execute(
-            "UPDATE orders SET strategy = 'clv_hunter' WHERE strategy IS NULL OR strategy = ''",
-            [],
-        );
 
         Ok(Self { conn })
     }
@@ -136,15 +118,14 @@ impl TradeLogger {
         game_info: Option<&GameInfo>,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps, game_name, home_team, away_team, is_home, espn_fair)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "INSERT OR REPLACE INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps, game_name, home_team, away_team, is_home)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
                 order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps,
                 game_info.map(|g| g.game_name.as_str()),
                 game_info.map(|g| g.home_team.as_str()),
                 game_info.map(|g| g.away_team.as_str()),
                 game_info.map(|g| g.is_home as i32),
-                game_info.and_then(|g| g.espn_fair),
             ],
         )?;
         Ok(())
@@ -153,7 +134,6 @@ impl TradeLogger {
     /// Log a fill. Returns true if a new row was inserted (false if duplicate trade_id).
     /// `filled_at` should be the actual fill timestamp from Kalshi (ISO 8601).
     /// If None, falls back to current time.
-    /// `fee_dollars` is the fee in dollars (Kalshi API `fee_cost` field). Stored in DB column `fee_cents` (legacy name).
     #[allow(clippy::too_many_arguments)]
     pub fn log_fill(
         &self,
@@ -164,17 +144,30 @@ impl TradeLogger {
         action: &str,
         price_cents: i64,
         count: i64,
-        fee_dollars: f64,
+        fee_cents: f64,
         filled_at: Option<&str>,
     ) -> Result<bool> {
         let rows = self.conn.execute(
-            "INSERT INTO fills (trade_id, order_id, ticker, side, action, price_cents, count, fee_cents, filled_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, datetime('now')))
-             ON CONFLICT(trade_id) DO UPDATE SET
-               fee_cents = CASE WHEN excluded.fee_cents > 0 THEN excluded.fee_cents ELSE fee_cents END",
-            rusqlite::params![trade_id, order_id, ticker, side, action, price_cents, count, fee_dollars, filled_at],
+            "INSERT OR IGNORE INTO fills (trade_id, order_id, ticker, side, action, price_cents, count, fee_cents, filled_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, datetime('now')))",
+            rusqlite::params![trade_id, order_id, ticker, side, action, price_cents, count, fee_cents, filled_at],
         )?;
         Ok(rows > 0)
+    }
+
+    pub fn log_pnl_snapshot(
+        &self,
+        strategy: &str,
+        unrealized: f64,
+        realized: f64,
+        exposure: f64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO pnl_snapshots (strategy, unrealized_pnl, realized_pnl, total_exposure)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![strategy, unrealized, realized, exposure],
+        )?;
+        Ok(())
     }
 
     /// Log a CLV (closing line value) check for a pre-game order.
@@ -189,7 +182,7 @@ impl TradeLogger {
         closing_mid_cents: i64,
         clv_cents: i64,
     ) -> Result<()> {
-        let captured = if clv_cents > 0 { 1 } else { 0 };
+        let captured = i32::from(clv_cents > 0);
         self.conn.execute(
             "INSERT INTO clv_checks (order_id, ticker, side, order_price_cents, closing_mid_cents, clv_cents, captured)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -215,8 +208,8 @@ impl TradeLogger {
         game_info: Option<&GameInfo>,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, created_at, game_name, home_team, away_team, is_home, edge_bps, espn_fair)
-             VALUES (?1, ?2, '', ?3, ?4, ?5, ?6, ?7, COALESCE(?8, datetime('now')), ?9, ?10, ?11, ?12, ?13, ?14)
+            "INSERT INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, created_at, game_name, home_team, away_team, is_home)
+             VALUES (?1, ?2, '', ?3, ?4, ?5, ?6, ?7, COALESCE(?8, datetime('now')), ?9, ?10, ?11, ?12)
              ON CONFLICT(order_id) DO UPDATE SET
                price_cents = excluded.price_cents,
                count = excluded.count,
@@ -224,9 +217,7 @@ impl TradeLogger {
                game_name = COALESCE(excluded.game_name, game_name),
                home_team = COALESCE(excluded.home_team, home_team),
                away_team = COALESCE(excluded.away_team, away_team),
-               is_home = COALESCE(excluded.is_home, is_home),
-               edge_bps = COALESCE(excluded.edge_bps, edge_bps),
-               espn_fair = COALESCE(excluded.espn_fair, espn_fair)
+               is_home = COALESCE(excluded.is_home, is_home)
              WHERE strategy = ''",
             rusqlite::params![
                 order_id, ticker, action, side, price_cents, count, status, created_at,
@@ -234,8 +225,6 @@ impl TradeLogger {
                 game_info.map(|g| g.home_team.as_str()),
                 game_info.map(|g| g.away_team.as_str()),
                 game_info.map(|g| g.is_home as i32),
-                game_info.and_then(|g| g.edge_bps),
-                game_info.and_then(|g| g.espn_fair),
             ],
         )?;
         Ok(())
@@ -248,77 +237,6 @@ impl TradeLogger {
             rusqlite::params![strategy, order_id],
         )?;
         Ok(())
-    }
-
-    /// Get strategy for a single order from the DB (fallback when in-memory state is lost).
-    pub fn get_order_strategy(&self, order_id: &str) -> Result<Option<String>> {
-        let result: Option<String> = self.conn.query_row(
-            "SELECT strategy FROM orders WHERE order_id = ?1",
-            rusqlite::params![order_id],
-            |row| row.get(0),
-        ).ok();
-        // Return None for empty strings (stub orders without strategy)
-        Ok(result.filter(|s| !s.is_empty()))
-    }
-
-    /// Batch-read strategies for multiple orders from the DB (for startup recovery).
-    pub fn get_order_strategies(&self, order_ids: &[String]) -> std::collections::HashMap<String, String> {
-        let mut result = std::collections::HashMap::new();
-        for order_id in order_ids {
-            if let Ok(Some(strategy)) = self.get_order_strategy(order_id) {
-                result.insert(order_id.clone(), strategy);
-            }
-        }
-        result
-    }
-
-    /// Backfill game_name/home_team/away_team/is_home for orders that have a ticker but missing game data.
-    /// Called at startup with live game state so historical orders get enriched.
-    pub fn backfill_game_info(&self, game_info_by_ticker: &std::collections::HashMap<String, GameInfo>) -> Result<usize> {
-        let mut count = 0;
-        for (ticker, info) in game_info_by_ticker {
-            let rows = self.conn.execute(
-                "UPDATE orders SET game_name = ?1, home_team = ?2, away_team = ?3, is_home = ?4,
-                 espn_fair = COALESCE(?5, espn_fair)
-                 WHERE ticker = ?6 AND (game_name IS NULL OR game_name = '')",
-                rusqlite::params![info.game_name, info.home_team, info.away_team, info.is_home as i32, info.espn_fair, ticker],
-            )?;
-            count += rows;
-        }
-        Ok(count)
-    }
-
-    /// Get distinct tickers from orders that have no game_name recorded.
-    pub fn tickers_missing_game_info(&self) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT ticker FROM orders WHERE game_name IS NULL OR game_name = ''"
-        )?;
-        let tickers = stmt.query_map([], |row| row.get(0))?
-            .filter_map(Result::ok)
-            .collect();
-        Ok(tickers)
-    }
-
-    /// Get distinct tickers from fills that have no settlement recorded yet.
-    pub fn unsettled_tickers(&self) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT ticker FROM fills WHERE settlement_cents IS NULL"
-        )?;
-        let tickers = stmt.query_map([], |row| row.get(0))?
-            .filter_map(Result::ok)
-            .collect();
-        Ok(tickers)
-    }
-
-    /// Record settlement price for all fills on a ticker.
-    /// Called during cleanup when a game reaches Final phase.
-    /// settlement_cents: 100 if YES side won, 0 if YES side lost.
-    pub fn record_settlement(&self, ticker: &str, settlement_cents: i64) -> Result<usize> {
-        let rows = self.conn.execute(
-            "UPDATE fills SET settlement_cents = ?1 WHERE ticker = ?2 AND settlement_cents IS NULL",
-            rusqlite::params![settlement_cents, ticker],
-        )?;
-        Ok(rows)
     }
 
     /// Update order status (e.g. to "filled" or "partial_fill").
@@ -364,24 +282,16 @@ impl TradeLogger {
         Ok((total_edge_dollars, fill_count))
     }
 
-    /// Get realized P&L for today (settled fills only).
-    ///
-    /// Only includes fills where settlement is known. Open positions are excluded —
-    /// their cost is already reflected in the Exposure metric.
-    ///
-    /// Note: `fee_cents` column stores fee in dollars despite the column name.
+    /// Get total realized P&L for today.
+    /// Note: `fee_cents` column stores dollars despite the legacy name.
     pub fn daily_realized_pnl(&self) -> Result<f64> {
         let pnl: f64 = self.conn.query_row(
             "SELECT COALESCE(SUM(
-                CASE
-                  WHEN side = 'yes' AND action = 'buy'  THEN (settlement_cents - price_cents) * count / 100.0
-                  WHEN side = 'yes' AND action = 'sell' THEN (price_cents - settlement_cents) * count / 100.0
-                  WHEN side = 'no'  AND action = 'buy'  THEN ((100 - settlement_cents) - price_cents) * count / 100.0
-                  WHEN side = 'no'  AND action = 'sell' THEN (price_cents - (100 - settlement_cents)) * count / 100.0
+                CASE WHEN action = 'buy' THEN -price_cents * count / 100.0
+                     ELSE price_cents * count / 100.0
                 END - COALESCE(fee_cents, 0)
             ), 0.0)
-            FROM fills
-            WHERE date(filled_at) = date('now') AND settlement_cents IS NOT NULL",
+            FROM fills WHERE date(filled_at) = date('now')",
             [],
             |row| row.get(0),
         )?;

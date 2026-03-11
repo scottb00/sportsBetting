@@ -30,7 +30,6 @@ const CBB_SERIES: &[&str] = &[
     "KXNCAAMBMWC",
     "KXNCAAMBAAC",
     "KXNCAAMBSLAND",
-    "KXNCAAMBSLC",
     "KXNCAAMBOVC",
     "KXNCAAMBMAAC",
     "KXNCAAMBASUN",
@@ -52,17 +51,13 @@ pub fn kalshi_date_tag(date_str: &str) -> String {
     dt.format("%y%b%d").to_string().to_uppercase()
 }
 
-/// Get Kalshi date tags for yesterday, today, and tomorrow, plus date strings.
-/// Yesterday is included so late-running games (e.g. overtime, west coast) stay mapped.
-pub fn active_date_tags() -> (String, String, Vec<String>) {
+/// Get today's date and tomorrow's date as Kalshi date tags, plus today's YYYY-MM-DD string.
+pub fn today_and_tomorrow_tags() -> (String, String, Vec<String>) {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let tomorrow = (chrono::Local::now() + chrono::Duration::days(1))
         .format("%Y-%m-%d")
         .to_string();
-    let yesterday = (chrono::Local::now() - chrono::Duration::days(1))
-        .format("%Y-%m-%d")
-        .to_string();
-    let tags = vec![kalshi_date_tag(&yesterday), kalshi_date_tag(&today), kalshi_date_tag(&tomorrow)];
+    let tags = vec![kalshi_date_tag(&today), kalshi_date_tag(&tomorrow)];
     (today, tomorrow, tags)
 }
 
@@ -144,11 +139,10 @@ pub fn build_kalshi_for_matching(
 
 /// Build Kalshi volume map: ticker -> volume.
 pub fn build_kalshi_volume(events: &GetEventsResponse) -> HashMap<String, i64> {
-    let empty_markets = vec![];
     events
         .events
         .iter()
-        .flat_map(|e| e.markets.as_ref().unwrap_or(&empty_markets).iter())
+        .flat_map(|e| e.markets.as_ref().map_or(&[][..], |v| v.as_slice()))
         .filter_map(|m| m.volume.map(|v| (m.ticker.clone(), v)))
         .collect()
 }
@@ -206,20 +200,20 @@ fn extract_team_from_title(title: &str) -> String {
     }
 }
 
-/// Get bid/ask/mid for a ticker from an order books map.
-/// Returns all-None if the ticker has no book yet.
-pub fn book_prices(order_books: &HashMap<String, LocalOrderBook>, ticker: &str) -> BookPrices {
-    order_books
-        .get(ticker)
-        .map(extract_book_prices)
-        .unwrap_or(BookPrices { bid: None, ask: None, mid: None })
-}
-
 /// Extract bid/ask/mid from a local order book.
 pub fn extract_book_prices(book: &LocalOrderBook) -> BookPrices {
     BookPrices {
         bid: book.best_yes_bid().map(|l| l.price as f64),
         ask: book.best_yes_ask().map(|l| l.price as f64),
         mid: book.yes_mid(),
+    }
+}
+
+/// Look up bid/ask/mid for a ticker from the order books map.
+/// Returns empty BookPrices (all None) if the ticker is not found.
+pub fn book_prices(order_books: &HashMap<String, LocalOrderBook>, ticker: &str) -> BookPrices {
+    match order_books.get(ticker) {
+        Some(book) => extract_book_prices(book),
+        None => BookPrices { bid: None, ask: None, mid: None },
     }
 }

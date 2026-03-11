@@ -7,25 +7,27 @@
 │                          main.rs EVENT LOOP                        │
 │                                                                     │
 │  tokio::select! {                                                   │
-│    scoreboard_tick  ──► ESPN poll → strategy eval → order exec      │
-│    cleanup_tick     ──► remove finished games                       │
-│    discovery_tick   ──► find new Kalshi/Poly markets                │
-│    kalshi_ws_rx     ──► orderbook updates, fills                    │
-│    poly_ws_rx       ──► price updates (logged, not yet in signals)  │
+│    scoreboard_tick      ──► ESPN poll → strategy eval → order exec  │
+│    maintenance_tick     ──► cleanup → discovery → order/fill sync   │
+│                              → position reconciliation              │
+│    kalshi_ws_rx         ──► orderbook updates, fills                │
+│    poly_ws_rx           ──► price updates (logged, not yet signals) │
 │  }                                                                  │
 └────────────────────────────────┬────────────────────────────────────┘
                                  │
-                    ┌────────────▼────────────┐
-                    │   SharedState            │
-                    │   Arc<Mutex<BotState>>   │
-                    ├─────────────────────────┤
-                    │ GameStateManager        │  ← all games + markets
-                    │ MarketMapper            │  ← ESPN↔Kalshi↔Poly
-                    │ OrderManager            │  ← open orders + intents
-                    │ RiskManager             │  ← position limits, P&L
-                    │ LocalOrderBooks (map)   │  ← per-ticker book
-                    │ TradeLogger (SQLite)    │  ← audit trail
-                    └─────────────────────────┘
+          ┌──────────────────────────────────────────────────┐
+          │  5 independent locks (acquire in order shown)    │
+          │                                                  │
+          │  SharedMapper       Arc<tokio::Mutex<...>>       │  ← market mapping cache
+          │  SharedState        Arc<tokio::Mutex<BotState>>  │  ← GameStateManager
+          │    BotState:                                     │     OrderManager
+          │      game_state_mgr                              │     RiskManager
+          │      risk                                        │
+          │      order_manager                               │
+          │  SharedOrderBooks   Arc<RwLock<HashMap<...>>>    │  ← per-ticker bid/ask
+          │  SharedBreakLog     Arc<std::Mutex<VecDeque>>    │  ← dashboard ring buffer
+          │  SharedLogger       Arc<std::Mutex<TradeLogger>> │  ← SQLite audit trail
+          └──────────────────────────────────────────────────┘
 ```
 
 ## Data Sources & Flow
@@ -156,27 +158,7 @@
   └──────────────────────────────────────────┘
 ```
 
-## Strategy 2: Cross-Market Arb Scanner
-
-```
-  WHEN: Game is live, at halftime, or on break
-        (broader than Break EV — runs continuously)
-
-  WHY:  Same edge logic as Break EV, but catches mispricings
-        that appear mid-play when scores change rapidly.
-
-  ┌────────────────────────────────────────────────────────┐
-  │  Same evaluate_market() pipeline as Break EV           │
-  │                                                        │
-  │  Key difference: fires during LIVE play, not just      │
-  │  breaks. Captures real-time arb when Kalshi hasn't     │
-  │  fully priced in a scoring run or momentum shift.      │
-  │                                                        │
-  │  Order placement: identical (passive ALO, post_only)   │
-  └────────────────────────────────────────────────────────┘
-```
-
-## Strategy 3: CLV Hunter (Pre-Game)
+## Strategy 2: CLV Hunter (Pre-Game)
 
 ```
   WHEN: Game phase == PreGame (before tipoff)
@@ -306,7 +288,7 @@
   │   ├── risk.rs                Kelly sizing, position limits, fee calc
   │   ├── executor.rs            Signal → Kalshi REST order
   │   ├── logger.rs              SQLite trade logging
-  │   ├── notifier.rs            ntfy.sh push notifications
+  │   ├── notifier.rs            Telegram push notifications
   │   └── handlers/
   │       ├── mod.rs             Re-exports
   │       ├── scoreboard.rs      ESPN tick → strategy eval → order exec
@@ -316,9 +298,9 @@
   │       └── discovery.rs       Find new markets mid-session
   │
   ├── strategies/
-  │   ├── common.rs              evaluate_edge(), evaluate_market(), ALO calc
-  │   ├── break_ev.rs            Break-based +EV quoter
-  │   ├── arb_scanner.rs         Cross-market arb (live play)
+  │   ├── mod.rs                 Strategy trait + StrategyRegistry
+  │   ├── common.rs              evaluate_market(), compute_edge_and_alo(), ALO calc
+  │   ├── break_ev.rs            Break-based +EV quoter (halftime/TV timeout)
   │   └── clv_hunter.rs          Pre-game CLV hunting
   │
   ├── kalshi/

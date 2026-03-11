@@ -16,42 +16,39 @@ pub async fn sync_orders(state: &SharedState, logger: &SharedLogger, kalshi_rest
         }
     };
 
-    // Collect game_info and strategy per order under state lock (minimal data needed for logging)
-    let order_extras: Vec<(i64, Option<crate::engine::logger::GameInfo>, Option<String>)> = {
+    // Collect data for logging under state lock (avoids holding state during SQLite writes)
+    type LogEntry = (String, String, String, String, i64, i64, String, String,
+                     Option<crate::engine::logger::GameInfo>, Option<String>);
+    let log_entries: Vec<LogEntry> = {
         let s = state.lock().await;
         orders.iter().map(|order| {
             let price_cents = match order.side {
                 crate::kalshi::types::OrderSide::Yes => order.yes_price.unwrap_or(0),
                 crate::kalshi::types::OrderSide::No => order.no_price.unwrap_or(0),
             };
-            let mut game_info = crate::engine::logger::GameInfo::from_game_state(&s.game_state, &order.ticker);
-            if let Some(ref mut gi) = game_info {
-                let side_str = format!("{:?}", order.side);
-                let action_str = format!("{:?}", order.action);
-                gi.edge_bps = gi.compute_edge_bps(price_cents, &side_str, &action_str);
-            }
+            let game_info = crate::engine::logger::GameInfo::from_game_state(&s.game_state, &order.ticker);
             let strategy = s.order_manager.get_strategy(&order.order_id).map(|s| s.to_string());
-            (price_cents, game_info, strategy)
+            (
+                order.order_id.clone(), order.ticker.clone(),
+                format!("{:?}", order.action), format!("{:?}", order.side),
+                price_cents, order.remaining_count,
+                order.status.clone(), order.created_time.clone(),
+                game_info, strategy,
+            )
         }).collect()
     };
 
     // Log under logger lock (no state lock held)
     {
         let log = logger.lock().unwrap();
-        for (order, (price_cents, game_info, strategy)) in orders.iter().zip(order_extras.iter()) {
+        for (order_id, ticker, action, side, price_cents, remaining_count, status, created_time, game_info, strategy) in &log_entries {
             let _ = log.log_order_if_missing(
-                &order.order_id,
-                &order.ticker,
-                &format!("{:?}", order.action),
-                &format!("{:?}", order.side),
-                *price_cents,
-                order.remaining_count,
-                &order.status,
-                Some(&order.created_time),
-                game_info.as_ref(),
+                order_id, ticker, action, side,
+                *price_cents, *remaining_count, status,
+                Some(created_time.as_str()), game_info.as_ref(),
             );
-            if let Some(strategy) = strategy {
-                let _ = log.update_order_strategy(&order.order_id, strategy);
+            if let Some(strat) = strategy {
+                let _ = log.update_order_strategy(order_id, strat);
             }
         }
     }

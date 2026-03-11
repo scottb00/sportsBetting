@@ -32,39 +32,32 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
         return;
     }
 
-    // Phase 1: Collect metadata from state and determine which fills are new, under state lock
+    // Phase 1: Collect metadata from state, under state lock
     let fill_data: Vec<(
         usize,                                      // index
         i64,                                        // price_cents
         f64,                                        // fee_dollars
         Option<crate::engine::logger::GameInfo>,    // game_info
         Option<String>,                             // strategy
-        bool,                                       // is_new (not already processed)
     )> = {
-        let mut s = state.lock().await;
+        let s = state.lock().await;
         fills.iter().enumerate().map(|(i, fill)| {
             let price_cents = if fill.side == "yes" { fill.yes_price } else { fill.no_price };
             let fee_dollars = fill.fee_cost.unwrap_or(0.0); // Kalshi API fee_cost is in dollars
-            let mut game_info = crate::engine::logger::GameInfo::from_game_state(&s.game_state, &fill.ticker);
-            if let Some(ref mut gi) = game_info {
-                gi.edge_bps = gi.compute_edge_bps(price_cents, &fill.side, &fill.action);
-            }
+            let game_info: Option<crate::engine::logger::GameInfo> =
+                crate::engine::logger::GameInfo::from_game_state(&s.game_state, &fill.ticker);
             let strategy = s.order_manager.get_strategy(&fill.order_id).map(ToString::to_string);
-            let is_new = !s.order_manager.is_fill_processed(&fill.trade_id);
-            if is_new {
-                s.order_manager.mark_fill_processed(&fill.trade_id);
-            }
-            (i, price_cents, fee_dollars, game_info, strategy, is_new)
+            (i, price_cents, fee_dollars, game_info, strategy)
         }).collect()
     };
     // state lock released
 
-    let new_count: usize = fill_data.iter().filter(|d| d.5).count();
+    let new_count = fills.len();
 
     // Phase 2: Log to SQLite and update order statuses under logger lock only
     {
         let log = logger.lock().unwrap();
-        for (i, price_cents, fee_dollars, game_info, strategy, _is_new) in &fill_data {
+        for (i, price_cents, fee_dollars, game_info, strategy) in &fill_data {
             let fill = &fills[*i];
 
             // Backfill stub order row
@@ -104,15 +97,10 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
     // Phase 3: Apply state updates under state lock only (no logger lock)
     {
         let mut s = state.lock().await;
-        for (i, _price_cents, _fee_dollars, _game_info, _strategy, is_new) in &fill_data {
-            if !is_new {
-                continue;
-            }
+        for (i, _price_cents, _fee_dollars, _game_info, _strategy) in &fill_data {
             let fill = &fills[*i];
             s.order_manager.record_fill(&fill.order_id, fill.count);
-            // Update risk manager for fills discovered via REST that were missed by WS.
-            // The is_fill_processed dedup ensures we never double-count: if the WS handler
-            // already processed this fill, is_new will be false and we skip this block.
+            // Update risk manager for fills discovered via REST
             let price_cents = if fill.side == "yes" { fill.yes_price } else { fill.no_price };
             s.risk.record_fill(&fill.ticker, &fill.action, &fill.side, price_cents, fill.count);
         }

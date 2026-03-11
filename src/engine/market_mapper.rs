@@ -224,7 +224,7 @@ impl MarketMapper {
 
             if kalshi_match.is_some() || poly_match.is_some() {
                 let espn_home = espn_name.split(" @ ").nth(1).unwrap_or("");
-                let kalshi_markets = if let Some((_, ref _title, ref markets)) = kalshi_match {
+                let kalshi_markets = if let Some((_, _, ref markets)) = kalshi_match {
                     markets.iter().map(|(ticker, yes_sub)| {
                         let is_home = Self::yes_is_home_team(espn_home, yes_sub);
                         tracing::info!(
@@ -273,12 +273,7 @@ impl MarketMapper {
         let espn_away = espn_parts[0].trim().to_lowercase();
         let espn_home = espn_parts[1].trim().to_lowercase();
 
-        let title_clean = if !suffix.is_empty() {
-            market_title.trim_end_matches(suffix).to_string()
-        } else {
-            market_title.to_string()
-        };
-
+        let title_clean = market_title.trim_end_matches(suffix);
         let market_parts: Vec<&str> = title_clean.split(sep).collect();
         if market_parts.len() != 2 { return false; }
 
@@ -292,65 +287,12 @@ impl MarketMapper {
     }
 
     /// Normalize abbreviations in team names for matching.
-    /// Applied to both ESPN and Kalshi names before comparison, so any mismatch
-    /// in how a team is named (abbreviated vs full, accented vs ASCII) resolves cleanly.
     fn normalize_team_name(name: &str) -> String {
-        // 1. Strip common accent characters
-        let name = name
-            .replace('é', "e")
-            .replace('í', "i")
-            .replace('ó', "o")
-            .replace('á', "a")
-            .replace('ú', "u")
-            .replace('ñ', "n");
-
-        // 2. Expand dotted abbreviations
-        let name = name
-            .replace("st.", "state")
+        name.replace("st.", "state")
             .replace("miss.", "mississippi")
             .replace("n.c.", "north carolina")
-            .replace("s.c.", "south carolina");
-
-        // 3. University nickname lookup table.
-        //    Maps alternate/abbreviated forms → canonical full name.
-        //    Longer entries first to avoid partial substring collisions
-        //    (e.g. "siue" before "siu", "nc central" before "nc state").
-        const NICKNAMES: &[(&str, &str)] = &[
-            // NC variants — longer first
-            ("nc central",              "north carolina central"),
-            ("nc a&t",                  "north carolina a&t"),
-            ("nc state",                "north carolina state"),
-            // Multi-word school nicknames
-            ("southern illinois edwardsville", "southern illinois edwardsville"), // keep siue intact
-            // Single-word / acronym nicknames
-            ("siue",  "southern illinois edwardsville"),
-            ("umass", "massachusetts"),
-            ("uconn", "connecticut"),
-            ("unlv",  "nevada las vegas"),
-            ("ucf",   "central florida"),
-            ("uab",   "alabama birmingham"),
-            ("uic",   "illinois chicago"),
-            ("utep",  "texas el paso"),
-            ("utsa",  "texas san antonio"),
-            ("vcu",   "virginia commonwealth"),
-            ("uri",   "rhode island"),
-            ("siu",   "southern illinois"),
-            ("niu",   "northern illinois"),
-            ("wku",   "western kentucky"),
-            ("eku",   "eastern kentucky"),
-            ("nku",   "northern kentucky"),
-            ("byu",   "brigham young"),
-            ("tcu",   "texas christian"),
-            ("smu",   "southern methodist"),
-        ];
-
-        let mut result = name;
-        for (from, to) in NICKNAMES {
-            result = result.replace(from, to);
-        }
-
-        // 4. Collapse any doubled "state" introduced by expansions
-        result.replace(" state state", " state")
+            .replace("s.c.", "south carolina")
+            .replace(" state state", " state")
     }
 
     /// Check if a market's YES side is for the home team by comparing
@@ -381,10 +323,10 @@ impl MarketMapper {
             "saints", "vikings", "bobcats", "bison", "aggies", "demons",
         ];
         let full_words: Vec<&str> = full_norm.split_whitespace()
-            .filter(|w| !skip.contains(&w.to_lowercase().as_str()))
+            .filter(|w| !skip.contains(w))
             .collect();
         let short_words: Vec<&str> = short_norm.split_whitespace()
-            .filter(|w| !skip.contains(&w.to_lowercase().as_str()))
+            .filter(|w| !skip.contains(w))
             .collect();
 
         if full_words.is_empty() || short_words.is_empty() {
@@ -462,36 +404,6 @@ mod tests {
         assert!(MarketMapper::fuzzy_game_match(
             "UNC Tar Heels @ Duke Blue Devils",
             "Duke Blue Devils at UNC Tar Heels Winner?",
-            " at ", " Winner?"
-        ));
-    }
-
-    #[test]
-    fn san_jose_state_accent_matches() {
-        // ESPN: "San José State Spartans" (accented é), Kalshi: "San Jose St."
-        assert!(MarketMapper::fuzzy_game_match(
-            "San José State Spartans @ Boise State Broncos",
-            "San Jose St. at Boise St. Winner?",
-            " at ", " Winner?"
-        ));
-    }
-
-    #[test]
-    fn umass_matches_massachusetts() {
-        // ESPN: "Massachusetts Minutemen", Kalshi: "UMass at Miami (OH)"
-        assert!(MarketMapper::fuzzy_game_match(
-            "Massachusetts Minutemen @ Miami (OH) RedHawks",
-            "UMass at Miami (OH) Winner?",
-            " at ", " Winner?"
-        ));
-    }
-
-    #[test]
-    fn nc_state_matches_north_carolina_st() {
-        // ESPN: "NC State Wolfpack", Kalshi title: "Pittsburgh at North Carolina St."
-        assert!(MarketMapper::fuzzy_game_match(
-            "Pittsburgh Panthers @ NC State Wolfpack",
-            "Pittsburgh at North Carolina St. Winner?",
             " at ", " Winner?"
         ));
     }
