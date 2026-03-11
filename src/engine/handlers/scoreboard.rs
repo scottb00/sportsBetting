@@ -4,7 +4,6 @@ use std::sync::Arc;
 use crate::engine::bot::{SharedState, SharedOrderBooks, SharedBreakLog, SharedLogger, StrategyRegistry, BotState, fetch_and_apply_summary};
 use crate::engine::executor::{build_eval_snapshot, evaluate_strategies, execute_signal};
 use crate::engine::notifier::Notifier;
-use crate::engine::order_manager::ClvOrderInfo;
 use crate::espn::poller::{EspnPoller, GameTracker};
 use crate::kalshi::orderbook::LocalOrderBook;
 use crate::kalshi::rest::KalshiRestClient;
@@ -142,14 +141,27 @@ async fn refresh_stale_clv_orders(
     let stale: Vec<(String, String, i64)> = {
         let s = state.lock().await;
         let books = order_books.read().await;
-        s.order_manager
-            .all_clv_orders()
-            .into_iter()
-            .filter(|info| {
-                books.get(&info.ticker).is_some_and(|book| is_stale_clv_order(info, book))
-            })
-            .map(|info| (info.order_id.clone(), info.ticker.clone(), info.price_cents))
-            .collect()
+        let all = s.order_manager.all_clv_orders();
+        if all.is_empty() {
+            return;
+        }
+        let mut result = Vec::new();
+        for info in all {
+            let best_bid = match info.side.as_str() {
+                "Yes" => books.get(&info.ticker).and_then(|b| b.best_yes_bid()).map(|b| b.price),
+                "No"  => books.get(&info.ticker).and_then(|b| b.best_no_bid()).map(|b| b.price),
+                _     => None,
+            };
+            let stale = best_bid.is_some_and(|bid| bid > info.price_cents);
+            tracing::info!(
+                "CLV refresh: {} {} bid={}c best_{}_bid={:?} stale={}",
+                info.ticker, info.side, info.price_cents, info.side, best_bid, stale,
+            );
+            if stale {
+                result.push((info.order_id.clone(), info.ticker.clone(), info.price_cents));
+            }
+        }
+        result
     };
 
     if stale.is_empty() {
@@ -176,15 +188,6 @@ async fn refresh_stale_clv_orders(
                 tracing::warn!("CLV stale: failed to cancel {} on {}: {:?}", order_id, ticker, e);
             }
         }
-    }
-}
-
-/// Return true if a CLV order's bid has been outbid by the market (no longer top of book).
-fn is_stale_clv_order(info: &ClvOrderInfo, book: &LocalOrderBook) -> bool {
-    match info.side.as_str() {
-        "Yes" => book.best_yes_bid().is_some_and(|bid| bid.price > info.price_cents),
-        "No" => book.best_no_bid().is_some_and(|bid| bid.price > info.price_cents),
-        _ => false,
     }
 }
 

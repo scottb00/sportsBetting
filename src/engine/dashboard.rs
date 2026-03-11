@@ -20,6 +20,8 @@ struct DashboardState {
     logger: SharedLogger,
     db_path: String,
     dry_run: bool,
+    /// ISO-8601 timestamp when this process started (= last deploy time).
+    started_at: String,
 }
 
 // --- JSON response types ---
@@ -77,6 +79,8 @@ struct RiskView {
     dry_run: bool,
     open_orders: usize,
     in_flight: usize,
+    /// ISO-8601 timestamp when this process started (= last deploy time).
+    started_at: String,
 }
 
 #[derive(Serialize)]
@@ -258,6 +262,7 @@ async fn api_risk(State(state): State<DashboardState>) -> impl IntoResponse {
         dry_run: state.dry_run,
         open_orders: s.order_manager.open_order_count(),
         in_flight: s.order_manager.in_flight_count(),
+        started_at: state.started_at.clone(),
     })
 }
 
@@ -456,6 +461,7 @@ pub async fn serve(
         logger,
         db_path: db_path.to_string(),
         dry_run,
+        started_at: chrono::Utc::now().to_rfc3339(),
     };
 
     let app = Router::new()

@@ -325,6 +325,14 @@ function fmtEvalBadge(result, edgeAfterFees, aloPrice) {
 }
 function pnlClass(v) { return v > 0 ? 'positive' : v < 0 ? 'negative' : 'neutral'; }
 function fmt$(v) { return (v >= 0 ? '+' : '') + '$' + v.toFixed(2); }
+function fmtAge(iso) {
+  if (!iso) return '-';
+  const secs = Math.floor((Date.now() - new Date(iso)) / 1000);
+  if (secs < 60) return `${secs}s ago`;
+  if (secs < 3600) return `${Math.floor(secs/60)}m ago`;
+  const h = Math.floor(secs/3600), m = Math.floor((secs%3600)/60);
+  return `${h}h ${m}m ago`;
+}
 function fmtPct(v) { return v != null ? (v * 100).toFixed(1) + '%' : '-'; }
 function fmtEdge(v, side) {
   if (v == null) return '-';
@@ -425,6 +433,10 @@ async function refresh() {
       <div class="risk-item">
         <span class="risk-label">Status</span>
         <span class="risk-value ${risk.halted ? 'halted' : risk.dry_run ? 'neutral' : 'positive'}">${risk.halted ? 'HALTED' : risk.dry_run ? 'DRY RUN' : 'LIVE'}</span>
+      </div>
+      <div class="risk-item">
+        <span class="risk-label">Deployed</span>
+        <span class="risk-value neutral" title="${risk.started_at}">${fmtAge(risk.started_at)}</span>
       </div>
     `;
   }
