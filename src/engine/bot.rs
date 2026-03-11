@@ -94,13 +94,7 @@ pub fn create_bot_state(config: &Config) -> Result<(BotState, TradeLogger, Marke
 
     let state = BotState {
         game_state: GameStateManager::new(),
-        risk: RiskManager::new(
-            config.risk.max_position_per_game,
-            config.risk.max_total_exposure,
-            config.risk.daily_loss_limit,
-            config.risk.kelly_fraction,
-            config.risk.min_edge_threshold,
-        ),
+        risk: RiskManager::new(),
         order_manager: OrderManager::new(),
         started_at: Utc::now(),
     };

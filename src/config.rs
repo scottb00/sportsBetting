@@ -6,7 +6,6 @@ pub struct Config {
     pub kalshi: KalshiConfig,
     #[serde(default)]
     pub anthropic: Option<AnthropicConfig>,
-    pub risk: RiskConfig,
     pub strategy: StrategyConfig,
     pub polling: PollingConfig,
     pub logging: LoggingConfig,
@@ -28,15 +27,6 @@ pub struct KalshiConfig {
 #[derive(Debug, Deserialize)]
 pub struct AnthropicConfig {
     pub api_key: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RiskConfig {
-    pub max_position_per_game: f64,
-    pub max_total_exposure: f64,
-    pub daily_loss_limit: f64,
-    pub kelly_fraction: f64,
-    pub min_edge_threshold: f64,
 }
 
 fn default_maintenance_interval_secs() -> u64 { 30 }

@@ -59,11 +59,6 @@ struct MarketView {
 #[derive(Serialize)]
 struct RiskView {
     daily_pnl: f64,
-    current_total_exposure: f64,
-    max_total_exposure: f64,
-    max_position_per_game: f64,
-    daily_loss_limit: f64,
-    halted: bool,
     dry_run: bool,
     open_orders: usize,
     in_flight: usize,
@@ -264,11 +259,6 @@ async fn api_risk(State(state): State<DashboardState>) -> impl IntoResponse {
     let s = state.bot.lock().await;
     Json(RiskView {
         daily_pnl: s.risk.daily_pnl,
-        current_total_exposure: s.risk.current_total_exposure,
-        max_total_exposure: s.risk.max_total_exposure,
-        max_position_per_game: s.risk.max_position_per_game,
-        daily_loss_limit: s.risk.daily_loss_limit,
-        halted: s.risk.is_halted(),
         dry_run: state.dry_run,
         open_orders: s.order_manager.open_order_count(),
         in_flight: s.order_manager.in_flight_count(),

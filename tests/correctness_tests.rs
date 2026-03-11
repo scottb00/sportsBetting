@@ -57,7 +57,7 @@ fn make_game_with_book(
 }
 
 fn test_risk() -> RiskManager {
-    RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01)
+    RiskManager::new()
 }
 
 // ============================================================
@@ -92,29 +92,6 @@ proptest! {
     }
 
     /// Kelly size is NEVER negative.
-    #[test]
-    fn prop_kelly_never_negative(
-        fair_prob in 0.01f64..0.99,
-        price_cents in 1.0f64..99.0,
-        exposure in 0.0f64..40.0,
-    ) {
-        let risk = test_risk();
-        let size = risk.kelly_size(fair_prob, price_cents, exposure);
-        prop_assert!(size >= 0.0, "Kelly returned negative: {} for fair={}, price={}", size, fair_prob, price_cents);
-    }
-
-    /// Kelly size never exceeds per-game cap.
-    #[test]
-    fn prop_kelly_within_game_cap(
-        fair_prob in 0.51f64..0.99,
-        price_cents in 1.0f64..50.0,
-    ) {
-        let risk = test_risk();
-        let size = risk.kelly_size(fair_prob, price_cents, 0.0);
-        prop_assert!(size <= risk.max_position_per_game + 0.01,
-            "Kelly {} > game cap {}", size, risk.max_position_per_game);
-    }
-
     /// Maker fee is ALWAYS non-negative.
     #[test]
     fn prop_maker_fee_non_negative(
@@ -649,26 +626,3 @@ fn mapper_title_yes_is_away() {
         "Duke Blue Devils at North Carolina Tar Heels Winner?", "Duke"));
 }
 
-// ============================================================
-// 9. Risk: Halted State Blocks Everything
-// ============================================================
-
-#[test]
-fn halted_risk_produces_no_signals() {
-    let mut risk = test_risk();
-    risk.record_fill("T1", "buy", "yes", 80, 500);
-    risk.record_fill("T1", "sell", "yes", 40, 500);
-    assert!(risk.is_halted());
-
-    let size = risk.kelly_size(0.90, 20.0, 0.0);
-    assert!(!risk.can_trade(size));
-}
-
-#[test]
-fn exposure_cap_prevents_oversize() {
-    let mut risk_loaded = RiskManager::new(50.0, 100.0, 200.0, 0.5, 0.01);
-    risk_loaded.record_fill("T1", "buy", "yes", 90, 100);
-
-    let size = risk_loaded.kelly_size(0.80, 30.0, 0.0);
-    assert!(size <= 10.01, "Size {} should be capped to ~$10 remaining exposure", size);
-}

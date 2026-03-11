@@ -132,10 +132,6 @@ pub fn evaluate_strategies(
 ) -> Vec<OrderSignal> {
     let mut signals = Vec::new();
 
-    if snapshot.risk.is_halted() {
-        return signals;
-    }
-
     for game in snapshot.games.values() {
         let avail = match game_contracts_remaining(game, snapshot, order_books, registry) {
             Some(a) => a,
@@ -332,16 +328,6 @@ pub async fn execute_signal(
         // Get game markets for reduce detection and cap computation.
         let game_markets = s.game_state.game_markets_for(&signal.kalshi_ticker);
         let is_reduce = s.risk.is_reduce_order(&game_markets, &signal.kalshi_ticker, &signal.side);
-
-        // Reduce orders bypass exposure/risk checks — they decrease risk, not increase it.
-        if !is_reduce && !s.risk.can_trade(signal.size_dollars) {
-            tracing::warn!(
-                "Risk check failed for {} signal on {}",
-                signal.strategy,
-                signal.kalshi_ticker
-            );
-            return None;
-        }
 
         // Re-check resting order (a fill may have been partially processed).
         // For reduce orders, only block if the same ticker has a resting order (same-side conflict).

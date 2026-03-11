@@ -46,13 +46,7 @@ fn make_order(id: &str, ticker: &str, remaining: i64) -> Order {
 }
 
 fn test_risk() -> RiskManager {
-    RiskManager::new(
-        50.0,  // max_position_per_game
-        200.0, // max_total_exposure
-        100.0, // daily_loss_limit
-        0.5,   // kelly_fraction
-        0.01,  // min_edge_threshold
-    )
+    RiskManager::new()
 }
 
 fn make_registry(max_contracts_per_game: i64) -> StrategyRegistry {
@@ -109,113 +103,6 @@ fn make_bot_state_with_games(
         order_manager: OrderManager::new(),
     };
     (state, books)
-}
-
-// ============================================================
-// 1. Daily Loss Limit Halts All Trading
-// ============================================================
-
-#[test]
-fn halted_risk_produces_zero_signals() {
-    let mut risk = test_risk();
-    // Force a loss beyond the daily limit
-    risk.record_fill("LOSS", "buy", "yes", 90, 200);
-    risk.record_fill("LOSS", "sell", "yes", 40, 200);
-    assert!(risk.is_halted(), "Should be halted after large loss");
-
-    let (state, books) = make_bot_state_with_games(5, risk);
-    let registry = make_registry(20);
-
-    let snapshot = build_eval_snapshot(&state);
-    let mut break_log = VecDeque::new();
-    let signals = evaluate_strategies(&snapshot, &books, &mut break_log, &registry);
-
-    assert!(signals.is_empty(), "Halted risk should produce zero signals, got {}", signals.len());
-}
-
-#[test]
-fn daily_loss_limit_halts_after_losses() {
-    let mut risk = test_risk(); // daily_loss_limit = 100.0
-    assert!(!risk.is_halted());
-
-    // Lose $50 (not enough to halt)
-    risk.record_fill("T1", "buy", "yes", 80, 100);
-    risk.record_fill("T1", "sell", "yes", 30, 100);
-    // PnL = (0.30 - 0.80) * 100 = -$50
-    assert!(!risk.is_halted(), "Should not be halted yet at -$50");
-    assert!(risk.can_trade(10.0), "Should still be able to trade");
-
-    // Lose another $60 to push past -$100
-    risk.record_fill("T2", "buy", "yes", 70, 100);
-    risk.record_fill("T2", "sell", "yes", 10, 100);
-    // PnL = -50 + (0.10 - 0.70) * 100 = -50 + -60 = -$110
-    assert!(risk.is_halted(), "Should be halted at -$110");
-    assert!(!risk.can_trade(0.01), "Cannot trade even tiny amount when halted");
-
-    // Reset should re-enable
-    risk.reset_daily();
-    assert!(!risk.is_halted());
-    assert!(risk.can_trade(10.0));
-}
-
-// ============================================================
-// 2. Total Exposure Cap
-// ============================================================
-
-#[test]
-fn total_exposure_cap_blocks_new_trades() {
-    let mut risk = test_risk(); // max_total_exposure = 200.0
-
-    // Fill up to $195 exposure
-    risk.record_fill("T1", "buy", "yes", 50, 390); // 390 * 0.50 = $195
-    assert!(risk.can_trade(5.0), "Should allow trade within remaining $5");
-    assert!(!risk.can_trade(6.0), "Should block trade exceeding $200 cap");
-}
-
-#[test]
-fn kelly_size_respects_total_exposure_remaining() {
-    let mut risk = test_risk(); // max_total_exposure = 200.0
-
-    // Use up $190 of exposure
-    risk.record_fill("T1", "buy", "yes", 50, 380); // 380 * 0.50 = $190
-
-    // Kelly should return at most ~$10 (remaining exposure)
-    let size = risk.kelly_size(0.90, 20.0, 0.0);
-    assert!(
-        size <= 10.01,
-        "Kelly returned ${:.2} but only $10 exposure remaining", size
-    );
-}
-
-#[test]
-fn kelly_size_respects_per_game_cap() {
-    let risk = test_risk(); // max_position_per_game = 50.0
-
-    // No existing game exposure, but Kelly wants huge size due to high edge
-    let size = risk.kelly_size(0.95, 10.0, 0.0);
-    assert!(
-        size <= 50.01,
-        "Kelly returned ${:.2} but per-game cap is $50", size
-    );
-}
-
-#[test]
-fn kelly_size_accounts_for_existing_game_exposure() {
-    let risk = test_risk(); // max_position_per_game = 50.0
-
-    // Already have $40 exposure in this game
-    let size = risk.kelly_size(0.90, 20.0, 40.0);
-    assert!(
-        size <= 10.01,
-        "Kelly returned ${:.2} but only $10 per-game remaining", size
-    );
-}
-
-#[test]
-fn kelly_returns_zero_when_game_exposure_at_cap() {
-    let risk = test_risk();
-    let size = risk.kelly_size(0.90, 20.0, 50.0); // already at game cap
-    assert_eq!(size, 0.0, "Kelly should return 0 when game exposure at cap");
 }
 
 // ============================================================
@@ -395,47 +282,6 @@ fn contract_cap_is_per_game_not_global() {
 }
 
 // ============================================================
-// 6. Exposure Tracking Accuracy Through Fill Sequences
-// ============================================================
-
-#[test]
-fn exposure_tracks_buys_and_sells_correctly() {
-    let mut risk = test_risk();
-
-    // Buy 10 at 60c
-    risk.record_fill("T1", "buy", "yes", 60, 10);
-    assert!((risk.current_total_exposure - 6.0).abs() < 0.01, "Exposure should be $6");
-
-    // Buy 20 more at 40c
-    risk.record_fill("T1", "buy", "yes", 40, 20);
-    // Exposure: 6 + (20 * 0.40) = 6 + 8 = $14
-    assert!((risk.current_total_exposure - 14.0).abs() < 0.01, "Exposure should be $14");
-
-    // Sell 10 at 50c — reduces exposure by entry cost (avg_price * contracts)
-    // avg entry = (10*0.60 + 20*0.40)/30 = (6 + 8)/30 = 14/30 ≈ 0.4667
-    // sell cost reduction = 0.4667 * 10 ≈ 4.667
-    risk.record_fill("T1", "sell", "yes", 50, 10);
-    let expected = 14.0 - (14.0 / 30.0 * 10.0);
-    assert!(
-        (risk.current_total_exposure - expected).abs() < 0.01,
-        "Exposure should be ~${:.2}, got ${:.2}", expected, risk.current_total_exposure
-    );
-}
-
-#[test]
-fn exposure_never_goes_negative() {
-    let mut risk = test_risk();
-
-    risk.record_fill("T1", "buy", "yes", 30, 5);
-    // Sell more than we bought (shouldn't happen in practice, but mustn't go negative)
-    risk.record_fill("T1", "sell", "yes", 50, 5);
-    assert!(
-        risk.current_total_exposure >= 0.0,
-        "Exposure must never go negative, got {}", risk.current_total_exposure
-    );
-}
-
-// ============================================================
 // 7. Signal-to-Order Contract Count Respects Cap
 // ============================================================
 
@@ -478,131 +324,23 @@ fn signal_to_order_uses_natural_count_when_below_cap() {
 }
 
 // ============================================================
-// 8. Multiple Evaluation Rounds: Risk State Updates Between Ticks
-// ============================================================
-
-#[test]
-fn sequential_evaluations_with_executor_recheck() {
-    // Simulates the executor's behavior: evaluate_strategies produces signals from a snapshot,
-    // but execute_signal re-checks can_trade() under the lock before each fill.
-    // This is the real guard against exceeding the exposure cap.
-    let risk = test_risk(); // max_total_exposure = 200.0
-    let (mut state, books) = make_bot_state_with_games(10, risk);
-    let registry = make_registry(50);
-
-    for round in 0..5 {
-        let snapshot = build_eval_snapshot(&state);
-        let mut break_log = VecDeque::new();
-        let signals = evaluate_strategies(&snapshot, &books, &mut break_log, &registry);
-
-        for signal in &signals {
-            let contracts = (signal.size_dollars / (signal.price_cents as f64 / 100.0)).floor() as i64;
-            let contracts = contracts.max(1).min(signal.max_contracts.unwrap_or(50));
-            let additional_exposure = contracts as f64 * signal.price_cents as f64 / 100.0;
-
-            // Simulate executor's can_trade re-check (this is the real guard)
-            if !state.risk.can_trade(additional_exposure) {
-                continue; // executor would skip this signal
-            }
-
-            state.risk.record_fill(
-                &signal.kalshi_ticker,
-                "buy",
-                if matches!(signal.side, OrderSide::Yes) { "yes" } else { "no" },
-                signal.price_cents,
-                contracts,
-            );
-
-            let order = Order {
-                order_id: format!("order-{}-{}", round, signal.kalshi_ticker),
-                ticker: signal.kalshi_ticker.clone(),
-                action: OrderAction::Buy,
-                side: signal.side.clone(),
-                order_type: "limit".to_string(),
-                status: "resting".to_string(),
-                yes_price: if matches!(signal.side, OrderSide::Yes) { Some(signal.price_cents) } else { None },
-                no_price: if matches!(signal.side, OrderSide::No) { Some(signal.price_cents) } else { None },
-                remaining_count: contracts,
-                created_time: "2026-03-10T12:00:00Z".to_string(),
-            };
-            state.order_manager.record_placed_order(order.clone(), contracts, &signal.strategy);
-            state.order_manager.record_fill(&order.order_id, contracts);
-        }
-
-        // After each round (with executor re-check), exposure must be within cap
-        assert!(
-            state.risk.current_total_exposure <= 200.01,
-            "Round {}: exposure ${:.2} exceeded $200 cap",
-            round, state.risk.current_total_exposure
-        );
-    }
-}
-
-// ============================================================
-// 9. Kelly Size Properties Under Various Risk States
-// ============================================================
-
-#[test]
-fn kelly_zero_edge_no_trade() {
-    let risk = test_risk();
-    // Fair value exactly equals price → no edge
-    assert_eq!(risk.kelly_size(0.50, 50.0, 0.0), 0.0);
-}
-
-#[test]
-fn kelly_negative_edge_no_trade() {
-    let risk = test_risk();
-    // Fair value 40% but price 50c → negative edge
-    assert_eq!(risk.kelly_size(0.40, 50.0, 0.0), 0.0);
-}
-
-#[test]
-fn kelly_extreme_probabilities_safe() {
-    let risk = test_risk();
-    // Edge cases that could cause division by zero
-    assert_eq!(risk.kelly_size(0.0, 50.0, 0.0), 0.0);
-    assert_eq!(risk.kelly_size(1.0, 50.0, 0.0), 0.0);
-    assert_eq!(risk.kelly_size(0.5, 0.0, 0.0), 0.0);
-    assert_eq!(risk.kelly_size(0.5, 100.0, 0.0), 0.0);
-}
-
-#[test]
-fn kelly_respects_both_caps_simultaneously() {
-    // Make per-game cap lower than total exposure remaining
-    let risk = RiskManager::new(10.0, 200.0, 100.0, 0.5, 0.01);
-    let size = risk.kelly_size(0.90, 20.0, 0.0);
-    assert!(size <= 10.01, "Should be capped by per-game limit, got {}", size);
-
-    // Make total exposure remaining lower than per-game cap
-    let mut risk2 = RiskManager::new(50.0, 200.0, 100.0, 0.5, 0.01);
-    risk2.record_fill("X", "buy", "yes", 50, 380); // $190 exposure
-    let size2 = risk2.kelly_size(0.90, 20.0, 0.0);
-    assert!(size2 <= 10.01, "Should be capped by total exposure remaining, got {}", size2);
-}
-
-// ============================================================
 // 10. Seed and Reseed Position Consistency
 // ============================================================
 
 #[test]
-fn seed_positions_adds_exposure() {
+fn seed_positions_tracks_net_position() {
     let mut risk = test_risk();
     risk.seed_positions("T1", "yes", 60, 10);
-    assert!((risk.current_total_exposure - 6.0).abs() < 0.01);
     assert_eq!(risk.net_position("T1"), 10);
 }
 
 #[test]
 fn reseed_replaces_old_position() {
     let mut risk = test_risk();
-    risk.seed_positions("T1", "yes", 60, 10); // $6 exposure
-    risk.seed_positions("T1", "no", 40, 5);   // +$2 exposure = $8 total
+    risk.seed_positions("T1", "yes", 60, 10);
+    risk.seed_positions("T1", "no", 40, 5);
 
-    // Reseed should clear both sides and set new
     risk.reseed_position("T1", "yes", 50, 8);
-    // Old: 10*0.60 + 5*0.40 = 8.0. New: 8*0.50 = 4.0
-    assert!((risk.current_total_exposure - 4.0).abs() < 0.01,
-        "After reseed, exposure should be $4, got ${:.2}", risk.current_total_exposure);
     assert_eq!(risk.net_position("T1"), 8);
 }
 
@@ -680,31 +418,6 @@ fn extreme_price_games_produce_no_signals() {
         signals.is_empty(),
         "Extreme-priced market (mid=98c) should be filtered out"
     );
-}
-
-// ============================================================
-// 13. can_trade Combines All Constraints
-// ============================================================
-
-#[test]
-fn can_trade_checks_halt_and_exposure() {
-    let mut risk = test_risk();
-
-    // Normal state: can trade
-    assert!(risk.can_trade(50.0));
-
-    // Near exposure cap
-    risk.record_fill("T1", "buy", "yes", 50, 300); // $150 exposure
-    assert!(risk.can_trade(50.0), "Should allow: 150 + 50 = 200 = cap");
-    assert!(!risk.can_trade(50.01), "Should block: 150 + 50.01 > 200");
-
-    // Halted: nothing works
-    risk.record_fill("T2", "buy", "yes", 90, 200);
-    risk.record_fill("T2", "sell", "yes", 10, 200);
-    // Big loss triggers halt
-    if risk.is_halted() {
-        assert!(!risk.can_trade(0.01));
-    }
 }
 
 // ============================================================
@@ -1072,62 +785,6 @@ fn regular_signal_still_blocked_when_no_position_to_reduce() {
     );
 }
 
-#[test]
-fn stress_many_games_never_exceed_exposure() {
-    let risk = RiskManager::new(50.0, 500.0, 300.0, 0.5, 0.01);
-    let (mut state, books) = make_bot_state_with_games(20, risk);
-    let registry = make_registry(30);
-
-    // Run 10 rounds of evaluation + simulated fills
-    for round in 0..10 {
-        let snapshot = build_eval_snapshot(&state);
-        let mut break_log = VecDeque::new();
-        let signals = evaluate_strategies(&snapshot, &books, &mut break_log, &registry);
-
-        for signal in &signals {
-            // Check that can_trade would allow this
-            assert!(
-                state.risk.can_trade(signal.size_dollars) || state.risk.is_halted(),
-                "Signal produced when can_trade should be false: size=${:.2}, exposure=${:.2}, halted={}",
-                signal.size_dollars, state.risk.current_total_exposure, state.risk.is_halted()
-            );
-
-            let contracts = (signal.size_dollars / (signal.price_cents as f64 / 100.0))
-                .floor() as i64;
-            let contracts = contracts.max(1).min(signal.max_contracts.unwrap_or(30));
-
-            state.risk.record_fill(
-                &signal.kalshi_ticker,
-                "buy",
-                if matches!(signal.side, OrderSide::Yes) { "yes" } else { "no" },
-                signal.price_cents,
-                contracts,
-            );
-
-            // Mark as resting then filled so next round can fire
-            let order = Order {
-                order_id: format!("stress-{}-{}", round, signal.kalshi_ticker),
-                ticker: signal.kalshi_ticker.clone(),
-                action: OrderAction::Buy,
-                side: signal.side.clone(),
-                order_type: "limit".to_string(),
-                status: "resting".to_string(),
-                yes_price: Some(signal.price_cents),
-                no_price: None,
-                remaining_count: contracts,
-                created_time: "2026-03-10T12:00:00Z".to_string(),
-            };
-            state.order_manager.record_placed_order(order.clone(), contracts, &signal.strategy);
-            state.order_manager.record_fill(&order.order_id, contracts);
-        }
-
-        assert!(
-            state.risk.current_total_exposure <= 500.01,
-            "Round {}: exposure ${:.2} exceeded $500 cap",
-            round, state.risk.current_total_exposure
-        );
-    }
-}
 
 // ============================================================
 // 20. CLV Staleness Detection Tests
