@@ -8,6 +8,10 @@ pub struct GameInfo {
     pub home_team: String,
     pub away_team: String,
     pub is_home: bool,
+    /// Edge in basis points at the time of order creation (positive = favorable)
+    pub edge_bps: Option<f64>,
+    /// ESPN fair value (probability, 0-1) for this ticker's YES side
+    pub espn_fair: Option<f64>,
 }
 
 impl GameInfo {
@@ -18,11 +22,14 @@ impl GameInfo {
     ) -> Option<Self> {
         let game = game_state.get_by_kalshi_ticker(ticker)?;
         let market = game.kalshi_markets.iter().find(|m| m.ticker == ticker)?;
+        let fair_value = game.fair_value_for_market(market);
         Some(GameInfo {
             game_name: format!("{} vs {}", game.away_team, game.home_team),
             home_team: game.home_team.clone(),
             away_team: game.away_team.clone(),
             is_home: market.is_home,
+            edge_bps: None,  // Caller computes if needed
+            espn_fair: fair_value,
         })
     }
 }
@@ -91,6 +98,7 @@ impl TradeLogger {
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN away_team TEXT");
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN is_home INTEGER");
         let _ = conn.execute_batch("ALTER TABLE fills ADD COLUMN settlement_cents INTEGER");
+        let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN espn_fair REAL");
 
         // One-time backfill: set empty strategies to "clv_hunter" (only strategy that has placed orders)
         let _ = conn.execute(
@@ -116,14 +124,15 @@ impl TradeLogger {
         game_info: Option<&GameInfo>,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps, game_name, home_team, away_team, is_home)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT OR REPLACE INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps, game_name, home_team, away_team, is_home, espn_fair)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             rusqlite::params![
                 order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps,
                 game_info.map(|g| g.game_name.as_str()),
                 game_info.map(|g| g.home_team.as_str()),
                 game_info.map(|g| g.away_team.as_str()),
                 game_info.map(|g| g.is_home as i32),
+                game_info.and_then(|g| g.espn_fair),
             ],
         )?;
         Ok(())
@@ -194,8 +203,8 @@ impl TradeLogger {
         game_info: Option<&GameInfo>,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, created_at, game_name, home_team, away_team, is_home)
-             VALUES (?1, ?2, '', ?3, ?4, ?5, ?6, ?7, COALESCE(?8, datetime('now')), ?9, ?10, ?11, ?12)
+            "INSERT INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, created_at, game_name, home_team, away_team, is_home, edge_bps, espn_fair)
+             VALUES (?1, ?2, '', ?3, ?4, ?5, ?6, ?7, COALESCE(?8, datetime('now')), ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(order_id) DO UPDATE SET
                price_cents = excluded.price_cents,
                count = excluded.count,
@@ -203,7 +212,9 @@ impl TradeLogger {
                game_name = COALESCE(excluded.game_name, game_name),
                home_team = COALESCE(excluded.home_team, home_team),
                away_team = COALESCE(excluded.away_team, away_team),
-               is_home = COALESCE(excluded.is_home, is_home)
+               is_home = COALESCE(excluded.is_home, is_home),
+               edge_bps = COALESCE(excluded.edge_bps, edge_bps),
+               espn_fair = COALESCE(excluded.espn_fair, espn_fair)
              WHERE strategy = ''",
             rusqlite::params![
                 order_id, ticker, action, side, price_cents, count, status, created_at,
@@ -211,6 +222,8 @@ impl TradeLogger {
                 game_info.map(|g| g.home_team.as_str()),
                 game_info.map(|g| g.away_team.as_str()),
                 game_info.map(|g| g.is_home as i32),
+                game_info.and_then(|g| g.edge_bps),
+                game_info.and_then(|g| g.espn_fair),
             ],
         )?;
         Ok(())
@@ -253,9 +266,10 @@ impl TradeLogger {
         let mut count = 0;
         for (ticker, info) in game_info_by_ticker {
             let rows = self.conn.execute(
-                "UPDATE orders SET game_name = ?1, home_team = ?2, away_team = ?3, is_home = ?4
-                 WHERE ticker = ?5 AND (game_name IS NULL OR game_name = '')",
-                rusqlite::params![info.game_name, info.home_team, info.away_team, info.is_home as i32, ticker],
+                "UPDATE orders SET game_name = ?1, home_team = ?2, away_team = ?3, is_home = ?4,
+                 espn_fair = COALESCE(?5, espn_fair)
+                 WHERE ticker = ?6 AND (game_name IS NULL OR game_name = '')",
+                rusqlite::params![info.game_name, info.home_team, info.away_team, info.is_home as i32, info.espn_fair, ticker],
             )?;
             count += rows;
         }

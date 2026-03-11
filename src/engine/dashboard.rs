@@ -371,11 +371,15 @@ fn query_orders(db_path: &str) -> anyhow::Result<Vec<OrderRow>> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     let mut stmt = conn.prepare(
-        "SELECT order_id, ticker, COALESCE(strategy,''), action, side, price_cents, count, status, created_at, game_name, home_team, away_team, is_home
+        "SELECT order_id, ticker, COALESCE(strategy,''), action, side, price_cents, count, status, created_at, game_name, home_team, away_team, is_home, edge_bps, espn_fair
          FROM orders ORDER BY created_at DESC LIMIT 50"
     )?;
     let rows = stmt.query_map([], |row| {
         let is_home_int: Option<i32> = row.get(12)?;
+        let edge_bps: Option<f64> = row.get(13)?;
+        let espn_fair: Option<f64> = row.get(14)?;
+        // Convert stored edge_bps to edge probability for display
+        let edge = edge_bps.map(|bps| bps / 10000.0);
         Ok(OrderRow {
             order_id: row.get(0)?,
             ticker: row.get(1)?,
@@ -390,8 +394,8 @@ fn query_orders(db_path: &str) -> anyhow::Result<Vec<OrderRow>> {
             count: row.get(6)?,
             status: row.get(7)?,
             created_at: row.get(8)?,
-            edge: None,
-            espn_fair: None,
+            edge,
+            espn_fair,
         })
     })?.filter_map(Result::ok).collect();
     Ok(rows)
@@ -403,7 +407,7 @@ fn query_fills(db_path: &str) -> anyhow::Result<Vec<FillRow>> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     let mut stmt = conn.prepare(
-        "SELECT f.trade_id, f.order_id, f.ticker, f.side, f.action, f.price_cents, f.count, COALESCE(f.fee_cents,0), f.filled_at, COALESCE(o.strategy,''), o.edge_bps, o.game_name, o.home_team, o.away_team, o.is_home, f.settlement_cents
+        "SELECT f.trade_id, f.order_id, f.ticker, f.side, f.action, f.price_cents, f.count, COALESCE(f.fee_cents,0), f.filled_at, COALESCE(o.strategy,''), o.edge_bps, o.game_name, o.home_team, o.away_team, o.is_home, f.settlement_cents, o.espn_fair
          FROM fills f LEFT JOIN orders o ON f.order_id = o.order_id
          ORDER BY f.filled_at DESC LIMIT 200"
     )?;
@@ -427,7 +431,7 @@ fn query_fills(db_path: &str) -> anyhow::Result<Vec<FillRow>> {
             filled_at: row.get(8)?,
             edge_bps: row.get(10)?,
             mark_cents: settlement.map(|s| s as f64), // settlement from DB; live mid overrides in handler
-            espn_fair: None,
+            espn_fair: row.get(16)?,
         })
     })?.filter_map(Result::ok).collect();
     Ok(rows)

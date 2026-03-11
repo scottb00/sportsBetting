@@ -45,7 +45,18 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
         fills.iter().enumerate().map(|(i, fill)| {
             let price_cents = if fill.side == "yes" { fill.yes_price } else { fill.no_price };
             let fee_dollars = fill.fee_cost.unwrap_or(0.0); // Kalshi API fee_cost is in dollars
-            let game_info = crate::engine::logger::GameInfo::from_game_state(&s.game_state, &fill.ticker);
+            let mut game_info = crate::engine::logger::GameInfo::from_game_state(&s.game_state, &fill.ticker);
+            // Compute edge from live fair value
+            if let Some(ref mut gi) = game_info {
+                if let Some(fv) = gi.espn_fair {
+                    let order_prob = price_cents as f64 / 100.0;
+                    let is_yes = fill.side.eq_ignore_ascii_case("yes");
+                    let fair_for_side = if is_yes { fv } else { 1.0 - fv };
+                    let is_buy = fill.action.eq_ignore_ascii_case("buy");
+                    let raw_edge = fair_for_side - order_prob;
+                    gi.edge_bps = Some((if is_buy { raw_edge } else { -raw_edge }) * 10000.0);
+                }
+            }
             let strategy = s.order_manager.get_strategy(&fill.order_id).map(ToString::to_string);
             let is_new = !s.order_manager.is_fill_processed(&fill.trade_id);
             if is_new {

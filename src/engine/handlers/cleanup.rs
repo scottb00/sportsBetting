@@ -33,6 +33,8 @@ pub async fn cleanup_finished_games(state: &SharedState, order_books: &SharedOrd
                     home_team: g.home_team.clone(),
                     away_team: g.away_team.clone(),
                     is_home: m.is_home,
+                    edge_bps: None,
+                    espn_fair: g.fair_value_for_market(m),
                 })
             })
         })
