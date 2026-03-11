@@ -86,6 +86,34 @@ async fn main() -> Result<()> {
     // Fetch initial ESPN win probs
     fetch_summaries_for_games(&espn_poller, &state).await;
 
+    // Backfill game info for historical orders missing game_name
+    {
+        use sports_betting::engine::logger::GameInfo;
+        let game_info_map: std::collections::HashMap<String, GameInfo> = {
+            let s = state.lock().await;
+            s.game_state.games.values()
+                .flat_map(|g| {
+                    g.kalshi_markets.iter().map(move |m| {
+                        (m.ticker.clone(), GameInfo {
+                            game_name: format!("{} vs {}", g.away_team, g.home_team),
+                            home_team: g.home_team.clone(),
+                            away_team: g.away_team.clone(),
+                            is_home: m.is_home,
+                        })
+                    })
+                })
+                .collect()
+        };
+        if !game_info_map.is_empty() {
+            let log = logger.lock().unwrap();
+            match log.backfill_game_info(&game_info_map) {
+                Ok(n) if n > 0 => tracing::info!("Backfilled game info for {} order rows", n),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("Failed to backfill game info: {:?}", e),
+            }
+        }
+    }
+
     // --- Load existing positions and sync resting orders from Kalshi on startup ---
     {
         // Fetch positions outside the lock first
@@ -98,8 +126,8 @@ async fn main() -> Result<()> {
         };
         let mut s = state.lock().await;
         for pos in &positions {
-            if pos.total_traded > 0 {
-                s.order_manager.record_startup_position(&pos.ticker, pos.total_traded);
+            if pos.position != 0 {
+                s.order_manager.record_startup_position(&pos.ticker, pos.position.abs());
                 tracing::info!(
                     "Position: {} | traded={} position={} exposure={} pnl={}",
                     pos.ticker, pos.total_traded, pos.position,
@@ -121,6 +149,23 @@ async fn main() -> Result<()> {
         tracing::info!("Loaded positions from Kalshi, seeded risk manager");
     }
     handlers::sync_orders(&state, &logger, &kalshi_rest).await;
+    // Add resting order remaining counts to committed_contracts + recover strategies from DB
+    {
+        let mut s = state.lock().await;
+        s.order_manager.seed_committed_from_resting();
+        // Recover strategies for resting orders from DB
+        let order_ids: Vec<String> = s.order_manager.resting_order_ids();
+        if !order_ids.is_empty() {
+            let strategies = {
+                let log = logger.lock().unwrap();
+                log.get_order_strategies(&order_ids)
+            };
+            if !strategies.is_empty() {
+                tracing::info!("Recovered {} strategies from DB for resting orders", strategies.len());
+                s.order_manager.import_strategies(strategies);
+            }
+        }
+    }
     // Backfill fills from Kalshi REST (catches any missed WS fill events)
     handlers::sync_fills(&state, &logger, &kalshi_rest).await;
 

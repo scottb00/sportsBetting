@@ -100,6 +100,12 @@ impl TradeLogger {
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN away_team TEXT");
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN is_home INTEGER");
 
+        // One-time backfill: set empty strategies to "clv_hunter" (only strategy that has placed orders)
+        let _ = conn.execute(
+            "UPDATE orders SET strategy = 'clv_hunter' WHERE strategy IS NULL OR strategy = ''",
+            [],
+        );
+
         Ok(Self { conn })
     }
 
@@ -148,8 +154,10 @@ impl TradeLogger {
         filled_at: Option<&str>,
     ) -> Result<bool> {
         let rows = self.conn.execute(
-            "INSERT OR IGNORE INTO fills (trade_id, order_id, ticker, side, action, price_cents, count, fee_cents, filled_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, datetime('now')))",
+            "INSERT INTO fills (trade_id, order_id, ticker, side, action, price_cents, count, fee_cents, filled_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, datetime('now')))
+             ON CONFLICT(trade_id) DO UPDATE SET
+               fee_cents = CASE WHEN excluded.fee_cents > 0 THEN excluded.fee_cents ELSE fee_cents END",
             rusqlite::params![trade_id, order_id, ticker, side, action, price_cents, count, fee_cents, filled_at],
         )?;
         Ok(rows > 0)
@@ -237,6 +245,43 @@ impl TradeLogger {
             rusqlite::params![strategy, order_id],
         )?;
         Ok(())
+    }
+
+    /// Get strategy for a single order from the DB (fallback when in-memory state is lost).
+    pub fn get_order_strategy(&self, order_id: &str) -> Result<Option<String>> {
+        let result: Option<String> = self.conn.query_row(
+            "SELECT strategy FROM orders WHERE order_id = ?1",
+            rusqlite::params![order_id],
+            |row| row.get(0),
+        ).ok();
+        // Return None for empty strings (stub orders without strategy)
+        Ok(result.filter(|s| !s.is_empty()))
+    }
+
+    /// Batch-read strategies for multiple orders from the DB (for startup recovery).
+    pub fn get_order_strategies(&self, order_ids: &[String]) -> std::collections::HashMap<String, String> {
+        let mut result = std::collections::HashMap::new();
+        for order_id in order_ids {
+            if let Ok(Some(strategy)) = self.get_order_strategy(order_id) {
+                result.insert(order_id.clone(), strategy);
+            }
+        }
+        result
+    }
+
+    /// Backfill game_name/home_team/away_team/is_home for orders that have a ticker but missing game data.
+    /// Called at startup with live game state so historical orders get enriched.
+    pub fn backfill_game_info(&self, game_info_by_ticker: &std::collections::HashMap<String, GameInfo>) -> Result<usize> {
+        let mut count = 0;
+        for (ticker, info) in game_info_by_ticker {
+            let rows = self.conn.execute(
+                "UPDATE orders SET game_name = ?1, home_team = ?2, away_team = ?3, is_home = ?4
+                 WHERE ticker = ?5 AND (game_name IS NULL OR game_name = '')",
+                rusqlite::params![info.game_name, info.home_team, info.away_team, info.is_home as i32, ticker],
+            )?;
+            count += rows;
+        }
+        Ok(count)
     }
 
     /// Update order status (e.g. to "filled" or "partial_fill").

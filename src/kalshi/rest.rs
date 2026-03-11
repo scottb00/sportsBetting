@@ -124,6 +124,14 @@ impl KalshiRestClient {
         self.get(&path).await
     }
 
+    // --- Order Book ---
+
+    /// Fetch the current orderbook for a market ticker.
+    pub async fn get_orderbook(&self, ticker: &str) -> Result<OrderBookSnapshot> {
+        let resp: GetOrderbookResponse = self.get(&format!("/markets/{}/orderbook", ticker)).await?;
+        Ok(resp.orderbook)
+    }
+
     // --- Market Data ---
 
     pub async fn get_events(

@@ -108,7 +108,7 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
         let mut s = state.lock().await;
         for &i in &new_fill_indices {
             let fill = &fills[i];
-            let ctx = &fill_contexts[i];
+            let _ctx = &fill_contexts[i];
 
             // In-memory dedup: skip if WS handler already processed this fill
             if s.order_manager.is_fill_processed(&fill.trade_id) {
@@ -117,10 +117,9 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
             s.order_manager.mark_fill_processed(&fill.trade_id);
 
             s.order_manager.record_fill(&fill.order_id, fill.count);
-            s.risk.record_fill(
-                &fill.ticker, &fill.action, &fill.side,
-                ctx.price_cents, fill.count,
-            );
+            // NOTE: Do NOT call s.risk.record_fill() here. Risk state (exposure, positions)
+            // is already seeded correctly from Kalshi positions API at startup via seed_positions().
+            // Calling record_fill here would double-count historical fills on top of the seed.
         }
 
         // Update high-water mark

@@ -242,9 +242,14 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
 }
 
 async fn api_risk(State(state): State<DashboardState>) -> impl IntoResponse {
+    // Read daily PnL from DB (persisted, includes fees) — acquire logger lock first, then release
+    let daily_pnl = {
+        let log = state.logger.lock().unwrap();
+        log.daily_realized_pnl().unwrap_or(0.0)
+    };
     let s = state.bot.lock().await;
     Json(RiskView {
-        daily_pnl: s.risk.daily_pnl,
+        daily_pnl,
         current_total_exposure: s.risk.current_total_exposure,
         max_total_exposure: s.risk.max_total_exposure,
         max_position_per_game: s.risk.max_position_per_game,

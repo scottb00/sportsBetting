@@ -500,7 +500,7 @@ async function refresh() {
           <td><span class="phase phase-${g.phase}">${g.status_detail || g.phase}</span></td>
           <td class="num">${fmtPct(g.espn_home_win_prob)}</td>
           <td class="num">${g._bid != null || g._ask != null ? (g._bid != null ? g._bid.toFixed(0) : '-') + ' / ' + (g._ask != null ? g._ask.toFixed(0) : '-') : '-'}</td>
-          <td class="num">${fmtEdge(g._edge)}${(g.phase === 'Break' || g.phase === 'Halftime' || g.phase === 'Live') && g._evalResult ? '<br>' + fmtEvalBadge(g._evalResult, g._evalEdgeAfterFees, g._evalAloPrice) : ''}</td>
+          <td class="num">${fmtEdgeWithDollars(g._edge, 1)}${(g.phase === 'Break' || g.phase === 'Halftime' || g.phase === 'Live') && g._evalResult ? '<br>' + fmtEvalBadge(g._evalResult, g._evalEdgeAfterFees, g._evalAloPrice) : ''}</td>
           <td class="num">${g._vol > 0 ? g._vol.toLocaleString() : '-'}</td>
           <td>${g._posLabels.length > 0 ? g._posLabels.map(p => `<span class="pos-badge ${p.cls}">${p.qty} ${p.side} ${p.contractTeam}</span>`).join(' ') : '-'}</td>
           <td>${g._hasOrder ? '<span class="order-dot"></span>' : ''}</td>

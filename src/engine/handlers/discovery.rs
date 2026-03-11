@@ -107,11 +107,28 @@ pub async fn discover_new_markets(
 
     // Subscribe to new tickers on the live WS connection
     if let Some(handle) = ws_handle {
-        let count = handle.subscribe_additional(new_tickers);
+        let count = handle.subscribe_additional(new_tickers.clone());
         if count > 0 {
             tracing::info!("Discovery: subscribed to {} new tickers on WS", count);
         }
     } else {
         tracing::warn!("Discovery: no WS handle — new markets won't receive book updates");
+    }
+
+    // Seed orderbooks from REST for new tickers (guarantees book data even if WS snapshot is delayed)
+    for ticker in &new_tickers {
+        match kalshi_rest.get_orderbook(ticker).await {
+            Ok(snapshot) => {
+                let mut s = state.lock().await;
+                let book = s.order_books
+                    .entry(ticker.clone())
+                    .or_insert_with(|| crate::kalshi::orderbook::LocalOrderBook::new(ticker.clone()));
+                book.apply_snapshot(&snapshot);
+                tracing::info!("Discovery: seeded orderbook for {} from REST", ticker);
+            }
+            Err(e) => {
+                tracing::warn!("Discovery: failed to fetch orderbook for {}: {:?}", ticker, e);
+            }
+        }
     }
 }

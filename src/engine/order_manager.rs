@@ -85,9 +85,20 @@ impl OrderManager {
         }
     }
 
-    /// Seed committed_contracts for a single ticker (call on startup from pre-fetched data).
-    pub fn record_startup_position(&mut self, ticker: &str, total_traded: i64) {
-        self.committed_contracts.insert(ticker.to_string(), total_traded);
+    /// Seed committed_contracts for a single ticker from current position size (call on startup).
+    /// Uses abs(position) — the number of contracts currently held — not lifetime total_traded.
+    pub fn record_startup_position(&mut self, ticker: &str, current_position_abs: i64) {
+        if current_position_abs > 0 {
+            self.committed_contracts.insert(ticker.to_string(), current_position_abs);
+        }
+    }
+
+    /// Add resting order remaining counts to committed_contracts (call after sync_orders).
+    /// This accounts for outstanding resting orders alongside already-filled position.
+    pub fn seed_committed_from_resting(&mut self) {
+        for order in self.resting_orders.values() {
+            *self.committed_contracts.entry(order.ticker.clone()).or_insert(0) += order.remaining_count;
+        }
     }
 
     /// Apply pre-fetched orders from Kalshi into the local cache.
@@ -261,6 +272,18 @@ impl OrderManager {
     /// Get the strategy that placed an order (if known from this session).
     pub fn get_strategy(&self, order_id: &str) -> Option<&str> {
         self.order_strategies.get(order_id).map(|s| s.as_str())
+    }
+
+    /// Import strategies from DB into the in-memory map (for startup recovery).
+    pub fn import_strategies(&mut self, strategies: std::collections::HashMap<String, String>) {
+        for (order_id, strategy) in strategies {
+            self.order_strategies.entry(order_id).or_insert(strategy);
+        }
+    }
+
+    /// Get all resting order IDs (for startup strategy recovery).
+    pub fn resting_order_ids(&self) -> Vec<String> {
+        self.resting_orders.keys().cloned().collect()
     }
 
     pub fn open_order_count(&self) -> usize {

@@ -136,9 +136,10 @@ impl RiskManager {
                 entry.avg_price = total_cost / entry.contracts as f64;
             }
         } else {
-            // Sell: decrease exposure, realize PnL
-            self.current_total_exposure = (self.current_total_exposure - notional).max(0.0);
+            // Sell: decrease exposure by entry cost (not sell price), realize PnL
             if let Some(entry) = self.positions.get_mut(&key) {
+                let entry_cost = entry.avg_price * contracts as f64;
+                self.current_total_exposure = (self.current_total_exposure - entry_cost).max(0.0);
                 let avg_entry_cents = entry.avg_price * 100.0;
                 let realized_pnl = (price - entry.avg_price) * contracts as f64;
                 self.daily_pnl += realized_pnl;
@@ -150,6 +151,9 @@ impl RiskManager {
                     "Realized PnL on {} {}: ${:.4} ({} contracts @ {}c vs avg entry {:.2}c)",
                     ticker, side, realized_pnl, contracts, price_cents, avg_entry_cents,
                 );
+            } else {
+                // No position entry — best effort: subtract sell notional
+                self.current_total_exposure = (self.current_total_exposure - notional).max(0.0);
             }
         }
 

@@ -189,6 +189,7 @@ impl KalshiWsClient {
                             channels: vec![
                                 "orderbook_delta".to_string(),
                                 "trade".to_string(),
+                                "fill".to_string(),
                             ],
                             market_tickers: Some(new_tickers.clone()),
                         },

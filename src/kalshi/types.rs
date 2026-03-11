@@ -16,6 +16,13 @@ pub struct PriceLevel {
     pub quantity: i64,
 }
 
+/// REST API response for GET /markets/{ticker}/orderbook.
+/// The response wraps the book in an `orderbook` field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetOrderbookResponse {
+    pub orderbook: OrderBookSnapshot,
+}
+
 // --- Orders ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
