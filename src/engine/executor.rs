@@ -269,6 +269,12 @@ pub struct PlacedOrder {
     pub price_cents: i64,
     pub size_dollars: f64,
     pub edge_after_fees: f64,
+    /// Human-readable game label, e.g. "Duke at UNC"
+    pub game_label: String,
+    /// Score at time of order, e.g. "42-38 (Away-Home)"
+    pub score: String,
+    /// Game clock/status, e.g. "Halftime" or "2nd Half, 8:23"
+    pub clock: String,
 }
 
 /// Execute an order signal via Kalshi REST API (or log if dry_run).
@@ -389,10 +395,20 @@ pub async fn execute_signal(
             let action_str = format!("{:?}", order_req.action);
             let side_str = format!("{:?}", order_req.side);
 
-            // Collect game_info under state lock, then drop before logging
-            let game_info = {
+            // Collect game_info and display fields under state lock, then drop before logging
+            let (game_info, game_label, score, clock) = {
                 let s = state.lock().await;
-                crate::engine::logger::GameInfo::from_game_state(&s.game_state, &signal.kalshi_ticker)
+                let gi = crate::engine::logger::GameInfo::from_game_state(&s.game_state, &signal.kalshi_ticker);
+                let (label, sc, cl) = if let Some(game) = s.game_state.get_by_kalshi_ticker(&signal.kalshi_ticker) {
+                    (
+                        format!("{} at {}", game.away_team, game.home_team),
+                        format!("{}-{}", game.away_score.unwrap_or(0), game.home_score.unwrap_or(0)),
+                        game.status_detail.clone(),
+                    )
+                } else {
+                    (signal.kalshi_ticker.clone(), String::new(), String::new())
+                };
+                (gi, label, sc, cl)
             };
 
             // Log under logger lock only (no state lock held)
@@ -440,6 +456,9 @@ pub async fn execute_signal(
                 price_cents,
                 size_dollars: signal.size_dollars,
                 edge_after_fees: signal.edge_after_fees,
+                game_label,
+                score,
+                clock,
             })
         }
         Err(e) => {

@@ -28,6 +28,7 @@ pub struct GameState {
     pub espn_event_id: String,
     /// All Kalshi markets for this game (typically 2: one per team)
     pub kalshi_markets: Vec<KalshiMarketState>,
+    // TODO: reserved for future Polymarket strategy integration
     pub polymarket_token_id: Option<String>,
     pub polymarket_is_home: bool, // true if polymarket YES token is for the home team
 

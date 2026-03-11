@@ -261,6 +261,14 @@ impl OrderManager {
         self.resting_orders.keys().cloned().collect()
     }
 
+    /// Return all resting CLV orders (for top-of-book staleness checks).
+    pub fn all_clv_orders(&self) -> Vec<&ClvOrderInfo> {
+        self.clv_orders
+            .values()
+            .filter(|info| self.resting_orders.contains_key(&info.order_id))
+            .collect()
+    }
+
     pub fn open_order_count(&self) -> usize {
         self.resting_orders.len()
     }

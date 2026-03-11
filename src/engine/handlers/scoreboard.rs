@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::engine::bot::{SharedState, SharedOrderBooks, SharedBreakLog, SharedLogger, StrategyRegistry, BotState, fetch_and_apply_summary};
 use crate::engine::executor::{build_eval_snapshot, evaluate_strategies, execute_signal};
 use crate::engine::notifier::Notifier;
+use crate::engine::order_manager::ClvOrderInfo;
 use crate::espn::poller::{EspnPoller, GameTracker};
 use crate::kalshi::orderbook::LocalOrderBook;
 use crate::kalshi::rest::KalshiRestClient;
@@ -85,6 +86,10 @@ pub async fn handle_scoreboard_tick(
         fetch_and_apply_summary(espn_poller, state, event_id, "Break ").await;
     }
 
+    // Cancel CLV orders that are no longer at the top of book (market moved away).
+    // Runs before snapshot so the re-evaluation below can re-place at the new price.
+    refresh_stale_clv_orders(state, order_books, kalshi_rest, dry_run).await;
+
     // Re-acquire lock for mutable pre-work, then snapshot and release before evaluation.
     // This minimizes lock hold time: WS fill processing isn't blocked during strategy evaluation.
     let snapshot = {
@@ -119,6 +124,67 @@ pub async fn handle_scoreboard_tick(
             .filter(|o| o.strategy == "break_ev")
             .collect();
         n.notify_orders_batch(&break_ev_orders).await;
+    }
+}
+
+/// Cancel CLV orders that are no longer at the top of the order book.
+///
+/// When the market moves up (someone outbids our resting order), we're no longer
+/// the best bid and unlikely to fill. Cancel the stale order so the strategy can
+/// re-evaluate and re-place at the current top of book if edge still exists.
+async fn refresh_stale_clv_orders(
+    state: &SharedState,
+    order_books: &SharedOrderBooks,
+    kalshi_rest: &Arc<KalshiRestClient>,
+    dry_run: bool,
+) {
+    // Collect stale CLV orders under locks (no async work inside)
+    let stale: Vec<(String, String, i64)> = {
+        let s = state.lock().await;
+        let books = order_books.read().await;
+        s.order_manager
+            .all_clv_orders()
+            .into_iter()
+            .filter(|info| {
+                books.get(&info.ticker).is_some_and(|book| is_stale_clv_order(info, book))
+            })
+            .map(|info| (info.order_id.clone(), info.ticker.clone(), info.price_cents))
+            .collect()
+    };
+
+    if stale.is_empty() {
+        return;
+    }
+
+    for (order_id, ticker, price_cents) in &stale {
+        tracing::info!(
+            "CLV stale: {} on {} (our bid={}c outbid by market) — cancelling",
+            order_id, ticker, price_cents,
+        );
+
+        if dry_run {
+            continue;
+        }
+
+        match kalshi_rest.cancel_order(order_id).await {
+            Ok(()) => {
+                let mut s = state.lock().await;
+                s.order_manager.remove_order(order_id);
+                tracing::info!("CLV stale: cancelled {} on {}, will re-evaluate", order_id, ticker);
+            }
+            Err(e) => {
+                tracing::warn!("CLV stale: failed to cancel {} on {}: {:?}", order_id, ticker, e);
+            }
+        }
+    }
+}
+
+/// Return true if a CLV order's bid has been outbid by the market (no longer top of book).
+fn is_stale_clv_order(info: &ClvOrderInfo, book: &LocalOrderBook) -> bool {
+    match info.side.as_str() {
+        "Yes" => book.best_yes_bid().is_some_and(|bid| bid.price > info.price_cents),
+        "No" => book.best_no_bid().is_some_and(|bid| bid.price > info.price_cents),
+        _ => false,
     }
 }
 

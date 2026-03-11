@@ -5,7 +5,7 @@ use crate::engine::bot::{SharedState, SharedOrderBooks, SharedMapper, populate_g
 use crate::engine::market_prep::{
     build_espn_for_matching, build_kalshi_for_matching,
     build_kalshi_volume, filter_events_for_dates, fetch_all_kalshi_cbb_events,
-    today_and_tomorrow_tags,
+    active_date_tags,
 };
 use crate::espn::poller::EspnPoller;
 use crate::kalshi::rest::KalshiRestClient;
@@ -23,7 +23,7 @@ pub async fn discover_new_markets(
     ws_handle: Option<&KalshiWsHandle>,
     unmapped_tickers: &mut HashSet<String>,
 ) {
-    let (today, _, date_tags) = today_and_tomorrow_tags();
+    let (today, _, date_tags) = active_date_tags();
     let mut kalshi_events = fetch_all_kalshi_cbb_events(kalshi_rest).await;
     filter_events_for_dates(&mut kalshi_events, &date_tags);
 

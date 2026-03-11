@@ -51,9 +51,9 @@ pub fn kalshi_date_tag(date_str: &str) -> String {
     dt.format("%y%b%d").to_string().to_uppercase()
 }
 
-/// Get today's date and tomorrow's date as Kalshi date tags, plus today's YYYY-MM-DD string.
-/// Also includes yesterday's tag so late-running games (e.g. overtime, west coast) stay mapped.
-pub fn today_and_tomorrow_tags() -> (String, String, Vec<String>) {
+/// Get Kalshi date tags for yesterday, today, and tomorrow, plus date strings.
+/// Yesterday is included so late-running games (e.g. overtime, west coast) stay mapped.
+pub fn active_date_tags() -> (String, String, Vec<String>) {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let tomorrow = (chrono::Local::now() + chrono::Duration::days(1))
         .format("%Y-%m-%d")

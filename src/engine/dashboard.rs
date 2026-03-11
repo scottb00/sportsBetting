@@ -283,11 +283,13 @@ async fn api_orders(State(state): State<DashboardState>) -> impl IntoResponse {
                 if let Some(fv) = game.fair_value_for_market(market)
                 {
                     row.espn_fair = Some(fv);
-                    let order_prob = row.price_cents as f64 / 100.0;
-                    let is_yes = row.side.eq_ignore_ascii_case("yes");
-                    let fair_for_side = if is_yes { fv } else { 1.0 - fv };
-                    let raw_edge = fair_for_side - order_prob;
-                    row.edge = Some(if row.action.eq_ignore_ascii_case("buy") { raw_edge } else { -raw_edge });
+                    let gi = crate::engine::logger::GameInfo {
+                        game_name: String::new(), home_team: String::new(),
+                        away_team: String::new(), is_home: market.is_home,
+                        edge_bps: None, espn_fair: Some(fv),
+                    };
+                    row.edge = gi.compute_edge_bps(row.price_cents, &row.side, &row.action)
+                        .map(|bps| bps / 10000.0);
                 }
             }
         }
@@ -328,13 +330,12 @@ async fn api_fills(State(state): State<DashboardState>) -> impl IntoResponse {
                 if row.edge_bps.is_none()
                     && let Some(fv) = game.fair_value_for_market(market)
                 {
-                    let order_prob = row.price_cents as f64 / 100.0;
-                    let is_yes = row.side.eq_ignore_ascii_case("yes");
-                    let fair_for_side = if is_yes { fv } else { 1.0 - fv };
-                    let is_buy = row.action.eq_ignore_ascii_case("buy");
-                    let raw_edge = fair_for_side - order_prob;
-                    let signed_edge = if is_buy { raw_edge } else { -raw_edge };
-                    row.edge_bps = Some(signed_edge * 10000.0);
+                    let gi = crate::engine::logger::GameInfo {
+                        game_name: String::new(), home_team: String::new(),
+                        away_team: String::new(), is_home: market.is_home,
+                        edge_bps: None, espn_fair: Some(fv),
+                    };
+                    row.edge_bps = gi.compute_edge_bps(row.price_cents, &row.side, &row.action);
                 }
             }
         }

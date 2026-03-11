@@ -15,7 +15,7 @@ use sports_betting::engine::handlers;
 use sports_betting::engine::market_mapper::MarketMapper;
 use sports_betting::engine::market_prep::{
     self, build_espn_for_matching, build_kalshi_for_matching,
-    build_kalshi_volume, filter_events_for_dates, today_and_tomorrow_tags,
+    build_kalshi_volume, filter_events_for_dates, active_date_tags,
 };
 use sports_betting::engine::notifier::Notifier;
 use sports_betting::espn::poller::{EspnPoller, GameTracker};
@@ -364,7 +364,7 @@ async fn fetch_initial_markets(
     });
     tracing::info!("Found {} Polymarket events", poly_events.len());
 
-    let (_, tomorrow, date_tags) = today_and_tomorrow_tags();
+    let (_, tomorrow, date_tags) = active_date_tags();
     let mut kalshi_events = market_prep::fetch_all_kalshi_cbb_events(kalshi_rest).await;
     let before = kalshi_events.events.len();
     filter_events_for_dates(&mut kalshi_events, &date_tags);

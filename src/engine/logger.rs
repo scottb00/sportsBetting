@@ -15,6 +15,18 @@ pub struct GameInfo {
 }
 
 impl GameInfo {
+    /// Compute signed edge in basis points from this game's fair value.
+    /// Returns positive for favorable edge (buying below fair / selling above fair).
+    pub fn compute_edge_bps(&self, price_cents: i64, side: &str, action: &str) -> Option<f64> {
+        let fv = self.espn_fair?;
+        let order_prob = price_cents as f64 / 100.0;
+        let is_yes = side.eq_ignore_ascii_case("yes");
+        let fair_for_side = if is_yes { fv } else { 1.0 - fv };
+        let is_buy = action.eq_ignore_ascii_case("buy");
+        let raw_edge = fair_for_side - order_prob;
+        Some((if is_buy { raw_edge } else { -raw_edge }) * 10000.0)
+    }
+
     /// Look up game info from the live game state for a given Kalshi ticker.
     pub fn from_game_state(
         game_state: &crate::engine::game_state::GameStateManager,

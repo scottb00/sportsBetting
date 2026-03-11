@@ -60,11 +60,22 @@ impl Notifier {
         if orders.len() == 1 {
             let o = &orders[0];
             let title = format!("Order: {} {}", o.action, o.ticker);
-            let body = format!(
+            let mut body = String::new();
+            if !o.game_label.is_empty() {
+                body.push_str(&format!("{}", o.game_label));
+                if !o.score.is_empty() {
+                    body.push_str(&format!(" | {}", o.score));
+                }
+                if !o.clock.is_empty() {
+                    body.push_str(&format!(" | {}", o.clock));
+                }
+                body.push('\n');
+            }
+            body.push_str(&format!(
                 "{} {} {} contracts @ {}c\nSize: ${:.2}\nEdge: {:.1}%\nStrategy: {}",
                 o.action, o.side, o.count, o.price_cents,
                 o.size_dollars, o.edge_after_fees * 100.0, o.strategy,
-            );
+            ));
             self.send(&title, &body).await;
             return;
         }
@@ -73,11 +84,23 @@ impl Notifier {
         let title = format!("{} Orders Placed", orders.len());
         let mut lines = Vec::new();
         for o in orders {
-            lines.push(format!(
-                "{} {} {} {}ct @ {}c ${:.2} (edge {:.1}%)",
-                o.action, o.side, o.ticker, o.count, o.price_cents,
+            let mut line = String::new();
+            if !o.game_label.is_empty() {
+                line.push_str(&format!("[{}]", o.game_label));
+                if !o.score.is_empty() {
+                    line.push_str(&format!(" {}", o.score));
+                }
+                if !o.clock.is_empty() {
+                    line.push_str(&format!(" {}", o.clock));
+                }
+                line.push_str(" - ");
+            }
+            line.push_str(&format!(
+                "{} {} {}ct @ {}c ${:.2} (edge {:.1}%)",
+                o.action, o.side, o.count, o.price_cents,
                 o.size_dollars, o.edge_after_fees * 100.0,
             ));
+            lines.push(line);
         }
         lines.push(format!("Total: ${:.2}", total_size));
 

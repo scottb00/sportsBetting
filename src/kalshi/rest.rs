@@ -34,10 +34,9 @@ impl KalshiRestClient {
     /// Retries up to 3 times with exponential backoff on HTTP 429 (Too Many Requests).
     async fn request(&self, method: &str, path: &str, builder: reqwest::RequestBuilder) -> Result<reqwest::Response> {
         let api_path = Self::api_path(path);
-        let headers = self.auth.sign_request(method, &api_path)?;
 
-        let request = headers
-            .apply(builder)
+        // Build the request without auth headers so we can re-sign on each attempt
+        let base_request = builder
             .build()
             .with_context(|| format!("Failed to build {} {} request", method, path))?;
 
@@ -46,9 +45,16 @@ impl KalshiRestClient {
         let mut last_status = reqwest::StatusCode::OK;
 
         for attempt in 0..=max_retries {
-            let req = request
+            let mut req = base_request
                 .try_clone()
                 .with_context(|| format!("Failed to clone {} {} request", method, path))?;
+
+            // Re-sign on each attempt so the timestamp stays fresh after backoff
+            let headers = self.auth.sign_request(method, &api_path)?;
+            let h = req.headers_mut();
+            h.insert("KALSHI-ACCESS-KEY", headers.key_id.parse().unwrap());
+            h.insert("KALSHI-ACCESS-TIMESTAMP", headers.timestamp.parse().unwrap());
+            h.insert("KALSHI-ACCESS-SIGNATURE", headers.signature.parse().unwrap());
 
             let resp = self
                 .client

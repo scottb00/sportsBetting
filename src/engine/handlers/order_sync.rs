@@ -25,16 +25,10 @@ pub async fn sync_orders(state: &SharedState, logger: &SharedLogger, kalshi_rest
                 crate::kalshi::types::OrderSide::No => order.no_price.unwrap_or(0),
             };
             let mut game_info = crate::engine::logger::GameInfo::from_game_state(&s.game_state, &order.ticker);
-            // Compute edge from live fair value
             if let Some(ref mut gi) = game_info {
-                if let Some(fv) = gi.espn_fair {
-                    let is_yes = matches!(order.side, crate::kalshi::types::OrderSide::Yes);
-                    let order_prob = price_cents as f64 / 100.0;
-                    let fair_for_side = if is_yes { fv } else { 1.0 - fv };
-                    let is_buy = matches!(order.action, crate::kalshi::types::OrderAction::Buy);
-                    let raw_edge = fair_for_side - order_prob;
-                    gi.edge_bps = Some((if is_buy { raw_edge } else { -raw_edge }) * 10000.0);
-                }
+                let side_str = format!("{:?}", order.side);
+                let action_str = format!("{:?}", order.action);
+                gi.edge_bps = gi.compute_edge_bps(price_cents, &side_str, &action_str);
             }
             let strategy = s.order_manager.get_strategy(&order.order_id).map(|s| s.to_string());
             (price_cents, game_info, strategy)

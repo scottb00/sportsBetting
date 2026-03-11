@@ -46,16 +46,8 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
             let price_cents = if fill.side == "yes" { fill.yes_price } else { fill.no_price };
             let fee_dollars = fill.fee_cost.unwrap_or(0.0); // Kalshi API fee_cost is in dollars
             let mut game_info = crate::engine::logger::GameInfo::from_game_state(&s.game_state, &fill.ticker);
-            // Compute edge from live fair value
             if let Some(ref mut gi) = game_info {
-                if let Some(fv) = gi.espn_fair {
-                    let order_prob = price_cents as f64 / 100.0;
-                    let is_yes = fill.side.eq_ignore_ascii_case("yes");
-                    let fair_for_side = if is_yes { fv } else { 1.0 - fv };
-                    let is_buy = fill.action.eq_ignore_ascii_case("buy");
-                    let raw_edge = fair_for_side - order_prob;
-                    gi.edge_bps = Some((if is_buy { raw_edge } else { -raw_edge }) * 10000.0);
-                }
+                gi.edge_bps = gi.compute_edge_bps(price_cents, &fill.side, &fill.action);
             }
             let strategy = s.order_manager.get_strategy(&fill.order_id).map(ToString::to_string);
             let is_new = !s.order_manager.is_fill_processed(&fill.trade_id);
@@ -118,9 +110,11 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
             }
             let fill = &fills[*i];
             s.order_manager.record_fill(&fill.order_id, fill.count);
-            // NOTE: Do NOT call s.risk.record_fill() here. Risk state (exposure, positions)
-            // is already seeded correctly from Kalshi positions API at startup via seed_positions().
-            // Calling record_fill here would double-count historical fills on top of the seed.
+            // Update risk manager for fills discovered via REST that were missed by WS.
+            // The is_fill_processed dedup ensures we never double-count: if the WS handler
+            // already processed this fill, is_new will be false and we skip this block.
+            let price_cents = if fill.side == "yes" { fill.yes_price } else { fill.no_price };
+            s.risk.record_fill(&fill.ticker, &fill.action, &fill.side, price_cents, fill.count);
         }
 
         // Update high-water mark

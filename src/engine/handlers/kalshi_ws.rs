@@ -68,16 +68,8 @@ pub async fn handle_kalshi_event(
             let fee_dollars = RiskManager::maker_fee(count, price_cents) / 100.0;
             let strategy = s.order_manager.get_strategy(&order_id).map(ToString::to_string).unwrap_or_default();
             let mut game_info = GameInfo::from_game_state(&s.game_state, &ticker);
-            // Compute edge from live fair value
             if let Some(ref mut gi) = game_info {
-                if let Some(fv) = gi.espn_fair {
-                    let order_prob = price_cents as f64 / 100.0;
-                    let is_yes = side.eq_ignore_ascii_case("yes");
-                    let fair_for_side = if is_yes { fv } else { 1.0 - fv };
-                    let is_buy = action.eq_ignore_ascii_case("buy");
-                    let raw_edge = fair_for_side - order_prob;
-                    gi.edge_bps = Some((if is_buy { raw_edge } else { -raw_edge }) * 10000.0);
-                }
+                gi.edge_bps = gi.compute_edge_bps(price_cents, &side, &action);
             }
             drop(s);
             // Log under logger lock (separate from state lock)
