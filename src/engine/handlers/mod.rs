@@ -33,7 +33,7 @@ pub async fn handle_maintenance_tick(
     mapper: &SharedMapper,
     ws_handle: Option<&KalshiWsHandle>,
 ) {
-    cleanup_finished_games(state, order_books).await;
+    cleanup_finished_games(state, order_books, logger).await;
     discover_new_markets(kalshi_rest, espn_poller, state, order_books, mapper, ws_handle).await;
     sync_orders(state, logger, kalshi_rest).await;
     sync_fills(state, logger, kalshi_rest).await;

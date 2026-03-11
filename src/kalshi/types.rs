@@ -141,6 +141,9 @@ pub struct Market {
     pub yes_sub_title: Option<String>,
     #[serde(default)]
     pub no_sub_title: Option<String>,
+    /// Settlement result: "yes" or "no" for settled markets, absent for active.
+    #[serde(default)]
+    pub result: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

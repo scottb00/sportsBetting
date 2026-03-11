@@ -153,6 +153,13 @@ impl KalshiRestClient {
         self.get(&format!("/events{}", query)).await
     }
 
+    /// Fetch a single market by ticker (includes settlement result for settled markets).
+    pub async fn get_market(&self, ticker: &str) -> Result<Market> {
+        let resp: serde_json::Value = self.get(&format!("/markets/{}", ticker)).await?;
+        let market = resp.get("market").cloned().unwrap_or(resp);
+        serde_json::from_value(market).context("Failed to parse market response")
+    }
+
     pub async fn search_markets(&self, query: &str) -> Result<Vec<Market>> {
         let resp: serde_json::Value =
             self.get(&format!("/markets?search={}", urlencoding::encode(query)))

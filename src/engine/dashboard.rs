@@ -97,6 +97,8 @@ struct OrderRow {
     created_at: String,
     /// Perceived edge: fair_value - order_price (positive = buying below fair value)
     edge: Option<f64>,
+    /// ESPN fair value (probability, 0-1) for this ticker's YES side at query time
+    espn_fair: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -113,9 +115,15 @@ struct FillRow {
     action: String,
     price_cents: i64,
     count: i64,
-    fee_cents: f64,
+    /// Fee in dollars (Kalshi API returns fee_cost in dollars, e.g. 0.09 = 9 cents).
+    /// DB column is still named `fee_cents` (legacy misnomer).
+    fee_dollars: f64,
     filled_at: String,
     edge_bps: Option<f64>,
+    /// Current mark price in cents: live mid from order book, or settlement (100/0) from DB
+    mark_cents: Option<f64>,
+    /// ESPN fair value (probability, 0-1) for this ticker's YES side at query time
+    espn_fair: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -274,6 +282,7 @@ async fn api_orders(State(state): State<DashboardState>) -> impl IntoResponse {
                 row.is_home = Some(market.is_home);
                 if let Some(fv) = game.fair_value_for_market(market)
                 {
+                    row.espn_fair = Some(fv);
                     let order_prob = row.price_cents as f64 / 100.0;
                     let is_yes = row.side.eq_ignore_ascii_case("yes");
                     let fair_for_side = if is_yes { fv } else { 1.0 - fv };
@@ -297,13 +306,24 @@ async fn api_fills(State(state): State<DashboardState>) -> impl IntoResponse {
     };
     // Enrich with live game state (overrides DB values with fresher data, computes edge fallback)
     let s = state.bot.lock().await;
+    let books = state.order_books.read().await;
     for row in &mut rows {
+        // Live mid from order book (for active markets)
+        let prices = book_prices(&books, &row.ticker);
+        if let Some(mid) = prices.mid {
+            row.mark_cents = Some(mid);
+        }
+        // mark_cents from DB settlement remains if no live mid (already loaded from query)
+
         if let Some(game) = s.game_state.get_by_kalshi_ticker(&row.ticker) {
             row.game_name = Some(format!("{} vs {}", game.away_team, game.home_team));
             row.home_team = Some(game.home_team.clone());
             row.away_team = Some(game.away_team.clone());
             if let Some(market) = game.kalshi_markets.iter().find(|m| m.ticker == row.ticker) {
                 row.is_home = Some(market.is_home);
+                if let Some(fv) = game.fair_value_for_market(market) {
+                    row.espn_fair = Some(fv);
+                }
                 // Compute edge from live state if not stored in DB (e.g. synced/historical orders)
                 if row.edge_bps.is_none()
                     && let Some(fv) = game.fair_value_for_market(market)
@@ -371,6 +391,7 @@ fn query_orders(db_path: &str) -> anyhow::Result<Vec<OrderRow>> {
             status: row.get(7)?,
             created_at: row.get(8)?,
             edge: None,
+            espn_fair: None,
         })
     })?.filter_map(Result::ok).collect();
     Ok(rows)
@@ -382,12 +403,13 @@ fn query_fills(db_path: &str) -> anyhow::Result<Vec<FillRow>> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     let mut stmt = conn.prepare(
-        "SELECT f.trade_id, f.order_id, f.ticker, f.side, f.action, f.price_cents, f.count, COALESCE(f.fee_cents,0), f.filled_at, COALESCE(o.strategy,''), o.edge_bps, o.game_name, o.home_team, o.away_team, o.is_home
+        "SELECT f.trade_id, f.order_id, f.ticker, f.side, f.action, f.price_cents, f.count, COALESCE(f.fee_cents,0), f.filled_at, COALESCE(o.strategy,''), o.edge_bps, o.game_name, o.home_team, o.away_team, o.is_home, f.settlement_cents
          FROM fills f LEFT JOIN orders o ON f.order_id = o.order_id
          ORDER BY f.filled_at DESC LIMIT 200"
     )?;
     let rows = stmt.query_map([], |row| {
         let is_home_int: Option<i32> = row.get(14)?;
+        let settlement: Option<i64> = row.get(15)?;
         Ok(FillRow {
             trade_id: row.get(0)?,
             order_id: row.get(1)?,
@@ -401,9 +423,11 @@ fn query_fills(db_path: &str) -> anyhow::Result<Vec<FillRow>> {
             action: row.get(4)?,
             price_cents: row.get(5)?,
             count: row.get(6)?,
-            fee_cents: row.get(7)?,
+            fee_dollars: row.get(7)?,
             filled_at: row.get(8)?,
             edge_bps: row.get(10)?,
+            mark_cents: settlement.map(|s| s as f64), // settlement from DB; live mid overrides in handler
+            espn_fair: None,
         })
     })?.filter_map(Result::ok).collect();
     Ok(rows)

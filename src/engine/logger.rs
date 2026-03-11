@@ -90,6 +90,7 @@ impl TradeLogger {
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN home_team TEXT");
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN away_team TEXT");
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN is_home INTEGER");
+        let _ = conn.execute_batch("ALTER TABLE fills ADD COLUMN settlement_cents INTEGER");
 
         // One-time backfill: set empty strategies to "clv_hunter" (only strategy that has placed orders)
         let _ = conn.execute(
@@ -131,6 +132,7 @@ impl TradeLogger {
     /// Log a fill. Returns true if a new row was inserted (false if duplicate trade_id).
     /// `filled_at` should be the actual fill timestamp from Kalshi (ISO 8601).
     /// If None, falls back to current time.
+    /// `fee_dollars` is the fee in dollars (Kalshi API `fee_cost` field). Stored in DB column `fee_cents` (legacy name).
     #[allow(clippy::too_many_arguments)]
     pub fn log_fill(
         &self,
@@ -141,7 +143,7 @@ impl TradeLogger {
         action: &str,
         price_cents: i64,
         count: i64,
-        fee_cents: f64,
+        fee_dollars: f64,
         filled_at: Option<&str>,
     ) -> Result<bool> {
         let rows = self.conn.execute(
@@ -149,7 +151,7 @@ impl TradeLogger {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, datetime('now')))
              ON CONFLICT(trade_id) DO UPDATE SET
                fee_cents = CASE WHEN excluded.fee_cents > 0 THEN excluded.fee_cents ELSE fee_cents END",
-            rusqlite::params![trade_id, order_id, ticker, side, action, price_cents, count, fee_cents, filled_at],
+            rusqlite::params![trade_id, order_id, ticker, side, action, price_cents, count, fee_dollars, filled_at],
         )?;
         Ok(rows > 0)
     }
@@ -260,6 +262,28 @@ impl TradeLogger {
         Ok(count)
     }
 
+    /// Get distinct tickers from fills that have no settlement recorded yet.
+    pub fn unsettled_tickers(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT ticker FROM fills WHERE settlement_cents IS NULL"
+        )?;
+        let tickers = stmt.query_map([], |row| row.get(0))?
+            .filter_map(Result::ok)
+            .collect();
+        Ok(tickers)
+    }
+
+    /// Record settlement price for all fills on a ticker.
+    /// Called during cleanup when a game reaches Final phase.
+    /// settlement_cents: 100 if YES side won, 0 if YES side lost.
+    pub fn record_settlement(&self, ticker: &str, settlement_cents: i64) -> Result<usize> {
+        let rows = self.conn.execute(
+            "UPDATE fills SET settlement_cents = ?1 WHERE ticker = ?2 AND settlement_cents IS NULL",
+            rusqlite::params![settlement_cents, ticker],
+        )?;
+        Ok(rows)
+    }
+
     /// Update order status (e.g. to "filled" or "partial_fill").
     pub fn update_order_status(&self, order_id: &str, status: &str) -> Result<()> {
         self.conn.execute(
@@ -303,15 +327,24 @@ impl TradeLogger {
         Ok((total_edge_dollars, fill_count))
     }
 
-    /// Get total realized P&L for today.
+    /// Get realized P&L for today (settled fills only).
+    ///
+    /// Only includes fills where settlement is known. Open positions are excluded —
+    /// their cost is already reflected in the Exposure metric.
+    ///
+    /// Note: `fee_cents` column stores fee in dollars despite the column name.
     pub fn daily_realized_pnl(&self) -> Result<f64> {
         let pnl: f64 = self.conn.query_row(
             "SELECT COALESCE(SUM(
-                CASE WHEN action = 'buy' THEN -price_cents * count / 100.0
-                     ELSE price_cents * count / 100.0
-                END - COALESCE(fee_cents, 0) / 100.0
+                CASE
+                  WHEN side = 'yes' AND action = 'buy'  THEN (settlement_cents - price_cents) * count / 100.0
+                  WHEN side = 'yes' AND action = 'sell' THEN (price_cents - settlement_cents) * count / 100.0
+                  WHEN side = 'no'  AND action = 'buy'  THEN ((100 - settlement_cents) - price_cents) * count / 100.0
+                  WHEN side = 'no'  AND action = 'sell' THEN (price_cents - (100 - settlement_cents)) * count / 100.0
+                END - COALESCE(fee_cents, 0)
             ), 0.0)
-            FROM fills WHERE date(filled_at) = date('now')",
+            FROM fills
+            WHERE date(filled_at) = date('now') AND settlement_cents IS NOT NULL",
             [],
             |row| row.get(0),
         )?;

@@ -172,6 +172,46 @@ async fn main() -> Result<()> {
     // Backfill fills from Kalshi REST (catches any missed WS fill events)
     handlers::sync_fills(&state, &logger, &kalshi_rest).await;
 
+    // Backfill settlement prices for historical fills missing them
+    {
+        let unsettled = {
+            let log = logger.lock().unwrap();
+            log.unsettled_tickers().unwrap_or_default()
+        };
+        if !unsettled.is_empty() {
+            tracing::info!("Backfilling settlement for {} tickers with unsettled fills", unsettled.len());
+            let mut settled_count = 0;
+            for ticker in &unsettled {
+                match kalshi_rest.get_market(ticker).await {
+                    Ok(market) => {
+                        // Only record settlement for markets with an explicit "yes" or "no" result.
+                        // Kalshi may return result: "" for active markets — skip those.
+                        match market.result.as_deref() {
+                            Some("yes") | Some("no") => {
+                                let result = market.result.as_deref().unwrap();
+                                let settlement = if result == "yes" { 100 } else { 0 };
+                                let log = logger.lock().unwrap();
+                                if let Ok(n) = log.record_settlement(ticker, settlement) {
+                                    if n > 0 {
+                                        settled_count += n;
+                                        tracing::info!("Backfilled settlement for {}: {} ({})", ticker, result, settlement);
+                                    }
+                                }
+                            }
+                            _ => {} // Market still active or unknown result, skip
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("Could not fetch market {}: {:?}", ticker, e);
+                    }
+                }
+            }
+            if settled_count > 0 {
+                tracing::info!("Backfilled settlement for {} fills total", settled_count);
+            }
+        }
+    }
+
     // --- Connect WebSockets ---
     let (mut kalshi_rx, kalshi_ws_handle) = connect_kalshi_ws(&auth, &config, &mapper).await?;
     let mut poly_rx = connect_poly_ws(&state).await?;

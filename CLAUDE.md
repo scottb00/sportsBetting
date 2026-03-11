@@ -92,7 +92,8 @@ This is the #1 source of bugs. Each venue defines "YES" differently:
 ### API Gotchas
 - **Kalshi WS deltas**: Use `ts` field (ISO string), not `timestamp` (i64). Wrong field = silently dropped deltas.
 - **Kalshi positions API**: Returns `position` field (signed int: positive=YES, negative=NO). Does NOT return `yes_amount`/`no_amount`.
-- **Kalshi fills API**: `fee_cost` is a JSON string (e.g. `"0.0900"`), not float — needs custom deserializer. Also sends both `ticker` and `market_ticker` fields — cannot use `serde(alias)` or it fails with "duplicate field". `min_ts` param expects unix timestamp integer, not ISO string.
+- **Kalshi fills API**: `fee_cost` is a JSON string (e.g. `"0.0900"`), not float — needs custom deserializer. Value is in **dollars** (stored in DB column `fee_cents` — legacy misnomer, code uses `fee_dollars`). Also sends both `ticker` and `market_ticker` fields — cannot use `serde(alias)` or it fails with "duplicate field". `min_ts` param expects unix timestamp integer, not ISO string.
+- **Kalshi market `result` field**: Returns `""` (empty string) for active markets, not absent/null. Must match `"yes"` or `"no"` explicitly — treating empty as "not yes" = "no" will incorrectly settle active fills.
 - **ESPN dates**: Sends truncated ISO like `"2026-03-08T19:00Z"` (no seconds). Must normalize before parsing.
 - **Polymarket `outcomes`**: JSON string field, not native array. Needs explicit parsing.
 - **LLM market matching**: Claude Haiku often modifies ticker suffixes. Always validate returned tickers against the known valid set.

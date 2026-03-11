@@ -1,10 +1,35 @@
-use crate::engine::bot::{SharedState, SharedOrderBooks};
+use crate::engine::bot::{SharedState, SharedOrderBooks, SharedLogger};
 use crate::espn::types::GamePhase;
 
 /// Clean up internal state for finished games.
 /// Kalshi auto-cancels orders when games settle, so no REST calls needed.
-pub async fn cleanup_finished_games(state: &SharedState, order_books: &SharedOrderBooks) {
+pub async fn cleanup_finished_games(state: &SharedState, order_books: &SharedOrderBooks, logger: &SharedLogger) {
     let mut s = state.lock().await;
+
+    // Persist settlement prices before removing games
+    let settlements: Vec<(String, i64)> = s.game_state.games.values()
+        .filter(|g| g.phase == GamePhase::Final)
+        .flat_map(|g| {
+            let home_won = match (g.home_score, g.away_score) {
+                (Some(h), Some(a)) => h > a,
+                _ => return vec![],
+            };
+            g.kalshi_markets.iter().map(move |m| {
+                // Settlement: 100 if YES side won, 0 if YES side lost
+                let yes_won = if m.is_home { home_won } else { !home_won };
+                (m.ticker.clone(), if yes_won { 100 } else { 0 })
+            }).collect::<Vec<_>>()
+        })
+        .collect();
+
+    if !settlements.is_empty() {
+        let log = logger.lock().unwrap();
+        for (ticker, settlement) in &settlements {
+            if let Err(e) = log.record_settlement(ticker, *settlement) {
+                tracing::warn!("Failed to record settlement for {}: {:?}", ticker, e);
+            }
+        }
+    }
 
     let finished_tickers: Vec<String> = s.game_state.games.values()
         .filter(|g| g.phase == GamePhase::Final)

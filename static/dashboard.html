@@ -220,6 +220,7 @@
         <th>Position</th>
         <th class="num">Qty</th>
         <th class="num">Price</th>
+        <th class="num">Fair</th>
         <th class="num">Edge</th>
         <th class="num">Cost</th>
         <th>Status</th>
@@ -269,10 +270,12 @@
         <th>Position</th>
         <th class="num">Qty</th>
         <th class="num">Price</th>
+        <th class="num">Fair</th>
         <th class="num">Edge</th>
         <th class="num">Cost</th>
         <th class="num">Fee</th>
-        <th class="num">Net</th>
+        <th class="num">Mark</th>
+        <th class="num">P&L</th>
       </tr>
     </thead>
     <tbody></tbody>
@@ -504,7 +507,7 @@ async function refresh() {
           <td style="font-size:11px">${g._dt.display}</td>
           <td>${g.away_team} @ ${g.home_team}</td>
           <td class="num">${score}</td>
-          <td><span class="phase phase-${g.phase}">${g.status_detail || g.phase}</span></td>
+          <td><span class="phase phase-${g.phase}">${g.phase}</span>${(g.phase === 'Live' || g.phase === 'Break' || g.phase === 'Halftime') && g.status_detail ? `<div style="font-size:11px;color:#8b949e;margin-top:2px">${g.status_detail}</div>` : ''}</td>
           <td class="num">${fmtPct(g.espn_home_win_prob)}</td>
           <td class="num">${g._bid != null || g._ask != null ? (g._bid != null ? g._bid.toFixed(0) : '-') + ' / ' + (g._ask != null ? g._ask.toFixed(0) : '-') : '-'}</td>
           <td class="num">${fmtEdgeWithDollars(g._edge, 1)}${(g.phase === 'Break' || g.phase === 'Halftime' || g.phase === 'Live') && g._evalResult ? '<br>' + fmtEvalBadge(g._evalResult, g._evalEdgeAfterFees, g._evalAloPrice) : ''}</td>
@@ -580,7 +583,7 @@ async function refresh() {
     });
     const op = paginate(filtered, 'orders');
     if (filtered.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="9" class="empty">No orders match filters</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="10" class="empty">No orders match filters</td></tr>';
     } else {
       tbody.innerHTML = op.rows.map(o => {
         const stratCls = o.strategy ? `strat strat-${o.strategy}` : 'strat strat-synced';
@@ -595,6 +598,7 @@ async function refresh() {
           <td>${fmtPosition(o)}</td>
           <td class="num">${o.count}</td>
           <td class="num">${o.price_cents}¢</td>
+          <td class="num">${o.espn_fair != null ? (o.espn_fair * 100).toFixed(1) + '¢' : '-'}</td>
           <td class="num">${fmtEdgeWithDollars(o.edge, o.count)}</td>
           <td class="num">$${cost}</td>
           <td><span class="${statusCls}">${o.status}</span></td>
@@ -620,16 +624,31 @@ async function refresh() {
     });
     const fp = paginate(filtered, 'fills');
     if (filtered.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="10" class="empty">No fills match filters</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="12" class="empty">No fills match filters</td></tr>';
     } else {
       tbody.innerHTML = fp.rows.map(f => {
         const stratCls = f.strategy ? `strat strat-${f.strategy}` : 'strat strat-synced';
         const stratLabel = f.strategy || 'synced';
         const gameLabel = f.game_name || f.ticker;
         const cost = (f.price_cents * f.count / 100).toFixed(2);
-        const fee = f.fee_cents / 100;
-        const net = (f.action === 'buy' ? -1 : 1) * (f.price_cents * f.count / 100) - fee;
-        const netCls = net > 0 ? 'edge-pos' : net < 0 ? 'edge-neg' : '';
+        const fee = f.fee_dollars;
+        // Mark price display
+        const markLabel = f.mark_cents != null ? `${f.mark_cents.toFixed(0)}¢` : '-';
+        const isSettled = f.mark_cents === 0 || f.mark_cents === 100;
+        const markStyle = isSettled ? 'font-weight:600' : '';
+        // P&L: (mark - entry) * count / 100 - fee, sign depends on buy/sell side
+        let pnl = null;
+        if (f.mark_cents != null) {
+          const direction = f.action.toLowerCase() === 'buy' ? 1 : -1;
+          const isYes = f.side.toLowerCase() === 'yes';
+          // For YES side: pnl = direction * (mark - price) * count / 100
+          // For NO side: pnl = direction * ((100 - mark) - (100 - price)) * count / 100
+          const entryPrice = isYes ? f.price_cents : (100 - f.price_cents);
+          const markPrice = isYes ? f.mark_cents : (100 - f.mark_cents);
+          pnl = direction * (markPrice - entryPrice) * f.count / 100 - fee;
+        }
+        const pnlLabel = pnl != null ? `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}` : '-';
+        const pnlCls = pnl != null ? (pnl > 0 ? 'edge-pos' : pnl < 0 ? 'edge-neg' : '') : '';
         return `<tr>
           <td style="font-size:11px">${shortDateTime(f.filled_at)}</td>
           <td><span class="${stratCls}">${stratLabel}</span></td>
@@ -637,10 +656,12 @@ async function refresh() {
           <td>${fmtPosition(f)}</td>
           <td class="num">${f.count}</td>
           <td class="num">${f.price_cents}¢</td>
+          <td class="num">${f.espn_fair != null ? (f.espn_fair * 100).toFixed(1) + '¢' : '-'}</td>
           <td class="num">${fmtEdgeBps(f.edge_bps, f.count)}</td>
           <td class="num">$${cost}</td>
-          <td class="num">${f.fee_cents.toFixed(0)}¢</td>
-          <td class="num"><span class="${netCls}">${net >= 0 ? '+' : ''}$${net.toFixed(2)}</span></td>
+          <td class="num">$${f.fee_dollars.toFixed(2)}</td>
+          <td class="num" style="${markStyle}">${markLabel}</td>
+          <td class="num"><span class="${pnlCls}">${pnlLabel}</span></td>
         </tr>`;
       }).join('');
     }

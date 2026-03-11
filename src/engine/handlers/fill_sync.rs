@@ -36,7 +36,7 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
     let fill_data: Vec<(
         usize,                                      // index
         i64,                                        // price_cents
-        f64,                                        // fee_cents
+        f64,                                        // fee_dollars
         Option<crate::engine::logger::GameInfo>,    // game_info
         Option<String>,                             // strategy
         bool,                                       // is_new (not already processed)
@@ -44,14 +44,14 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
         let mut s = state.lock().await;
         fills.iter().enumerate().map(|(i, fill)| {
             let price_cents = if fill.side == "yes" { fill.yes_price } else { fill.no_price };
-            let fee_cents = fill.fee_cost.unwrap_or(0.0) * 100.0; // API returns dollars, convert to cents
+            let fee_dollars = fill.fee_cost.unwrap_or(0.0); // Kalshi API fee_cost is in dollars
             let game_info = crate::engine::logger::GameInfo::from_game_state(&s.game_state, &fill.ticker);
             let strategy = s.order_manager.get_strategy(&fill.order_id).map(ToString::to_string);
             let is_new = !s.order_manager.is_fill_processed(&fill.trade_id);
             if is_new {
                 s.order_manager.mark_fill_processed(&fill.trade_id);
             }
-            (i, price_cents, fee_cents, game_info, strategy, is_new)
+            (i, price_cents, fee_dollars, game_info, strategy, is_new)
         }).collect()
     };
     // state lock released
@@ -61,7 +61,7 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
     // Phase 2: Log to SQLite and update order statuses under logger lock only
     {
         let log = logger.lock().unwrap();
-        for (i, price_cents, fee_cents, game_info, strategy, _is_new) in &fill_data {
+        for (i, price_cents, fee_dollars, game_info, strategy, _is_new) in &fill_data {
             let fill = &fills[*i];
 
             // Backfill stub order row
@@ -89,7 +89,7 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
                 &fill.action,
                 *price_cents,
                 fill.count,
-                *fee_cents,
+                *fee_dollars,
                 Some(&fill.created_time),
             ) {
                 tracing::warn!("Failed to log fill {}: {:?}", fill.trade_id, e);
@@ -101,7 +101,7 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
     // Phase 3: Apply state updates under state lock only (no logger lock)
     {
         let mut s = state.lock().await;
-        for (i, _price_cents, _fee_cents, _game_info, _strategy, is_new) in &fill_data {
+        for (i, _price_cents, _fee_dollars, _game_info, _strategy, is_new) in &fill_data {
             if !is_new {
                 continue;
             }

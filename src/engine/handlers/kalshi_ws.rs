@@ -65,7 +65,7 @@ pub async fn handle_kalshi_event(
             let side = fill.side.clone();
             let action = fill.action.clone();
             let count = fill.count;
-            let fee_cents = RiskManager::maker_fee(count, price_cents);
+            let fee_dollars = RiskManager::maker_fee(count, price_cents) / 100.0;
             let strategy = s.order_manager.get_strategy(&order_id).map(ToString::to_string).unwrap_or_default();
             let game_info = GameInfo::from_game_state(&s.game_state, &ticker);
             drop(s);
@@ -83,7 +83,7 @@ pub async fn handle_kalshi_event(
                 }
                 let _ = log.log_fill(
                     &trade_id, &order_id, &ticker,
-                    &side, &action, price_cents, count, fee_cents,
+                    &side, &action, price_cents, count, fee_dollars,
                     None, // WS fills don't include timestamp; use current time
                 );
             }
