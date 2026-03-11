@@ -14,7 +14,7 @@ use sports_betting::engine::order_manager::{OrderManager, OrderSignal};
 use sports_betting::engine::risk::RiskManager;
 use sports_betting::espn::types::GamePhase;
 use sports_betting::kalshi::orderbook::LocalOrderBook;
-use sports_betting::kalshi::types::{Order, OrderAction, OrderSide};
+use sports_betting::kalshi::types::{Order, OrderAction, OrderBookSnapshot, OrderSide, PriceLevel};
 use sports_betting::strategies::break_ev::BreakEvQuoter;
 use sports_betting::strategies::clv_hunter::ClvHunter;
 use sports_betting::strategies::Strategy;
@@ -1123,4 +1123,256 @@ fn stress_many_games_never_exceed_exposure() {
             round, state.risk.current_total_exposure
         );
     }
+}
+
+// ============================================================
+// 20. CLV Staleness Detection Tests
+// ============================================================
+
+/// Helper: build a LocalOrderBook with a single YES bid at `yes_bid_price`.
+fn make_book_with_yes_bid(ticker: &str, yes_bid_price: i64) -> LocalOrderBook {
+    let mut book = LocalOrderBook::new(ticker.to_string());
+    book.apply_snapshot(&OrderBookSnapshot {
+        yes: vec![PriceLevel { price: yes_bid_price, quantity: 100 }],
+        no: vec![],
+    });
+    book
+}
+
+/// Helper: build a LocalOrderBook with a single NO bid at `no_bid_price`.
+fn make_book_with_no_bid(ticker: &str, no_bid_price: i64) -> LocalOrderBook {
+    let mut book = LocalOrderBook::new(ticker.to_string());
+    book.apply_snapshot(&OrderBookSnapshot {
+        yes: vec![],
+        no: vec![PriceLevel { price: no_bid_price, quantity: 100 }],
+    });
+    book
+}
+
+/// Apply the staleness predicate from scoreboard.rs to a single CLV order.
+fn is_clv_stale(
+    side: &str,
+    price_cents: i64,
+    books: &HashMap<String, LocalOrderBook>,
+    ticker: &str,
+) -> bool {
+    let best_bid = match side {
+        "Yes" => books.get(ticker).and_then(|b| b.best_yes_bid()).map(|b| b.price),
+        "No"  => books.get(ticker).and_then(|b| b.best_no_bid()).map(|b| b.price),
+        _     => None,
+    };
+    best_bid.is_some_and(|bid| bid > price_cents)
+}
+
+/// Build an Order suitable for use as a resting CLV order.
+fn make_clv_resting_order(id: &str, ticker: &str, side: OrderSide, price: i64) -> Order {
+    let (yes_price, no_price) = match side {
+        OrderSide::Yes => (Some(price), None),
+        OrderSide::No  => (None, Some(price)),
+    };
+    Order {
+        order_id: id.to_string(),
+        ticker: ticker.to_string(),
+        action: OrderAction::Buy,
+        side,
+        order_type: "limit".to_string(),
+        status: "resting".to_string(),
+        yes_price,
+        no_price,
+        remaining_count: 5,
+        created_time: "2026-03-11T10:00:00Z".to_string(),
+    }
+}
+
+#[test]
+fn clv_order_not_stale_when_book_matches_our_price() {
+    // Order at 20, best_yes_bid = 20 → best_bid == price → not stale
+    let ticker = "CLV-GAME";
+    let mut books = HashMap::new();
+    books.insert(ticker.to_string(), make_book_with_yes_bid(ticker, 20));
+
+    let stale = is_clv_stale("Yes", 20, &books, ticker);
+    assert!(!stale, "Order at 20 with best_yes_bid=20 should NOT be stale (not outbid)");
+}
+
+#[test]
+fn clv_order_stale_when_outbid() {
+    // Order at 20, best_yes_bid = 22 → someone outbid us → stale
+    let ticker = "CLV-GAME";
+    let mut books = HashMap::new();
+    books.insert(ticker.to_string(), make_book_with_yes_bid(ticker, 22));
+
+    let stale = is_clv_stale("Yes", 20, &books, ticker);
+    assert!(stale, "Order at 20 with best_yes_bid=22 should be stale (outbid)");
+}
+
+#[test]
+fn clv_order_not_stale_when_book_below_our_price() {
+    // Order at 20, best_yes_bid = 18 → we're still at the top of book → not stale
+    let ticker = "CLV-GAME";
+    let mut books = HashMap::new();
+    books.insert(ticker.to_string(), make_book_with_yes_bid(ticker, 18));
+
+    let stale = is_clv_stale("Yes", 20, &books, ticker);
+    assert!(!stale, "Order at 20 with best_yes_bid=18 should NOT be stale (we're top of book)");
+}
+
+#[test]
+fn clv_no_order_stale_when_outbid() {
+    // No-side order at 75, best_no_bid = 77 → someone outbid us → stale
+    let ticker = "CLV-GAME";
+    let mut books = HashMap::new();
+    books.insert(ticker.to_string(), make_book_with_no_bid(ticker, 77));
+
+    let stale = is_clv_stale("No", 75, &books, ticker);
+    assert!(stale, "No-side order at 75 with best_no_bid=77 should be stale (outbid)");
+}
+
+#[test]
+fn clv_order_not_stale_when_book_absent() {
+    // No book entry for ticker → best_bid = None → not stale
+    let ticker = "CLV-GAME";
+    let books: HashMap<String, LocalOrderBook> = HashMap::new();
+
+    let stale = is_clv_stale("Yes", 20, &books, ticker);
+    assert!(!stale, "Order with no book entry should NOT be stale (no information)");
+}
+
+#[test]
+fn all_clv_orders_excludes_non_clv() {
+    // CLV order in clv_orders but NOT in resting_orders → excluded by all_clv_orders()
+    let mut om = OrderManager::new();
+
+    // Register a CLV order without a corresponding resting order
+    om.record_clv_order("order-ghost", "CLV-GAME", "Yes", 20);
+
+    // all_clv_orders() filters to only those also in resting_orders
+    let clv = om.all_clv_orders();
+    assert!(
+        clv.is_empty(),
+        "CLV order not in resting_orders should be excluded by all_clv_orders(), got {} entries",
+        clv.len()
+    );
+}
+
+// ============================================================
+// 21. CLV Recovery Tests
+// ============================================================
+
+#[test]
+fn recover_clv_from_resting_basic() {
+    // Resting order with strategy="clv_hunter" in order_strategies → recovered into clv_orders
+    let mut om = OrderManager::new();
+
+    let order = make_clv_resting_order("o-clv-1", "CLV-GAME", OrderSide::Yes, 35);
+    om.record_placed_order(order, 5, "clv_hunter");
+
+    // record_placed_order populates resting_orders and order_strategies but NOT clv_orders.
+    // This simulates the post-restart state where clv_orders is empty.
+    let before = om.all_clv_orders();
+    assert!(before.is_empty(), "Before recovery, clv_orders should be empty");
+
+    om.recover_clv_from_resting();
+
+    let after = om.all_clv_orders();
+    assert_eq!(after.len(), 1, "After recovery, the CLV order should be present");
+    assert_eq!(after[0].order_id, "o-clv-1");
+    assert_eq!(after[0].ticker, "CLV-GAME");
+    assert_eq!(after[0].price_cents, 35);
+}
+
+#[test]
+fn recover_clv_from_resting_skips_non_clv() {
+    // Resting order with strategy="break_ev" should NOT be recovered into clv_orders
+    let mut om = OrderManager::new();
+
+    let order = make_clv_resting_order("o-break-1", "BREAK-GAME", OrderSide::Yes, 48);
+    om.record_placed_order(order, 5, "break_ev");
+
+    om.recover_clv_from_resting();
+
+    let clv = om.all_clv_orders();
+    assert!(
+        clv.is_empty(),
+        "break_ev order should NOT be recovered into clv_orders, got {} entries",
+        clv.len()
+    );
+}
+
+#[test]
+fn recover_clv_from_resting_skips_already_present() {
+    // Order already in clv_orders → recover_clv_from_resting skips it (no duplicate)
+    let mut om = OrderManager::new();
+
+    let order = make_clv_resting_order("o-clv-2", "CLV-GAME", OrderSide::Yes, 42);
+    om.record_placed_order(order, 5, "clv_hunter");
+
+    // Manually populate clv_orders (simulates order placed in-session, not via restart)
+    om.record_clv_order("o-clv-2", "CLV-GAME", "Yes", 42);
+
+    assert_eq!(om.all_clv_orders().len(), 1);
+
+    // Recovery should skip already-present entries
+    om.recover_clv_from_resting();
+
+    let clv = om.all_clv_orders();
+    assert_eq!(
+        clv.len(), 1,
+        "Should have exactly 1 CLV entry after recovery (no duplicate)"
+    );
+}
+
+#[test]
+fn recover_clv_from_resting_no_strategy() {
+    // Resting order with no entry in order_strategies → NOT recovered
+    let mut om = OrderManager::new();
+
+    // apply_synced_orders adds to resting_orders but NOT order_strategies
+    om.apply_synced_orders(vec![
+        make_clv_resting_order("o-unknown", "CLV-GAME", OrderSide::Yes, 30),
+    ]);
+
+    om.recover_clv_from_resting();
+
+    let clv = om.all_clv_orders();
+    assert!(
+        clv.is_empty(),
+        "Order with no strategy entry should NOT be recovered into clv_orders"
+    );
+}
+
+#[test]
+fn recover_clv_from_resting_mixed_strategies() {
+    // Mix of clv_hunter and break_ev orders — only clv_hunter gets recovered
+    let mut om = OrderManager::new();
+
+    let clv_order = make_clv_resting_order("o-clv-3", "CLV-GAME", OrderSide::Yes, 28);
+    om.record_placed_order(clv_order, 3, "clv_hunter");
+
+    let break_order = make_clv_resting_order("o-break-2", "BREAK-GAME", OrderSide::No, 55);
+    om.record_placed_order(break_order, 4, "break_ev");
+
+    om.recover_clv_from_resting();
+
+    let clv = om.all_clv_orders();
+    assert_eq!(clv.len(), 1, "Only the clv_hunter order should be recovered, got {}", clv.len());
+    assert_eq!(clv[0].order_id, "o-clv-3");
+}
+
+#[test]
+fn recover_clv_no_side_correct_for_no_order() {
+    // Verify that a No-side CLV order gets the correct side string after recovery
+    let mut om = OrderManager::new();
+
+    let order = make_clv_resting_order("o-clv-no", "CLV-GAME-NO", OrderSide::No, 72);
+    om.record_placed_order(order, 5, "clv_hunter");
+
+    om.recover_clv_from_resting();
+
+    let clv = om.all_clv_orders();
+    assert_eq!(clv.len(), 1);
+    // The side field is formatted via `format!("{:?}", order.side)` in recover_clv_from_resting
+    assert_eq!(clv[0].side, "No", "Recovered No-side order should have side='No'");
+    assert_eq!(clv[0].price_cents, 72);
+    assert_eq!(clv[0].ticker, "CLV-GAME-NO");
 }
