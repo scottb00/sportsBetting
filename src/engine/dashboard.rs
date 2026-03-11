@@ -188,7 +188,8 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
                 edge_side,
                 volume: m.volume,
                 has_resting_order: has_resting,
-                exposure: s.order_manager.committed_contracts(&m.ticker) as f64,
+                exposure: (s.risk.net_position(&m.ticker).unsigned_abs() as i64
+                    + s.order_manager.resting_contracts_for_tickers(&[m.ticker.as_str()])) as f64,
                 position: s.risk.net_position(&m.ticker),
                 alo_price,
                 edge_raw,

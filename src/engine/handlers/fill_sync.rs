@@ -44,7 +44,7 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
         let mut s = state.lock().await;
         fills.iter().enumerate().map(|(i, fill)| {
             let price_cents = if fill.side == "yes" { fill.yes_price } else { fill.no_price };
-            let fee_cents = fill.fee_cost.unwrap_or(0.0);
+            let fee_cents = fill.fee_cost.unwrap_or(0.0) * 100.0; // API returns dollars, convert to cents
             let game_info = crate::engine::logger::GameInfo::from_game_state(&s.game_state, &fill.ticker);
             let strategy = s.order_manager.get_strategy(&fill.order_id).map(ToString::to_string);
             let is_new = !s.order_manager.is_fill_processed(&fill.trade_id);

@@ -150,6 +150,12 @@
   <div class="pagination" id="games-pagination"></div>
 
   <h2>Break Evaluations</h2>
+  <div class="filters" id="break-eval-filters">
+    <div class="filter-group">
+      <label>Game</label>
+      <input type="text" id="filter-break-game" placeholder="Search..." style="width:120px">
+    </div>
+  </div>
   <table id="break-evals-table">
     <thead>
       <tr>
@@ -335,9 +341,10 @@ function fmtEdgeWithDollars(v, count) {
 // Edge from bps with dollar amount
 function fmtEdgeBps(bps, count) {
   if (bps == null) return '-';
+  const pct = bps / 100;
   const dollars = (bps / 10000) * count;
   const cls = bps > 0 ? 'edge-pos' : bps < 0 ? 'edge-neg' : '';
-  return `<span class="${cls}">${bps.toFixed(0)} bps <span style="font-size:11px;opacity:0.7">($${dollars.toFixed(2)})</span></span>`;
+  return `<span class="${cls}">${pct > 0 ? '+' : ''}${pct.toFixed(1)}% <span style="font-size:11px;opacity:0.7">($${dollars.toFixed(2)})</span></span>`;
 }
 // Translate order side+action into a position-style team label
 // Buy YES on home market = long home team, Buy NO on home market = long away team, etc.
@@ -514,12 +521,16 @@ async function refresh() {
   if (breakEvals) {
     const tbody = $('#break-evals-table tbody');
     // Flatten: one row per market per break eval
+    const fBGame = ($('#filter-break-game').value || '').toLowerCase();
     const rows = [];
     for (const ev of breakEvals) {
+      const gameName = `${ev.away_team} ${ev.home_team}`.toLowerCase();
+      if (fBGame && !gameName.includes(fBGame)) continue;
       if (ev.markets.length === 0) {
         rows.push({ ...ev, m: null });
       } else {
         for (const m of ev.markets) {
+          if (fBGame && m.ticker && !m.ticker.toLowerCase().includes(fBGame) && !gameName.includes(fBGame)) continue;
           rows.push({ ...ev, m });
         }
       }

@@ -14,10 +14,10 @@ use crate::strategies::common::compute_edge_and_alo;
 pub struct EvalSnapshot {
     pub games: HashMap<String, GameState>,
     pub risk: RiskManager,
-    /// Pre-computed committed contracts per ticker.
-    pub committed_contracts: HashMap<String, i64>,
     /// Set of tickers that have resting orders or in-flight API calls.
     pub resting_tickers: std::collections::HashSet<String>,
+    /// Pre-computed resting contract counts per ticker.
+    pub resting_contracts: HashMap<String, i64>,
 }
 
 /// Build an EvalSnapshot from the current BotState (call while holding the lock).
@@ -27,22 +27,23 @@ pub fn build_eval_snapshot(
     let games = state.game_state.games.clone();
     let risk = state.risk.clone();
 
-    // Pre-compute committed contracts and resting status for all game tickers
-    let mut committed_contracts = HashMap::new();
+    // Pre-compute resting status and resting contract counts for all game tickers
     let mut resting_tickers = std::collections::HashSet::new();
+    let mut resting_contracts = HashMap::new();
     for game in games.values() {
         for market in &game.kalshi_markets {
-            committed_contracts.insert(
-                market.ticker.clone(),
-                state.order_manager.committed_contracts(&market.ticker),
-            );
-            if state.order_manager.has_resting_order(&market.ticker) {
-                resting_tickers.insert(market.ticker.clone());
+            let ticker = &market.ticker;
+            if state.order_manager.has_resting_order(ticker) {
+                resting_tickers.insert(ticker.clone());
+            }
+            let resting = state.order_manager.resting_contracts_for_tickers(&[ticker.as_str()]);
+            if resting > 0 {
+                resting_contracts.insert(ticker.clone(), resting);
             }
         }
     }
 
-    EvalSnapshot { games, risk, committed_contracts, resting_tickers }
+    EvalSnapshot { games, risk, resting_tickers, resting_contracts }
 }
 
 /// Check whether a game should be skipped for strategy evaluation.
@@ -88,9 +89,13 @@ fn game_contracts_remaining(
         return None;
     }
 
-    // Check hard contract cap across all markets for this game
+    // Check hard contract cap: abs(filled position) + resting orders
     let game_committed: i64 = game.kalshi_markets.iter()
-        .map(|m| snapshot.committed_contracts.get(&m.ticker).copied().unwrap_or(0))
+        .map(|m| {
+            let position = snapshot.risk.net_position(&m.ticker).unsigned_abs() as i64;
+            let resting = snapshot.resting_contracts.get(&m.ticker).copied().unwrap_or(0);
+            position + resting
+        })
         .sum();
     if game_committed >= registry.max_contracts_per_game {
         return None;
@@ -122,10 +127,12 @@ pub fn evaluate_strategies(
             None => continue,
         };
 
-        // Compute exposure for Kelly sizing from committed contracts across all game tickers
+        // Compute exposure for Kelly sizing from position + resting orders
         let current_exposure: f64 = game.kalshi_markets.iter()
             .map(|m| {
-                let contracts = snapshot.committed_contracts.get(&m.ticker).copied().unwrap_or(0);
+                let position = snapshot.risk.net_position(&m.ticker).unsigned_abs() as i64;
+                let resting = snapshot.resting_contracts.get(&m.ticker).copied().unwrap_or(0);
+                let contracts = position + resting;
                 let avg_price = book_prices(order_books, &m.ticker).mid.map(|mid| mid / 100.0).unwrap_or(0.50);
                 contracts as f64 * avg_price
             })
@@ -300,10 +307,14 @@ pub async fn execute_signal(
             return None;
         }
 
-        // Re-compute contract cap across ALL tickers for this game (not just the signal's ticker)
+        // Re-compute contract cap: abs(filled position) + resting orders
         let game_tickers = s.game_state.game_tickers_for(&signal.kalshi_ticker);
         let game_committed: i64 = game_tickers.iter()
-            .map(|t| s.order_manager.committed_contracts(t))
+            .map(|t| {
+                let position = s.risk.net_position(t).unsigned_abs() as i64;
+                let resting = s.order_manager.resting_contracts_for_tickers(&[t.as_str()]);
+                position + resting
+            })
             .sum();
         let contracts_remaining = (max_contracts_per_game - game_committed).max(0);
         if contracts_remaining <= 0 {

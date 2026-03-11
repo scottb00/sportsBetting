@@ -52,9 +52,6 @@ pub struct OrderManager {
     /// Strategy that placed each order (order_id -> strategy name).
     /// Populated when the executor places orders; used by sync to backfill the DB.
     order_strategies: HashMap<String, String>,
-    /// Tracks total contracts sent per ticker (resting + filled).
-    /// This persists across order fills to prevent re-ordering the same game.
-    committed_contracts: HashMap<String, i64>,
     /// In-memory fill dedup (double-buffer): current + previous sets.
     /// When current exceeds 500 entries, it rotates to previous and a new current starts.
     /// This bounds memory while keeping recent fills for dedup.
@@ -81,27 +78,10 @@ impl OrderManager {
             in_flight: HashMap::new(),
             clv_orders: HashMap::new(),
             order_strategies: HashMap::new(),
-            committed_contracts: HashMap::new(),
             processed_fills: HashSet::new(),
             processed_fills_prev: HashSet::new(),
             last_sync: None,
             last_fill_sync_ts: None,
-        }
-    }
-
-    /// Seed committed_contracts for a single ticker from current position size (call on startup).
-    /// Uses abs(position) — the number of contracts currently held — not lifetime total_traded.
-    pub fn record_startup_position(&mut self, ticker: &str, current_position_abs: i64) {
-        if current_position_abs > 0 {
-            self.committed_contracts.insert(ticker.to_string(), current_position_abs);
-        }
-    }
-
-    /// Add resting order remaining counts to committed_contracts (call after sync_orders).
-    /// This accounts for outstanding resting orders alongside already-filled position.
-    pub fn seed_committed_from_resting(&mut self) {
-        for order in self.resting_orders.values() {
-            *self.committed_contracts.entry(order.ticker.clone()).or_insert(0) += order.remaining_count;
         }
     }
 
@@ -186,14 +166,11 @@ impl OrderManager {
     }
 
     /// Record a newly placed order into the cache (avoids waiting for next sync).
-    /// Also tracks committed contracts so filled orders still count toward limits.
     pub fn record_placed_order(&mut self, order: Order, contracts_sent: i64, strategy: &str) {
         self.order_strategies.insert(order.order_id.clone(), strategy.to_string());
-        *self.committed_contracts.entry(order.ticker.clone()).or_default() += contracts_sent;
         tracing::info!(
-            "Committed {} contracts on {} (total: {})",
-            contracts_sent, order.ticker,
-            self.committed_contracts.get(&order.ticker).unwrap_or(&0),
+            "Placed {} contracts on {} (order {})",
+            contracts_sent, order.ticker, order.order_id,
         );
         self.in_flight.remove(&order.ticker);
         self.orders_by_ticker
@@ -246,12 +223,6 @@ impl OrderManager {
             post_only: Some(signal.post_only),
             expiration_ts: signal.expiration_ts,
         })
-    }
-
-    /// Get total contracts committed for a market (resting + filled).
-    /// This prevents re-ordering after fills exhaust the per-game limit.
-    pub fn committed_contracts(&self, ticker: &str) -> i64 {
-        self.committed_contracts.get(ticker).copied().unwrap_or(0)
     }
 
     /// Get order IDs for a market ticker (for cancellation).
@@ -349,16 +320,8 @@ impl OrderManager {
     }
 
     /// Remove an order from local cache (e.g. after cancel or sync removal).
-    /// Decrements committed_contracts by the unfilled remaining_count so that
-    /// cancelled orders don't permanently consume per-game contract budget.
     pub fn remove_order(&mut self, order_id: &str) {
         if let Some(order) = self.resting_orders.remove(order_id) {
-            // Give back unfilled contract budget
-            if order.remaining_count > 0
-                && let Some(committed) = self.committed_contracts.get_mut(&order.ticker)
-            {
-                *committed = (*committed - order.remaining_count).max(0);
-            }
             if let Some(ids) = self.orders_by_ticker.get_mut(&order.ticker) {
                 ids.remove(order_id);
                 if ids.is_empty() {
@@ -369,24 +332,10 @@ impl OrderManager {
         self.clv_orders.remove(order_id);
     }
 
-    /// Remove committed_contracts entries for finished tickers (prevents unbounded growth).
-    pub fn clear_committed_contracts(&mut self, tickers: &[String]) {
-        for ticker in tickers {
-            self.committed_contracts.remove(ticker.as_str());
-        }
-    }
-
     /// Clean up order_strategies entries that reference orders no longer resting.
     /// Called during game cleanup to prevent unbounded growth over long runs.
     pub fn cleanup_stale_strategies(&mut self) {
         self.order_strategies.retain(|oid, _| self.resting_orders.contains_key(oid));
-    }
-
-    /// Get total committed contracts across multiple tickers (game-level check).
-    pub fn committed_contracts_for_tickers(&self, tickers: &[&str]) -> i64 {
-        tickers.iter()
-            .map(|t| self.committed_contracts.get(*t).copied().unwrap_or(0))
-            .sum()
     }
 
     /// Count resting contracts across multiple tickers.
@@ -451,14 +400,6 @@ mod tests {
     }
 
     #[test]
-    fn committed_contracts_tracked() {
-        let mut om = OrderManager::new();
-        om.record_placed_order(make_order("o1", "TICKER-A"), 10, "test");
-        assert_eq!(om.committed_contracts("TICKER-A"), 10);
-        assert_eq!(om.committed_contracts("TICKER-B"), 0);
-    }
-
-    #[test]
     fn clv_orders_tracked() {
         let mut om = OrderManager::new();
         om.record_placed_order(make_order("o1", "TICKER-A"), 10, "test");
@@ -505,21 +446,6 @@ mod tests {
         // Full fill
         om.record_fill("o1", 10);
         assert!(!om.has_resting_order("TICKER-A"), "Order should be gone after full fill");
-    }
-
-    #[test]
-    fn remove_order_decrements_committed_contracts() {
-        let mut om = OrderManager::new();
-        om.record_placed_order(make_order("o1", "TICKER-A"), 10, "test");
-        assert_eq!(om.committed_contracts("TICKER-A"), 10);
-
-        // Partial fill (3 contracts), then cancel remaining 7
-        om.record_fill("o1", 3);
-        assert_eq!(om.committed_contracts("TICKER-A"), 10); // still 10 after fill
-
-        om.remove_order("o1");
-        // Should decrement by remaining_count (7), leaving 3 (the filled portion)
-        assert_eq!(om.committed_contracts("TICKER-A"), 3);
     }
 
     #[test]

@@ -21,7 +21,6 @@ pub async fn cleanup_finished_games(state: &SharedState, order_books: &SharedOrd
 
     let count_before = s.game_state.games.len();
     s.game_state.cleanup_finished();
-    s.order_manager.clear_committed_contracts(&finished_tickers);
     s.order_manager.cleanup_stale_strategies();
     let removed = count_before - s.game_state.games.len();
     drop(s);

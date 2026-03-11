@@ -132,7 +132,6 @@ async fn main() -> Result<()> {
         let mut s = state.lock().await;
         for pos in &positions {
             if pos.position != 0 {
-                s.order_manager.record_startup_position(&pos.ticker, pos.position.abs());
                 tracing::info!(
                     "Position: {} | traded={} position={} exposure={} pnl={}",
                     pos.ticker, pos.total_traded, pos.position,
@@ -154,10 +153,9 @@ async fn main() -> Result<()> {
         tracing::info!("Loaded positions from Kalshi, seeded risk manager");
     }
     handlers::sync_orders(&state, &logger, &kalshi_rest).await;
-    // Add resting order remaining counts to committed_contracts + recover strategies from DB
+    // Recover strategies for resting orders from DB
     {
         let mut s = state.lock().await;
-        s.order_manager.seed_committed_from_resting();
         // Recover strategies for resting orders from DB
         let order_ids: Vec<String> = s.order_manager.resting_order_ids();
         if !order_ids.is_empty() {
