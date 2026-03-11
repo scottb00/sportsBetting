@@ -9,7 +9,6 @@ use crate::config::Config;
 use crate::engine::game_state::{GameStateManager, KalshiMarketState};
 use crate::engine::logger::TradeLogger;
 use crate::engine::market_mapper::MarketMapper;
-use crate::engine::market_prep::{BookPrices, extract_book_prices};
 use crate::engine::order_manager::OrderManager;
 use crate::engine::risk::RiskManager;
 use crate::espn::poller::EspnPoller;
@@ -45,28 +44,22 @@ pub struct BreakMarketEval {
     pub side: Option<String>,
 }
 
-/// All shared mutable state for the bot.
+/// Core mutable state: game data, risk, and order tracking.
+/// Order books and break eval log are stored in separate locks to reduce contention.
 pub struct BotState {
     pub game_state: GameStateManager,
-    pub order_books: HashMap<String, LocalOrderBook>,
     pub risk: RiskManager,
     pub order_manager: OrderManager,
-    /// Ring buffer of recent break evaluations (newest first).
-    pub break_eval_log: VecDeque<BreakEvalLog>,
-}
-
-impl BotState {
-    /// Derive bid/ask/mid prices from the order book for a ticker.
-    /// Returns default (all None) if no book exists yet.
-    pub fn book_prices(&self, ticker: &str) -> BookPrices {
-        self.order_books
-            .get(ticker)
-            .map(extract_book_prices)
-            .unwrap_or(BookPrices { bid: None, ask: None, mid: None })
-    }
 }
 
 pub type SharedState = Arc<Mutex<BotState>>;
+
+/// Order books in a RwLock: WS deltas write, strategies/dashboard read concurrently.
+/// Separated from BotState so orderbook updates (highest frequency) don't block strategy evaluation.
+pub type SharedOrderBooks = Arc<tokio::sync::RwLock<HashMap<String, LocalOrderBook>>>;
+
+/// Break evaluation log for the dashboard. Separated from BotState since it's dashboard-only.
+pub type SharedBreakLog = Arc<std::sync::Mutex<VecDeque<BreakEvalLog>>>;
 
 /// Thread-safe trade logger, independent of BotState to reduce lock contention.
 /// Uses std::sync::Mutex since all operations are fast (single SQLite INSERT).
@@ -99,7 +92,6 @@ pub fn create_bot_state(config: &Config) -> Result<(BotState, TradeLogger, Marke
 
     let state = BotState {
         game_state: GameStateManager::new(),
-        order_books: HashMap::new(),
         risk: RiskManager::new(
             config.risk.max_position_per_game,
             config.risk.max_total_exposure,
@@ -108,7 +100,6 @@ pub fn create_bot_state(config: &Config) -> Result<(BotState, TradeLogger, Marke
             config.risk.min_edge_threshold,
         ),
         order_manager: OrderManager::new(),
-        break_eval_log: VecDeque::new(),
     };
     Ok((state, logger, market_mapper))
 }

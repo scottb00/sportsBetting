@@ -1,9 +1,9 @@
-use crate::engine::bot::SharedState;
+use crate::engine::bot::{SharedState, SharedOrderBooks};
 use crate::espn::types::GamePhase;
 
 /// Clean up internal state for finished games.
 /// Kalshi auto-cancels orders when games settle, so no REST calls needed.
-pub async fn cleanup_finished_games(state: &SharedState) {
+pub async fn cleanup_finished_games(state: &SharedState, order_books: &SharedOrderBooks) {
     let mut s = state.lock().await;
 
     let finished_tickers: Vec<String> = s.game_state.games.values()
@@ -22,10 +22,18 @@ pub async fn cleanup_finished_games(state: &SharedState) {
     let count_before = s.game_state.games.len();
     s.game_state.cleanup_finished();
     s.order_manager.clear_committed_contracts(&finished_tickers);
-    for ticker in &finished_tickers {
-        s.order_books.remove(ticker);
-    }
+    s.order_manager.cleanup_stale_strategies();
     let removed = count_before - s.game_state.games.len();
+    drop(s);
+
+    // Remove order books for finished tickers (separate lock)
+    if !finished_tickers.is_empty() {
+        let mut books = order_books.write().await;
+        for ticker in &finished_tickers {
+            books.remove(ticker);
+        }
+    }
+
     if removed > 0 {
         tracing::info!("Cleaned up {} finished games ({} tickers)", removed, finished_tickers.len());
     }

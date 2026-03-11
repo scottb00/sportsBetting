@@ -1,23 +1,67 @@
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use crate::engine::bot::{BotState, BreakEvalLog, BreakMarketEval, SharedState, SharedLogger, StrategyRegistry};
+use crate::engine::bot::{BreakEvalLog, BreakMarketEval, SharedState, SharedLogger, StrategyRegistry};
+use crate::engine::game_state::GameState;
+use crate::engine::market_prep::book_prices;
 use crate::engine::order_manager::{OrderManager, OrderSignal};
 use crate::engine::risk::RiskManager;
+use crate::kalshi::orderbook::LocalOrderBook;
 use crate::kalshi::rest::KalshiRestClient;
+
+/// Snapshot of state needed for strategy evaluation (taken under lock, evaluated without lock).
+pub struct EvalSnapshot {
+    pub games: HashMap<String, GameState>,
+    pub risk: RiskManager,
+    /// Pre-computed committed contracts per ticker.
+    pub committed_contracts: HashMap<String, i64>,
+    /// Set of tickers that have resting orders or in-flight API calls.
+    pub resting_tickers: std::collections::HashSet<String>,
+}
+
+/// Build an EvalSnapshot from the current BotState (call while holding the lock).
+pub fn build_eval_snapshot(
+    state: &crate::engine::bot::BotState,
+) -> EvalSnapshot {
+    let games = state.game_state.games.clone();
+    let risk = state.risk.clone();
+
+    // Pre-compute committed contracts and resting status for all game tickers
+    let mut committed_contracts = HashMap::new();
+    let mut resting_tickers = std::collections::HashSet::new();
+    for game in games.values() {
+        for market in &game.kalshi_markets {
+            committed_contracts.insert(
+                market.ticker.clone(),
+                state.order_manager.committed_contracts(&market.ticker),
+            );
+            if state.order_manager.has_resting_order(&market.ticker) {
+                resting_tickers.insert(market.ticker.clone());
+            }
+        }
+    }
+
+    EvalSnapshot { games, risk, committed_contracts, resting_tickers }
+}
 
 /// Run all strategies and collect order signals.
 /// Evaluates across ALL markets per game, picks the best signal per game.
+///
+/// Operates on an EvalSnapshot taken from BotState, so the state lock is NOT held
+/// during evaluation. This allows WS fill processing to proceed concurrently.
 pub fn evaluate_strategies(
-    state: &mut BotState,
+    snapshot: &EvalSnapshot,
+    order_books: &HashMap<String, LocalOrderBook>,
+    break_log: &mut VecDeque<BreakEvalLog>,
     registry: &StrategyRegistry,
 ) -> Vec<OrderSignal> {
     let mut signals = Vec::new();
 
-    if state.risk.is_halted() {
+    if snapshot.risk.is_halted() {
         return signals;
     }
 
-    for game in state.game_state.games.values() {
+    for game in snapshot.games.values() {
         if !game.has_kalshi() {
             continue;
         }
@@ -36,13 +80,13 @@ pub fn evaluate_strategies(
 
         // Skip extreme prices — check if any market has mid in tradeable range
         let has_tradeable_mid = game.kalshi_markets.iter().any(|m| {
-            state.book_prices(&m.ticker).mid.is_some_and(|mid| {
+            book_prices(order_books, &m.ticker).mid.is_some_and(|mid| {
                 (registry.min_price_cents..=registry.max_price_cents).contains(&mid)
             })
         });
         if !has_tradeable_mid {
             let mids: Vec<_> = game.kalshi_markets.iter()
-                .map(|m| format!("{}={:?}", m.ticker, state.book_prices(&m.ticker).mid))
+                .map(|m| format!("{}={:?}", m.ticker, book_prices(order_books, &m.ticker).mid))
                 .collect();
             if game.phase.is_live_or_break() || game.phase == crate::espn::types::GamePhase::PreGame {
                 tracing::debug!(
@@ -55,7 +99,7 @@ pub fn evaluate_strategies(
 
         // Check hard contract cap across all markets for this game
         let game_committed: i64 = game.kalshi_markets.iter()
-            .map(|m| state.order_manager.committed_contracts(&m.ticker))
+            .map(|m| snapshot.committed_contracts.get(&m.ticker).copied().unwrap_or(0))
             .sum();
         if game_committed >= registry.max_contracts_per_game {
             continue;
@@ -65,9 +109,8 @@ pub fn evaluate_strategies(
         // Compute exposure for Kelly sizing from committed contracts across all game tickers
         let current_exposure: f64 = game.kalshi_markets.iter()
             .map(|m| {
-                let contracts = state.order_manager.committed_contracts(&m.ticker);
-                // Approximate exposure: contracts * average price (use 0.50 as fallback)
-                let avg_price = state.book_prices(&m.ticker).mid.map(|mid| mid / 100.0).unwrap_or(0.50);
+                let contracts = snapshot.committed_contracts.get(&m.ticker).copied().unwrap_or(0);
+                let avg_price = book_prices(order_books, &m.ticker).mid.map(|mid| mid / 100.0).unwrap_or(0.50);
                 contracts as f64 * avg_price
             })
             .sum();
@@ -80,7 +123,7 @@ pub fn evaluate_strategies(
             let away_score = game.away_score.unwrap_or(0);
             for market in &game.kalshi_markets {
                 let fair = game.fair_value_for_market(market);
-                let prices = state.book_prices(&market.ticker);
+                let prices = book_prices(order_books, &market.ticker);
                 let kalshi_mid = prices.mid.map(|m| m / 100.0);
                 tracing::info!(
                     "BREAK: {} v {} | {} | score {}-{} | {} YES={} bid={:?} ask={:?} mid={:?} | espn_fair={:?} | vol={:?}",
@@ -138,7 +181,7 @@ pub fn evaluate_strategies(
 
             // Skip if any market in this game already has a resting order or in-flight
             let has_resting = game.kalshi_markets.iter().any(|m| {
-                state.order_manager.has_resting_order(&m.ticker)
+                snapshot.resting_tickers.contains(&m.ticker)
             });
             if has_resting {
                 if is_break {
@@ -150,7 +193,7 @@ pub fn evaluate_strategies(
                 continue;
             }
 
-            if let Some(mut signal) = strategy.evaluate(game, &state.risk, current_exposure, &state.order_books) {
+            if let Some(mut signal) = strategy.evaluate(game, &snapshot.risk, current_exposure, order_books) {
                 // Set expiration for non-CLV strategies (CLV sets its own in evaluate())
                 if signal.expiration_ts.is_none() {
                     let expire_at = chrono::Utc::now().timestamp() + registry.order_ttl.as_secs() as i64;
@@ -166,8 +209,7 @@ pub fn evaluate_strategies(
         if let Some(mut signal) = best_signal {
             signal.max_contracts = Some(contracts_remaining);
             if is_break {
-                // Log break eval with signal
-                state.break_eval_log.push_front(BreakEvalLog {
+                break_log.push_front(BreakEvalLog {
                     timestamp: chrono::Utc::now().to_rfc3339(),
                     away_team: game.away_team.clone(),
                     home_team: game.home_team.clone(),
@@ -176,7 +218,7 @@ pub fn evaluate_strategies(
                     markets: market_evals,
                     result: format!("SIGNAL: {} {:?} {}c", signal.kalshi_ticker, signal.side, signal.price_cents),
                 });
-                if state.break_eval_log.len() > 100 { state.break_eval_log.pop_back(); }
+                if break_log.len() > 100 { break_log.pop_back(); }
             }
             signals.push(signal);
         } else if is_break {
@@ -184,7 +226,7 @@ pub fn evaluate_strategies(
                 "BREAK RESULT: {} v {} | no signal generated",
                 game.away_team, game.home_team,
             );
-            state.break_eval_log.push_front(BreakEvalLog {
+            break_log.push_front(BreakEvalLog {
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 away_team: game.away_team.clone(),
                 home_team: game.home_team.clone(),
@@ -193,7 +235,7 @@ pub fn evaluate_strategies(
                 markets: market_evals,
                 result: "NO_SIGNAL".to_string(),
             });
-            if state.break_eval_log.len() > 100 { state.break_eval_log.pop_back(); }
+            if break_log.len() > 100 { break_log.pop_back(); }
         }
     }
 

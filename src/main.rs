@@ -1,3 +1,4 @@
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -6,8 +7,8 @@ use tracing_subscriber::EnvFilter;
 
 use sports_betting::config::Config;
 use sports_betting::engine::bot::{
-    self, SharedState, SharedLogger, SharedMapper, create_bot_state, create_strategies,
-    populate_game_states, fetch_summaries_for_games,
+    self, SharedState, SharedOrderBooks, SharedBreakLog, SharedLogger, SharedMapper,
+    create_bot_state, create_strategies, populate_game_states, fetch_summaries_for_games,
 };
 use sports_betting::engine::dashboard;
 use sports_betting::engine::handlers;
@@ -68,16 +69,20 @@ async fn main() -> Result<()> {
     ).await?;
 
     let state: SharedState = Arc::new(Mutex::new(bot_state));
+    let order_books: SharedOrderBooks = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+    let break_log: SharedBreakLog = Arc::new(std::sync::Mutex::new(VecDeque::new()));
     let mapper: SharedMapper = Arc::new(Mutex::new(market_mapper));
 
     // Start dashboard web server
     {
-        let dashboard_state = state.clone();
-        let dashboard_logger = logger.clone();
+        let dash_state = state.clone();
+        let dash_books = order_books.clone();
+        let dash_blog = break_log.clone();
+        let dash_logger = logger.clone();
         let db_path = config.logging.db_path.clone();
-        let dashboard_dry_run = config.kalshi.dry_run;
+        let dash_dry_run = config.kalshi.dry_run;
         tokio::spawn(async move {
-            if let Err(e) = dashboard::serve(dashboard_state, dashboard_logger, &db_path, 3030, dashboard_dry_run).await {
+            if let Err(e) = dashboard::serve(dash_state, dash_books, dash_blog, dash_logger, &db_path, 3030, dash_dry_run).await {
                 tracing::error!("Dashboard server failed: {:?}", e);
             }
         });
@@ -195,14 +200,14 @@ async fn main() -> Result<()> {
                     current_day = now_day;
                 }
                 handlers::handle_scoreboard_tick(
-                    &espn_poller, &state, &logger, &mut game_tracker,
-                    &strategies, &kalshi_rest, dry_run,
+                    &espn_poller, &state, &order_books, &break_log, &logger,
+                    &mut game_tracker, &strategies, &kalshi_rest, dry_run,
                     notifier.as_ref(),
                 ).await;
             }
             _ = maintenance_interval.tick() => {
                 handlers::handle_maintenance_tick(
-                    &state, &logger, &kalshi_rest, &espn_poller,
+                    &state, &order_books, &logger, &kalshi_rest, &espn_poller,
                     &mapper, kalshi_ws_handle.as_ref(),
                 ).await;
             }
@@ -212,7 +217,15 @@ async fn main() -> Result<()> {
                     None => std::future::pending().await,
                 }
             } => {
-                handlers::handle_kalshi_event(event, &state, &logger).await;
+                // On WS reconnect, immediately sync fills and reconcile positions
+                // to close the drift window from any fills missed during disconnect.
+                let is_reconnect = matches!(&event, sports_betting::kalshi::websocket::KalshiWsEvent::Connected);
+                handlers::handle_kalshi_event(event, &state, &order_books, &logger).await;
+                if is_reconnect {
+                    tracing::info!("WS reconnected — running immediate fill sync + position reconciliation");
+                    handlers::sync_fills(&state, &logger, &kalshi_rest).await;
+                    handlers::reconcile_positions(&state, &kalshi_rest).await;
+                }
             }
             Some(event) = async {
                 match &mut poly_rx {

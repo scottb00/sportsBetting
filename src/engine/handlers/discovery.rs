@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::engine::bot::{SharedState, SharedMapper, populate_game_states, fetch_and_apply_summary};
+use crate::engine::bot::{SharedState, SharedOrderBooks, SharedMapper, populate_game_states, fetch_and_apply_summary};
 use crate::engine::market_prep::{
     build_espn_for_matching, build_kalshi_for_matching,
     build_kalshi_volume, filter_events_for_dates, fetch_all_kalshi_cbb_events,
@@ -15,6 +15,7 @@ pub async fn discover_new_markets(
     kalshi_rest: &Arc<KalshiRestClient>,
     espn_poller: &EspnPoller,
     state: &SharedState,
+    order_books: &SharedOrderBooks,
     mapper: &SharedMapper,
     ws_handle: Option<&KalshiWsHandle>,
 ) {
@@ -119,8 +120,8 @@ pub async fn discover_new_markets(
     for ticker in &new_tickers {
         match kalshi_rest.get_orderbook(ticker).await {
             Ok(snapshot) => {
-                let mut s = state.lock().await;
-                let book = s.order_books
+                let mut books = order_books.write().await;
+                let book = books
                     .entry(ticker.clone())
                     .or_insert_with(|| crate::kalshi::orderbook::LocalOrderBook::new(ticker.clone()));
                 book.apply_snapshot(&snapshot);

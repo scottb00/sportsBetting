@@ -1,18 +1,22 @@
-use crate::engine::bot::{SharedState, SharedLogger};
+use crate::engine::bot::{SharedState, SharedOrderBooks, SharedLogger};
 use crate::engine::logger::GameInfo;
 use crate::engine::risk::RiskManager;
 use crate::kalshi::websocket::KalshiWsEvent;
 
 /// Handle a Kalshi WebSocket event.
+///
+/// Orderbook updates (snapshots/deltas) only lock order_books — not state.
+/// Fill processing locks state for risk/order updates, then logger separately.
 pub async fn handle_kalshi_event(
     event: KalshiWsEvent,
     state: &SharedState,
+    order_books: &SharedOrderBooks,
     logger: &SharedLogger,
 ) {
-    let mut s = state.lock().await;
     match event {
         KalshiWsEvent::OrderBookSnapshot { market_ticker, snapshot } => {
-            let book = s.order_books
+            let mut books = order_books.write().await;
+            let book = books
                 .entry(market_ticker.clone())
                 .or_insert_with(|| crate::kalshi::orderbook::LocalOrderBook::new(market_ticker.clone()));
             book.apply_snapshot(&snapshot);
@@ -20,7 +24,8 @@ pub async fn handle_kalshi_event(
         }
         KalshiWsEvent::OrderBookDelta(delta) => {
             let ticker = delta.market_ticker.clone();
-            if let Some(book) = s.order_books.get_mut(&ticker) {
+            let mut books = order_books.write().await;
+            if let Some(book) = books.get_mut(&ticker) {
                 book.apply_delta(&delta);
             } else {
                 tracing::debug!("Delta for unknown ticker {} (no snapshot yet)", ticker);
@@ -32,6 +37,8 @@ pub async fn handle_kalshi_event(
                 fill.market_ticker, fill.action, fill.side, fill.count,
                 fill.yes_price, fill.no_price,
             );
+
+            let mut s = state.lock().await;
 
             // In-memory dedup: skip if this fill was already processed (e.g. by REST fill sync)
             if s.order_manager.is_fill_processed(&fill.trade_id) {
@@ -80,7 +87,6 @@ pub async fn handle_kalshi_event(
                     None, // WS fills don't include timestamp; use current time
                 );
             }
-            // Fill notifications are handled by scoreboard handler (break_ev orders only)
         }
         KalshiWsEvent::Trade(trade) => {
             tracing::debug!(

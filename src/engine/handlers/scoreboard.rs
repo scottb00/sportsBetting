@@ -1,15 +1,20 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::engine::bot::{SharedState, SharedLogger, StrategyRegistry, BotState, fetch_and_apply_summary};
-use crate::engine::executor::{evaluate_strategies, execute_signal};
+use crate::engine::bot::{SharedState, SharedOrderBooks, SharedBreakLog, SharedLogger, StrategyRegistry, BotState, fetch_and_apply_summary};
+use crate::engine::executor::{build_eval_snapshot, evaluate_strategies, execute_signal};
 use crate::engine::notifier::Notifier;
 use crate::espn::poller::{EspnPoller, GameTracker};
+use crate::kalshi::orderbook::LocalOrderBook;
 use crate::kalshi::rest::KalshiRestClient;
 
 /// Handle an ESPN scoreboard poll tick.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_scoreboard_tick(
     espn_poller: &EspnPoller,
     state: &SharedState,
+    order_books: &SharedOrderBooks,
+    break_log: &SharedBreakLog,
     logger: &SharedLogger,
     game_tracker: &mut GameTracker,
     registry: &StrategyRegistry,
@@ -55,7 +60,10 @@ pub async fn handle_scoreboard_tick(
     }
 
     // CLV validation: check pre-game orders when game goes live
-    validate_clv_orders(&s, logger, &pregame_to_live);
+    {
+        let books = order_books.read().await;
+        validate_clv_orders(&s, &books, logger, &pregame_to_live);
+    }
 
     // Log break detection with context
     for event_id in &new_breaks {
@@ -77,15 +85,22 @@ pub async fn handle_scoreboard_tick(
         fetch_and_apply_summary(espn_poller, state, event_id, "Break ").await;
     }
 
-    // Re-acquire lock for strategy evaluation and logging
-    let mut s = state.lock().await;
-    // Prune stale in-flight entries (older than 60s) instead of blanket clearing,
-    // so API calls still in progress from a previous tick keep their guard.
-    s.order_manager.prune_stale_in_flight(std::time::Duration::from_secs(60));
-    log_game_summary(&s);
-
-    let signals = evaluate_strategies(&mut s, registry);
-    drop(s);
+    // Re-acquire lock for mutable pre-work, then snapshot and release before evaluation.
+    // This minimizes lock hold time: WS fill processing isn't blocked during strategy evaluation.
+    let snapshot = {
+        let mut s = state.lock().await;
+        // Prune stale in-flight entries (older than 60s) instead of blanket clearing,
+        // so API calls still in progress from a previous tick keep their guard.
+        s.order_manager.prune_stale_in_flight(std::time::Duration::from_secs(60));
+        log_game_summary(&s);
+        build_eval_snapshot(&s)
+    };
+    // State lock is now released — strategies evaluate on the snapshot
+    let signals = {
+        let books = order_books.read().await;
+        let mut blog = break_log.lock().unwrap();
+        evaluate_strategies(&snapshot, &books, &mut blog, registry)
+    };
 
     let mut placed = Vec::new();
     for signal in signals {
@@ -108,13 +123,18 @@ pub async fn handle_scoreboard_tick(
 }
 
 /// Validate CLV orders when games transition from pre-game to live.
-fn validate_clv_orders(s: &BotState, logger: &SharedLogger, pregame_to_live: &[String]) {
+fn validate_clv_orders(
+    s: &BotState,
+    order_books: &HashMap<String, LocalOrderBook>,
+    logger: &SharedLogger,
+    pregame_to_live: &[String],
+) {
     for event_id in pregame_to_live {
         if let Some(gs) = s.game_state.get(event_id) {
             let tickers: Vec<&str> = gs.kalshi_tickers();
             let clv_orders = s.order_manager.clv_orders_for_tickers(&tickers);
             for clv_order in clv_orders {
-                let closing_mid = s.order_books
+                let closing_mid = order_books
                     .get(&clv_order.ticker)
                     .and_then(|book| book.yes_mid())
                     .map(|mid| mid as i64);

@@ -201,6 +201,15 @@ fn extract_team_from_title(title: &str) -> String {
     }
 }
 
+/// Get bid/ask/mid for a ticker from an order books map.
+/// Returns all-None if the ticker has no book yet.
+pub fn book_prices(order_books: &HashMap<String, LocalOrderBook>, ticker: &str) -> BookPrices {
+    order_books
+        .get(ticker)
+        .map(extract_book_prices)
+        .unwrap_or(BookPrices { bid: None, ask: None, mid: None })
+}
+
 /// Extract bid/ask/mid from a local order book.
 pub fn extract_book_prices(book: &LocalOrderBook) -> BookPrices {
     BookPrices {

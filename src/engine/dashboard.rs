@@ -7,13 +7,16 @@ use axum::{
 use rusqlite::Connection;
 use serde::Serialize;
 
-use crate::engine::bot::{SharedState, SharedLogger};
+use crate::engine::bot::{SharedState, SharedOrderBooks, SharedBreakLog, SharedLogger};
+use crate::engine::market_prep::book_prices;
 use crate::engine::risk::RiskManager;
 
 /// Shared state for the dashboard server.
 #[derive(Clone)]
 struct DashboardState {
     bot: SharedState,
+    order_books: SharedOrderBooks,
+    break_log: SharedBreakLog,
     logger: SharedLogger,
     db_path: String,
     dry_run: bool,
@@ -133,13 +136,14 @@ async fn index() -> impl IntoResponse {
 
 async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
     let s = state.bot.lock().await;
+    let books = state.order_books.read().await;
     let mut games: Vec<GameView> = s.game_state.games.values().filter(|g| {
         // Skip games with TBD teams (e.g. tournament bracket placeholders)
         !g.home_team.eq_ignore_ascii_case("TBD") && !g.away_team.eq_ignore_ascii_case("TBD")
     }).map(|g| {
         let markets: Vec<MarketView> = g.kalshi_markets.iter().map(|m| {
             let fair_value = g.fair_value_for_market(m);
-            let prices = s.book_prices(&m.ticker);
+            let prices = book_prices(&books, &m.ticker);
             // Compute tradeable edge: pick the better side (YES or NO)
             let (edge, edge_side) = match (fair_value, prices.mid) {
                 (Some(fv), Some(mid)) => {
@@ -332,8 +336,8 @@ async fn api_fills(State(state): State<DashboardState>) -> impl IntoResponse {
 }
 
 async fn api_break_evals(State(state): State<DashboardState>) -> impl IntoResponse {
-    let s = state.bot.lock().await;
-    Json(s.break_eval_log.iter().cloned().collect::<Vec<_>>())
+    let blog = state.break_log.lock().unwrap();
+    Json(blog.iter().cloned().collect::<Vec<_>>())
 }
 
 async fn api_edge(State(state): State<DashboardState>) -> impl IntoResponse {
@@ -419,9 +423,19 @@ fn query_fills(db_path: &str) -> anyhow::Result<Vec<FillRow>> {
 
 // --- Server ---
 
-pub async fn serve(bot_state: SharedState, logger: SharedLogger, db_path: &str, port: u16, dry_run: bool) -> anyhow::Result<()> {
+pub async fn serve(
+    bot_state: SharedState,
+    order_books: SharedOrderBooks,
+    break_log: SharedBreakLog,
+    logger: SharedLogger,
+    db_path: &str,
+    port: u16,
+    dry_run: bool,
+) -> anyhow::Result<()> {
     let state = DashboardState {
         bot: bot_state,
+        order_books,
+        break_log,
         logger,
         db_path: db_path.to_string(),
         dry_run,

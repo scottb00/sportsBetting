@@ -30,7 +30,7 @@ src/
 │   ├── cancel_orders.rs — Utility to cancel all resting orders
 │   └── debug_kalshi.rs  — Utility to debug Kalshi API/markets
 ├── engine/
-│   ├── bot.rs           — BotState, SharedState, SharedLogger, SharedMapper types
+│   ├── bot.rs           — BotState, SharedState, SharedOrderBooks, SharedBreakLog, SharedLogger, SharedMapper types
 │   ├── game_state.rs    — GameState, KalshiMarketState, GameStateManager
 │   ├── market_mapper.rs — Fuzzy team matching + LLM fallback + direction flags
 │   ├── market_prep.rs   — Shared fetch/filter/build helpers, BookPrices
@@ -47,7 +47,8 @@ src/
 │       ├── cleanup.rs       — Internal cleanup for finished games (no REST calls)
 │       ├── discovery.rs     — Discover new Kalshi markets
 │       ├── order_sync.rs    — Sync resting orders from Kalshi REST
-│       └── fill_sync.rs     — Sync fills from Kalshi REST
+│       ├── fill_sync.rs     — Sync fills from Kalshi REST
+│       └── position_sync.rs — Reconcile positions with Kalshi REST
 ├── strategies/
 │   ├── mod.rs           — Strategy trait + StrategyRegistry
 │   ├── common.rs        — evaluate_edge(), evaluate_market(), ALO price calc
@@ -60,7 +61,9 @@ src/
 
 ### Key Types
 
-- `SharedState` = `Arc<Mutex<BotState>>` — hot-path mutable state (game_state, order_books, risk, order_manager)
+- `SharedState` = `Arc<Mutex<BotState>>` — core mutable state (game_state, risk, order_manager)
+- `SharedOrderBooks` = `Arc<RwLock<HashMap<String, LocalOrderBook>>>` — order books in separate RwLock; WS writes, strategies/dashboard read concurrently
+- `SharedBreakLog` = `Arc<std::sync::Mutex<VecDeque<BreakEvalLog>>>` — dashboard-only break eval data, separated to reduce state lock contention
 - `SharedLogger` = `Arc<std::sync::Mutex<TradeLogger>>` — independent SQLite logger lock (std::sync, no .await while held)
 - `SharedMapper` = `Arc<tokio::sync::Mutex<MarketMapper>>` — independent mapper lock (tokio::sync, held across .await in discovery)
 - `GameState` — per-game: ESPN probs, Kalshi markets, Polymarket price, phase, scores
@@ -69,7 +72,7 @@ src/
 - `StrategyRegistry` — holds all strategy instances, created at startup via `create_strategies()`
 
 ### Lock Ordering
-When multiple locks are needed, acquire in this order to prevent deadlocks: **mapper → state → logger**
+When multiple locks are needed, acquire in this order to prevent deadlocks: **mapper → state → order_books → break_log → logger**
 
 ## Critical Domain Knowledge
 
@@ -108,28 +111,44 @@ Optional (with defaults): `live_strategies` (["clv_hunter"]), `min_volume` (2000
 
 ## Deployment
 
-The bot runs on **Fly.io** (app: `sportsbetting-bot`, region: `iad` / US East).
-Dashboard URL: **https://sportsbetting-bot.fly.dev**
+The bot runs on a **DigitalOcean Droplet** (1 vCPU, 2GB RAM, Ubuntu 24.04, NYC3 region).
+Server IP: `165.227.117.108`
 
-- **Deploy**: `flyctl deploy` (builds via Dockerfile, multi-stage Rust build — takes several minutes)
-- **Logs**: `flyctl logs`
-- **SSH**: `flyctl ssh console`
-- **Start/stop**: `flyctl machine start <id>` / `flyctl machine stop <id>`
-- **Status**: `flyctl status`
-- **Secrets**: `CONFIG_TOML` and `KALSHI_PRIVATE_KEY` are stored as Fly secrets (injected by `entrypoint.sh`)
-- **Dashboard**: Exposed on port 3030 via Fly HTTP service (force HTTPS, auto_stop=false)
-- **VM**: `shared-cpu-1x`, 256MB RAM
+### Cross-compile & Deploy
+```bash
+# Build for Linux (from macOS)
+PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH" cargo build --release --target x86_64-unknown-linux-musl
 
-**CLI note**: On macOS, `fly` may not be in PATH. Use `/opt/homebrew/bin/flyctl` if `fly` is not found.
+# Upload binary
+scp target/x86_64-unknown-linux-musl/release/sports-betting root@165.227.117.108:/home/bot/app/sports-betting
 
-Key files:
-- `Dockerfile` — Multi-stage build (rust:1.94-bookworm → debian:bookworm-slim)
-- `fly.toml` — Fly.io app config
-- `entrypoint.sh` — Writes secrets to disk, then execs the binary
+# Restart
+ssh root@165.227.117.108 systemctl restart sports-betting
+```
 
-To update secrets: `flyctl secrets set CONFIG_TOML="$(cat config.toml)" KALSHI_PRIVATE_KEY="$(cat kalshi_private_key.pem)"`
+Requires `x86_64-unknown-linux-musl` rustup target and `musl-cross` brew package (already installed).
+Cargo cross-compilation config is in `.cargo/config.toml`.
 
-**IMPORTANT**: When config.rs changes (adding/removing fields), you MUST also update the CONFIG_TOML secret on Fly.io. The deployed binary will crash on startup if the config doesn't match the expected schema.
+### Server Layout
+- **Binary**: `/home/bot/app/sports-betting`
+- **Config**: `/home/bot/app/config.toml` (chmod 600)
+- **Key**: `/home/bot/app/kalshi_private_key.pem` (chmod 600)
+- **Service**: `sports-betting.service` (systemd, runs as `bot` user)
+- **Dashboard**: Port 3030 (direct access via `http://165.227.117.108:3030` or HTTPS via Caddy when configured)
+
+### Server Commands
+- **Logs**: `ssh root@165.227.117.108 journalctl -u sports-betting -f`
+- **Status**: `ssh root@165.227.117.108 systemctl status sports-betting`
+- **Restart**: `ssh root@165.227.117.108 systemctl restart sports-betting`
+- **Stop**: `ssh root@165.227.117.108 systemctl stop sports-betting`
+
+### Updating Config/Key
+```bash
+scp config.toml root@165.227.117.108:/home/bot/app/config.toml
+ssh root@165.227.117.108 'chown bot:bot /home/bot/app/config.toml && chmod 600 /home/bot/app/config.toml && systemctl restart sports-betting'
+```
+
+**IMPORTANT**: When config.rs changes (adding/removing fields), you MUST also update `config.toml` on the server. The binary will crash on startup if the config doesn't match the expected schema.
 
 ## Testing
 
@@ -160,5 +179,6 @@ The maintenance tick (default 30s, configurable via `intervals.maintenance_inter
 1. `cleanup_finished_games()` — internal state cleanup only (Kalshi auto-cancels settled orders)
 2. `discover_new_markets()` — find new Kalshi markets, map them, subscribe WS
 3. `sync_orders()` + `sync_fills()` — reconcile with Kalshi REST
+4. `reconcile_positions()` — compare local risk positions with Kalshi API, auto-correct drift
 
 Dashboard server runs as a separate tokio task on port 3030.

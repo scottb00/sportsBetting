@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 
 /// Tracks average entry price and size for a position (keyed by "ticker:side").
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct PositionEntry {
     avg_price: f64, // in dollars (0.0–1.0)
     contracts: i64,
 }
 
 /// Risk management and Kelly sizing.
+#[derive(Clone)]
 pub struct RiskManager {
     pub max_position_per_game: f64,  // dollars
     pub max_total_exposure: f64,     // dollars
@@ -176,6 +177,21 @@ impl RiskManager {
             });
             self.current_total_exposure += contracts as f64 * avg_price_cents as f64 / 100.0;
         }
+    }
+
+    /// Reset and re-seed position for a ticker from Kalshi API data.
+    /// Used by position reconciliation to correct drift from missed fills.
+    pub fn reseed_position(&mut self, ticker: &str, side: &str, avg_price_cents: i64, contracts: i64) {
+        // Remove old entries for both sides of this ticker
+        for s in ["yes", "no"] {
+            let key = format!("{}:{}", ticker, s);
+            if let Some(old) = self.positions.remove(&key) {
+                self.current_total_exposure -= old.avg_price * old.contracts as f64;
+            }
+        }
+        self.current_total_exposure = self.current_total_exposure.max(0.0);
+        // Re-seed with current position
+        self.seed_positions(ticker, side, avg_price_cents, contracts);
     }
 
     /// Net position for a ticker: positive = YES contracts, negative = NO contracts.

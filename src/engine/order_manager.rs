@@ -55,9 +55,12 @@ pub struct OrderManager {
     /// Tracks total contracts sent per ticker (resting + filled).
     /// This persists across order fills to prevent re-ordering the same game.
     committed_contracts: HashMap<String, i64>,
-    /// In-memory fill dedup: trade_ids we've already applied to state.
-    /// Prevents double-counting when both WS and REST fill sync process the same fill.
+    /// In-memory fill dedup (double-buffer): current + previous sets.
+    /// When current exceeds 500 entries, it rotates to previous and a new current starts.
+    /// This bounds memory while keeping recent fills for dedup.
+    /// SQLite UNIQUE constraint is the true dedup; this prevents double state updates.
     processed_fills: HashSet<String>,
+    processed_fills_prev: HashSet<String>,
     /// When we last synced with Kalshi.
     pub last_sync: Option<Instant>,
     /// High-water mark for fill sync: latest fill created_time as unix seconds.
@@ -80,6 +83,7 @@ impl OrderManager {
             order_strategies: HashMap::new(),
             committed_contracts: HashMap::new(),
             processed_fills: HashSet::new(),
+            processed_fills_prev: HashSet::new(),
             last_sync: None,
             last_fill_sync_ts: None,
         }
@@ -305,16 +309,17 @@ impl OrderManager {
     }
 
     /// Check if a fill has already been processed (in-memory dedup).
+    /// Checks both current and previous buffer for coverage across rotations.
     pub fn is_fill_processed(&self, trade_id: &str) -> bool {
-        self.processed_fills.contains(trade_id)
+        self.processed_fills.contains(trade_id) || self.processed_fills_prev.contains(trade_id)
     }
 
     /// Mark a fill as processed (in-memory dedup).
+    /// Uses double-buffer rotation: when current exceeds 500, swap to previous and start fresh.
+    /// This bounds total memory to ~1000 entries while keeping recent fills for dedup.
     pub fn mark_fill_processed(&mut self, trade_id: &str) {
-        // Cap the set to prevent unbounded growth over long sessions.
-        // SQLite INSERT OR IGNORE is the true dedup; this just prevents
-        // double-counting within a single sync cycle.
-        if self.processed_fills.len() > 10_000 {
+        if self.processed_fills.len() >= 500 {
+            std::mem::swap(&mut self.processed_fills, &mut self.processed_fills_prev);
             self.processed_fills.clear();
         }
         self.processed_fills.insert(trade_id.to_string());
@@ -369,6 +374,12 @@ impl OrderManager {
         for ticker in tickers {
             self.committed_contracts.remove(ticker.as_str());
         }
+    }
+
+    /// Clean up order_strategies entries that reference orders no longer resting.
+    /// Called during game cleanup to prevent unbounded growth over long runs.
+    pub fn cleanup_stale_strategies(&mut self) {
+        self.order_strategies.retain(|oid, _| self.resting_orders.contains_key(oid));
     }
 
     /// Get total committed contracts across multiple tickers (game-level check).
