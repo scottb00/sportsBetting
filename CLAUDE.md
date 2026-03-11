@@ -107,10 +107,18 @@ Key settings: `kalshi.dry_run = true` for paper trading. Risk params are at 0.1x
 
 ### Strategy Config Fields
 Required: `break_ev_min_edge`, `clv_hunter_min_edge`
-Optional (with defaults): `live_strategies` (["clv_hunter"]), `min_volume` (20000), `min_price_cents` (10.0), `max_price_cents` (90.0), `order_ttl_secs` (120), `max_contracts_per_game` (20)
+Optional (with defaults): `live_strategies` (["clv_hunter"]), `min_volume` (20000), `min_price_cents` (10.0), `max_price_cents` (90.0), `order_ttl_secs` (120), `max_contracts_per_game` (20), `contracts_per_pct_edge` (20.0), `min_trade_contracts` (5)
 
 **Note**: There is NO `arb_scanner_min_edge` field. The arb_scanner strategy was planned but never implemented.
 **Note**: The `summary_on_break_only` polling config field was removed (was parsed but never used).
+
+### Sizing Model (Target Position)
+Strategies use a **target-position model** (not Kelly). For each market:
+- `target = floor(edge_pct * contracts_per_pct_edge)` in the edge direction (0 if edge < min_edge)
+- `net = risk.net_position(ticker)` (current signed position: +YES, -NO)
+- If `target > 0` and `delta = target - net >= min_trade_contracts`: add contracts toward target
+- If `target == 0` and `net != 0`: close entire position (no edge threshold — just post passively)
+- No partial trims — only fully close when edge disappears entirely to avoid negative-EV trades
 
 ## Deployment
 

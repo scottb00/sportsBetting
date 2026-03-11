@@ -58,8 +58,8 @@ fn test_risk() -> RiskManager {
 fn make_registry(max_contracts_per_game: i64) -> StrategyRegistry {
     StrategyRegistry {
         strategies: vec![
-            Box::new(BreakEvQuoter::new(0.01)),
-            Box::new(ClvHunter::new(0.01)),
+            Box::new(BreakEvQuoter::new(0.01, 20.0, 1)),
+            Box::new(ClvHunter::new(0.01, 20.0, 1)),
         ],
         live_strategies: vec!["break_ev".into(), "clv_hunter".into()],
         min_volume: 1000,
@@ -103,6 +103,7 @@ fn make_bot_state_with_games(
     }
 
     let state = BotState {
+        started_at: chrono::Utc::now(),
         game_state: gsm,
         risk,
         order_manager: OrderManager::new(),
@@ -627,6 +628,7 @@ fn low_volume_games_produce_no_signals() {
     books.insert("LOW-VOL".to_string(), make_book("LOW-VOL", 48, 52));
 
     let state = BotState {
+        started_at: chrono::Utc::now(),
         game_state: gsm,
         risk,
         order_manager: OrderManager::new(),
@@ -663,6 +665,7 @@ fn extreme_price_games_produce_no_signals() {
     books.insert("EXTREME".to_string(), make_book("EXTREME", 97, 99));
 
     let state = BotState {
+        started_at: chrono::Utc::now(),
         game_state: gsm,
         risk,
         order_manager: OrderManager::new(),
@@ -711,7 +714,7 @@ fn can_trade_checks_halt_and_exposure() {
 #[test]
 fn no_signal_when_edge_below_threshold() {
     let risk = test_risk(); // min_edge = 0.01
-    let quoter = BreakEvQuoter::new(0.05); // strategy needs 5% edge
+    let quoter = BreakEvQuoter::new(0.05, 20.0, 1); // strategy needs 5% edge
 
     // Fair = 54%, market mid = 50c → edge ~3c after ALO pricing
     // This should be below the 5% threshold
@@ -919,6 +922,7 @@ fn make_single_game(
     books.insert("T0-AWAY".to_string(), make_book("T0-AWAY", away_book.0, away_book.1));
 
     let state = BotState {
+        started_at: chrono::Utc::now(),
         game_state: gsm,
         risk,
         order_manager: OrderManager::new(),

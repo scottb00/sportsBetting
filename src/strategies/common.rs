@@ -67,99 +67,160 @@ pub fn compute_edge_and_alo(yes_bid: i64, yes_ask: i64, fair_value: f64) -> Opti
 }
 
 /// Evaluate edge for a specific Kalshi market within a game.
-/// Returns an OrderSignal if edge exceeds threshold after fees.
 ///
-/// Logic:
-/// 1. Get ESPN fair value aligned with this market's YES side
-/// 2. Determine direction (buy YES or buy NO)
-/// 3. Price ALO: most aggressive passive price (ask-1 for YES, best NO ask-1 for NO)
-/// 4. Edge = |fair_value - order_price| (edge from actual fill price, not mid)
-/// 5. Subtract maker fees
-/// 6. Kelly-size the order
+/// Target-position model:
+/// 1. Compute target = floor(edge_pct * contracts_per_pct_edge) in the edge direction (0 if no edge).
+/// 2. Compare to current net_position(ticker).
+/// 3. If target > 0 and delta >= min_trade_contracts: emit add signal.
+/// 4. If target == 0 and net != 0: emit close signal (full position, no edge threshold).
 fn evaluate_market(
     game: &GameState,
     market: &KalshiMarketState,
     order_books: &HashMap<String, LocalOrderBook>,
     risk: &RiskManager,
-    current_game_exposure: f64,
     min_edge: f64,
     strategy_name: &str,
+    contracts_per_pct_edge: f64,
+    min_trade_contracts: i64,
 ) -> Option<OrderSignal> {
     let fair_value = game.fair_value_for_market(market)?;
 
-    // Derive prices from order book (single source of truth)
+    // Derive prices from order book
     let prices = order_books.get(&market.ticker).map(extract_book_prices)?;
     let yes_bid = prices.bid? as i64;
     let yes_ask = prices.ask? as i64;
 
-    let result = compute_edge_and_alo(yes_bid, yes_ask, fair_value)?;
-
-    if result.edge_after_fees < min_edge {
-        if result.edge_after_fees > 0.0 {
-            // Near-miss: positive edge after fees but below threshold
-            tracing::info!(
-                "{} near-miss: {} edge_after_fees={:.4} < min_edge={:.4} (edge={:.4}, fair={:.4}, price={}c)",
-                strategy_name, market.ticker, result.edge_after_fees, min_edge, result.edge_raw, fair_value, result.alo_price
-            );
+    // Step 1: compute target in signed YES-units (+ = hold YES, - = hold NO)
+    let target_signed: i64 = if let Some(r) = compute_edge_and_alo(yes_bid, yes_ask, fair_value) {
+        if r.edge_after_fees >= min_edge {
+            let n = (r.edge_after_fees * 100.0 * contracts_per_pct_edge).floor().max(1.0) as i64;
+            if r.buying_yes { n } else { -n }
         } else {
-            // Fees eat the edge entirely
-            let fee_per_contract = RiskManager::maker_fee(1, result.alo_price) / 100.0;
-            tracing::info!(
-                "{} fees-eaten: {} edge={:.4} but edge_after_fees={:.4} (fee={:.4}, fair={:.4}, price={}c)",
-                strategy_name, market.ticker, result.edge_raw, result.edge_after_fees, fee_per_contract, fair_value, result.alo_price
-            );
+            0
         }
-        return None;
-    }
-
-    let (side, action) = if result.buying_yes {
-        (OrderSide::Yes, OrderAction::Buy)
     } else {
-        (OrderSide::No, OrderAction::Buy)
+        0
     };
 
-    // Kelly sizing: use the fair prob for the side we're buying
-    let fair_for_side = if result.buying_yes { fair_value } else { 1.0 - fair_value };
-    let size = risk.kelly_size(fair_for_side, result.alo_price as f64, current_game_exposure);
-    if size <= 0.0 {
-        return None;
+    // Step 2: current signed position for this ticker
+    let net = risk.net_position(&market.ticker);
+
+    // Step 3: decide action
+    if target_signed != 0 {
+        // Case A: we have a target — only ADD toward it, never trim.
+        // delta = target_signed - net (signed: positive means need more YES, negative means need more NO)
+        // We should only add if delta has the same sign as target_signed (we're short of target).
+        // If signs differ (we're already past target), do nothing — trimming is negative EV.
+        let delta = target_signed - net;
+        if delta == 0 || delta.signum() != target_signed.signum() {
+            return None; // at or past target, don't trim
+        }
+        if delta.abs() < min_trade_contracts {
+            return None; // anti-scalp: delta too small to bother
+        }
+
+        // delta has same sign as target: add toward target direction
+        let (side, action, alo, edge) = if target_signed > 0 {
+            // Target is YES — buy YES
+            let alo = (yes_ask - 1).max(1);
+            let edge = if let Some(r) = compute_edge_and_alo(yes_bid, yes_ask, fair_value) {
+                r.edge_after_fees
+            } else {
+                return None;
+            };
+            (OrderSide::Yes, OrderAction::Buy, alo, edge)
+        } else {
+            // Target is NO (target_signed < 0) — buy NO
+            let alo = (100 - yes_bid - 1).max(1);
+            let edge = if let Some(r) = compute_edge_and_alo(yes_bid, yes_ask, fair_value) {
+                r.edge_after_fees
+            } else {
+                return None;
+            };
+            (OrderSide::No, OrderAction::Buy, alo, edge)
+        };
+
+        let contracts = delta.abs();
+        let size_dollars = contracts as f64 * alo as f64 / 100.0;
+
+        let mid = (yes_bid + yes_ask) as f64 / 2.0 / 100.0;
+        let fair_for_log = if matches!(side, OrderSide::Yes) { fair_value } else { 1.0 - fair_value };
+        let mid_for_log = if matches!(side, OrderSide::Yes) { mid } else { 1.0 - mid };
+        tracing::info!(
+            "{} ADD signal: {} {:?} at {}c, {} contracts (target={} net={}), edge {:.4}, fair {:.4}, mid {:.4}",
+            strategy_name, market.ticker, side, alo, contracts,
+            target_signed, net, edge, fair_for_log, mid_for_log
+        );
+
+        Some(OrderSignal {
+            strategy: strategy_name.to_string(),
+            kalshi_ticker: market.ticker.clone(),
+            side,
+            action,
+            price_cents: alo,
+            size_dollars,
+            post_only: true,
+            expiration_ts: None,
+            edge_after_fees: edge,
+            max_contracts: None,
+        })
+    } else if net != 0 {
+        // Case B: no edge, but we have a position — close it
+        let (side, action, alo) = if net > 0 {
+            // Long YES → close by buying NO
+            let alo = (100 - yes_bid - 1).max(1);
+            (OrderSide::No, OrderAction::Buy, alo)
+        } else {
+            // Long NO (short YES) → close by buying YES
+            let alo = (yes_ask - 1).max(1);
+            (OrderSide::Yes, OrderAction::Buy, alo)
+        };
+
+        let contracts = net.unsigned_abs() as i64;
+        let size_dollars = contracts as f64 * alo as f64 / 100.0;
+
+        tracing::info!(
+            "{} CLOSE signal: {} {:?} at {}c, {} contracts (net={}, target=0, no edge), fair {:.4}",
+            strategy_name, market.ticker, side, alo, contracts, net, fair_value
+        );
+
+        Some(OrderSignal {
+            strategy: strategy_name.to_string(),
+            kalshi_ticker: market.ticker.clone(),
+            side,
+            action,
+            price_cents: alo,
+            size_dollars,
+            post_only: true,
+            expiration_ts: None,
+            edge_after_fees: 0.0, // close orders have no required edge
+            max_contracts: None,
+        })
+    } else {
+        // Case C: no target, no position — nothing to do
+        None
     }
-
-    let mid = (yes_bid + yes_ask) as f64 / 2.0 / 100.0;
-    let mid_for_side = if result.buying_yes { mid } else { 1.0 - mid };
-    tracing::info!(
-        "{} signal: {} {:?} {:?} at {}c, size ${:.2}, edge {:.4} (after fees), fair {:.4}, mid {:.4}",
-        strategy_name, market.ticker, action, side, result.alo_price, size, result.edge_after_fees, fair_for_side, mid_for_side
-    );
-
-    Some(OrderSignal {
-        strategy: strategy_name.to_string(),
-        kalshi_ticker: market.ticker.clone(),
-        side,
-        action,
-        price_cents: result.alo_price,
-        size_dollars: size,
-        post_only: true,
-        expiration_ts: None,
-        edge_after_fees: result.edge_after_fees,
-        max_contracts: None, // set by executor based on per-game limit
-    })
 }
 
 /// Evaluate edge across ALL Kalshi markets for a game, return the best signal.
 pub fn evaluate_edge(
     game: &GameState,
     risk: &RiskManager,
-    current_game_exposure: f64,
+    _current_game_exposure: f64, // kept for trait compat; no longer used for sizing
     min_edge: f64,
     strategy_name: &str,
     order_books: &HashMap<String, LocalOrderBook>,
+    contracts_per_pct_edge: f64,
+    min_trade_contracts: i64,
 ) -> Option<OrderSignal> {
     let mut best: Option<OrderSignal> = None;
 
     for market in &game.kalshi_markets {
-        if let Some(signal) = evaluate_market(game, market, order_books, risk, current_game_exposure, min_edge, strategy_name)
-            && best.as_ref().is_none_or(|b| signal.edge_after_fees > b.edge_after_fees)
+        if let Some(signal) = evaluate_market(
+            game, market, order_books, risk,
+            min_edge, strategy_name,
+            contracts_per_pct_edge, min_trade_contracts,
+        ) && best.as_ref().is_none_or(|b| signal.edge_after_fees > b.edge_after_fees)
         {
             best = Some(signal);
         }

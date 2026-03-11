@@ -64,6 +64,8 @@ fn default_min_price_cents() -> f64 { 10.0 }
 fn default_max_price_cents() -> f64 { 90.0 }
 fn default_order_ttl_secs() -> u64 { 120 }
 fn default_max_contracts_per_game() -> i64 { 20 }
+fn default_contracts_per_pct_edge() -> f64 { 20.0 }
+fn default_min_trade_contracts() -> i64 { 5 }
 
 #[derive(Debug, Deserialize)]
 pub struct StrategyConfig {
@@ -86,6 +88,14 @@ pub struct StrategyConfig {
     /// Hard cap on total contracts per game (across all tickers/orders). Default: 20.
     #[serde(default = "default_max_contracts_per_game")]
     pub max_contracts_per_game: i64,
+    /// Contracts to target per 1% of edge above min_edge. Replaces Kelly sizing.
+    /// e.g. 20.0 means 3% edge → target 60 contracts. Default: 20.
+    #[serde(default = "default_contracts_per_pct_edge")]
+    pub contracts_per_pct_edge: f64,
+    /// Minimum contract delta required to place an add order (anti-scalp guard).
+    /// Prevents tiny top-up orders when position is already close to target. Default: 5.
+    #[serde(default = "default_min_trade_contracts")]
+    pub min_trade_contracts: i64,
 }
 
 #[derive(Debug, Deserialize)]

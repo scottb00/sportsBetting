@@ -179,7 +179,7 @@ fn clv_hunter_no_signal_without_espn() {
     use sports_betting::strategies::clv_hunter::ClvHunter;
     use sports_betting::engine::risk::RiskManager;
 
-    let hunter = ClvHunter::new(0.015);
+    let hunter = ClvHunter::new(0.015, 20.0, 1);
     let risk = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01);
 
     let (mut gs, books) = make_game_with_markets(None);
@@ -194,7 +194,7 @@ fn clv_hunter_signal_with_espn() {
     use sports_betting::strategies::clv_hunter::ClvHunter;
     use sports_betting::engine::risk::RiskManager;
 
-    let hunter = ClvHunter::new(0.01);
+    let hunter = ClvHunter::new(0.01, 20.0, 1);
     let risk = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01);
 
     // ESPN says 65% home, Kalshi mid is 50c → big edge
@@ -213,7 +213,7 @@ fn break_ev_no_signal_when_not_on_break() {
     use sports_betting::strategies::Strategy;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = BreakEvQuoter::new(0.015);
+    let quoter = BreakEvQuoter::new(0.015, 20.0, 1);
     let risk = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01);
 
     let (mut gs, books) = make_game_with_markets(Some(0.70));
@@ -227,7 +227,7 @@ fn break_ev_signals_on_halftime() {
     use sports_betting::strategies::break_ev::BreakEvQuoter;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = BreakEvQuoter::new(0.01);
+    let quoter = BreakEvQuoter::new(0.01, 20.0, 1);
     let risk = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01);
 
     let (mut gs, books) = make_game_with_markets(Some(0.70));
@@ -242,7 +242,7 @@ fn strategy_picks_best_market() {
     use sports_betting::strategies::break_ev::BreakEvQuoter;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = BreakEvQuoter::new(0.01);
+    let quoter = BreakEvQuoter::new(0.01, 20.0, 1);
     let risk = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01);
 
     let mut gs = make_game();
@@ -269,7 +269,7 @@ fn alo_buy_yes_prices_at_ask_minus_one() {
     use sports_betting::strategies::break_ev::BreakEvQuoter;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = BreakEvQuoter::new(0.01);
+    let quoter = BreakEvQuoter::new(0.01, 20.0, 1);
     let risk = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01);
 
     let mut gs = make_game();
@@ -293,7 +293,7 @@ fn alo_buy_no_prices_correctly() {
     use sports_betting::strategies::break_ev::BreakEvQuoter;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = BreakEvQuoter::new(0.01);
+    let quoter = BreakEvQuoter::new(0.01, 20.0, 1);
     let risk = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01);
 
     let mut gs = make_game();
@@ -321,7 +321,7 @@ fn clv_signal_sets_expiration_to_game_start() {
     use sports_betting::strategies::clv_hunter::ClvHunter;
     use sports_betting::engine::risk::RiskManager;
 
-    let hunter = ClvHunter::new(0.01);
+    let hunter = ClvHunter::new(0.01, 20.0, 1);
     let risk = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01);
 
     let (mut gs, books) = make_game_with_markets(Some(0.65));
@@ -339,7 +339,7 @@ fn clv_signal_no_expiration_without_start_time() {
     use sports_betting::strategies::clv_hunter::ClvHunter;
     use sports_betting::engine::risk::RiskManager;
 
-    let hunter = ClvHunter::new(0.01);
+    let hunter = ClvHunter::new(0.01, 20.0, 1);
     let risk = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01);
 
     let (mut gs, books) = make_game_with_markets(Some(0.65));
@@ -481,7 +481,7 @@ fn edge_calculated_from_order_price() {
     use sports_betting::strategies::break_ev::BreakEvQuoter;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = BreakEvQuoter::new(0.01);
+    let quoter = BreakEvQuoter::new(0.01, 20.0, 1);
     let risk = RiskManager::new(50.0, 500.0, 200.0, 0.5, 0.01);
 
     // Fair=0.60, ask=58 → order price=57c → edge=0.60-0.57=0.03 (before fees)
@@ -498,4 +498,144 @@ fn edge_calculated_from_order_price() {
     assert!(signal.is_some());
     let sig = signal.unwrap();
     assert_eq!(sig.price_cents, 57); // ask - 1
+}
+
+// ============================================================
+// Target-position sizing tests
+// ============================================================
+
+/// Helper: make a game ready for break_ev evaluation.
+fn make_halftime_game(espn_hp: f64) -> (GameState, HashMap<String, LocalOrderBook>) {
+    let mut gs = GameState::new("evt_sz".into(), "Duke".into(), "UNC".into());
+    gs.espn_home_win_prob = Some(espn_hp);
+    gs.phase = GamePhase::Halftime;
+    let mut mkt = KalshiMarketState::new("TEST-HOME".into(), true);
+    mkt.volume = Some(50000);
+    gs.kalshi_markets.push(mkt);
+    let mut books = HashMap::new();
+    books.insert("TEST-HOME".to_string(), make_book("TEST-HOME", 48, 52));
+    (gs, books)
+}
+
+/// Linear sizing: edge * 100 * contracts_per_pct_edge should equal contract count.
+/// Fair=0.70, YES ALO=51c, edge_raw=0.19, fee=0.01, edge_after_fees=0.18
+/// With N=10: target = floor(0.18 * 100 * 10) = 18 contracts.
+#[test]
+fn target_sizing_linear_from_edge() {
+    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::engine::risk::RiskManager;
+
+    let quoter = BreakEvQuoter::new(0.01, 1.0, 1);
+    let risk = RiskManager::new(500.0, 5000.0, 200.0, 0.5, 0.01);
+
+    let (gs, books) = make_halftime_game(0.70);
+    // fair=0.70, YES ALO=51c, edge_after_fees≈0.18 (FP: ~0.1799...), N=1 → target=floor(17.99...)=17
+    let signal = quoter.evaluate(&gs, &risk, 0.0, &books).unwrap();
+    let order = sports_betting::engine::order_manager::OrderManager::signal_to_order(&signal).unwrap();
+    assert_eq!(order.count, 17, "17 contracts at ~18% edge with N=1");
+}
+
+/// When already below target, add to fill the gap.
+/// Fair=0.70 → target=17. Seed 5 YES → delta=12 → add 12 YES.
+#[test]
+fn target_adds_toward_target_when_below() {
+    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::engine::risk::RiskManager;
+    use sports_betting::kalshi::types::OrderSide;
+
+    let quoter = BreakEvQuoter::new(0.01, 1.0, 1);
+    let mut risk = RiskManager::new(500.0, 5000.0, 200.0, 0.5, 0.01);
+    risk.seed_positions("TEST-HOME", "yes", 51, 5); // hold 5 YES
+
+    let (gs, books) = make_halftime_game(0.70); // target=17
+    let signal = quoter.evaluate(&gs, &risk, 0.0, &books).unwrap();
+    assert!(matches!(signal.side, OrderSide::Yes), "should add YES");
+    let order = sports_betting::engine::order_manager::OrderManager::signal_to_order(&signal).unwrap();
+    assert_eq!(order.count, 12, "add 12 to reach target of 17 from 5");
+}
+
+/// Anti-scalp guard: delta < min_trade_contracts → no signal.
+/// Fair=0.70 → target=17. Seed 16 YES → delta=1 < min_trade_contracts=5 → None.
+#[test]
+fn target_no_signal_when_delta_below_min_trade() {
+    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::engine::risk::RiskManager;
+
+    let quoter = BreakEvQuoter::new(0.01, 1.0, 5); // min_trade_contracts=5
+    let mut risk = RiskManager::new(500.0, 5000.0, 200.0, 0.5, 0.01);
+    risk.seed_positions("TEST-HOME", "yes", 51, 16); // hold 16, target=17, delta=1 < 5
+
+    let (gs, books) = make_halftime_game(0.70);
+    let signal = quoter.evaluate(&gs, &risk, 0.0, &books);
+    assert!(signal.is_none(), "delta=2 < min_trade_contracts=5 → no scalp signal");
+}
+
+/// No trimming: when above target but still have edge, do nothing.
+/// Fair=0.70 → target=17. Seed 30 YES (above target) → no signal emitted.
+#[test]
+fn target_no_trim_when_above_target() {
+    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::engine::risk::RiskManager;
+
+    let quoter = BreakEvQuoter::new(0.01, 1.0, 1);
+    let mut risk = RiskManager::new(500.0, 5000.0, 200.0, 0.5, 0.01);
+    risk.seed_positions("TEST-HOME", "yes", 51, 30); // hold 30, target=17, delta=-13 (above target)
+
+    let (gs, books) = make_halftime_game(0.70);
+    let signal = quoter.evaluate(&gs, &risk, 0.0, &books);
+    assert!(signal.is_none(), "above target → no trim, no signal");
+}
+
+/// Close entire position when edge disappears (ESPN fair ≈ market mid → target=0).
+/// Seed 10 YES. When fair=0.50 and mid=0.50, no edge → target=0 → close signal emitted.
+#[test]
+fn target_closes_position_when_edge_gone() {
+    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::engine::risk::RiskManager;
+    use sports_betting::kalshi::types::OrderSide;
+
+    let quoter = BreakEvQuoter::new(0.01, 1.0, 1);
+    let mut risk = RiskManager::new(500.0, 5000.0, 200.0, 0.5, 0.01);
+    risk.seed_positions("TEST-HOME", "yes", 51, 10); // hold 10 YES
+
+    // fair=0.50 exactly at mid → compute_edge_and_alo returns None → target=0
+    let (gs, books) = make_halftime_game(0.50);
+    let signal = quoter.evaluate(&gs, &risk, 0.0, &books).unwrap();
+    assert!(matches!(signal.side, OrderSide::No), "close YES by buying NO");
+    let order = sports_betting::engine::order_manager::OrderManager::signal_to_order(&signal).unwrap();
+    assert_eq!(order.count, 10, "close all 10 YES contracts");
+    assert_eq!(signal.edge_after_fees, 0.0, "close signal has no required edge");
+}
+
+/// No signal when flat position and no edge.
+#[test]
+fn target_no_signal_when_flat_and_no_edge() {
+    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::engine::risk::RiskManager;
+
+    let quoter = BreakEvQuoter::new(0.01, 1.0, 1);
+    let risk = RiskManager::new(500.0, 5000.0, 200.0, 0.5, 0.01);
+
+    let (gs, books) = make_halftime_game(0.50); // no edge, no position
+    let signal = quoter.evaluate(&gs, &risk, 0.0, &books);
+    assert!(signal.is_none());
+}
+
+/// When edge favors NO, target is negative (hold NO contracts).
+/// Fair=0.30 → buying NO at (100-48-1)=51c. edge_raw≈0.19, N=1 → target≈-17.
+/// From flat → add NO 17.
+#[test]
+fn target_sizes_correctly_for_no_side() {
+    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::engine::risk::RiskManager;
+    use sports_betting::kalshi::types::OrderSide;
+
+    let quoter = BreakEvQuoter::new(0.01, 1.0, 1);
+    let risk = RiskManager::new(500.0, 5000.0, 200.0, 0.5, 0.01);
+
+    let (gs, books) = make_halftime_game(0.30); // edge favors NO
+    let signal = quoter.evaluate(&gs, &risk, 0.0, &books).unwrap();
+    assert!(matches!(signal.side, OrderSide::No), "should buy NO");
+    let order = sports_betting::engine::order_manager::OrderManager::signal_to_order(&signal).unwrap();
+    assert_eq!(order.count, 17, "17 NO contracts with N=1 and ~0.18 edge");
 }

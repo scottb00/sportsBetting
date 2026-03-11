@@ -107,8 +107,9 @@ impl OrderManager {
         }
         self.last_sync = Some(Instant::now());
 
-        // Clean up CLV entries for orders no longer resting
+        // Clean up CLV and strategy entries for orders no longer resting
         self.clv_orders.retain(|oid, _| self.resting_orders.contains_key(oid));
+        self.order_strategies.retain(|oid, _| self.resting_orders.contains_key(oid));
 
         let new_count = self.resting_orders.len();
         if old_count != 0 || new_count != 0 {

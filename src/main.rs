@@ -77,10 +77,11 @@ async fn main() -> Result<()> {
         let dashboard_state = state.clone();
         let dashboard_books = order_books.clone();
         let dashboard_logger = logger.clone();
+        let dashboard_break_log = break_log.clone();
         let db_path = config.logging.db_path.clone();
         let dashboard_dry_run = config.kalshi.dry_run;
         tokio::spawn(async move {
-            if let Err(e) = dashboard::serve(dashboard_state, dashboard_books, dashboard_logger, &db_path, 3030, dashboard_dry_run).await {
+            if let Err(e) = dashboard::serve(dashboard_state, dashboard_books, dashboard_logger, dashboard_break_log, &db_path, 3030, dashboard_dry_run).await {
                 tracing::error!("Dashboard server failed: {:?}", e);
             }
         });

@@ -16,11 +16,13 @@ use super::common::evaluate_edge;
 /// to converge toward sharp lines by game time. Orders auto-expire at tipoff.
 pub struct ClvHunter {
     pub min_edge: f64,
+    pub contracts_per_pct_edge: f64,
+    pub min_trade_contracts: i64,
 }
 
 impl ClvHunter {
-    pub fn new(min_edge: f64) -> Self {
-        Self { min_edge }
+    pub fn new(min_edge: f64, contracts_per_pct_edge: f64, min_trade_contracts: i64) -> Self {
+        Self { min_edge, contracts_per_pct_edge, min_trade_contracts }
     }
 }
 
@@ -40,7 +42,10 @@ impl Strategy for ClvHunter {
         current_game_exposure: f64,
         order_books: &HashMap<String, LocalOrderBook>,
     ) -> Option<OrderSignal> {
-        let mut signal = evaluate_edge(game, risk, current_game_exposure, self.min_edge, self.name(), order_books)?;
+        let mut signal = evaluate_edge(
+            game, risk, current_game_exposure, self.min_edge, self.name(), order_books,
+            self.contracts_per_pct_edge, self.min_trade_contracts,
+        )?;
         // Set expiration to game start time so Kalshi auto-expires the order at tipoff
         signal.expiration_ts = game.start_time_ts;
         Some(signal)

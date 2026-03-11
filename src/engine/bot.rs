@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 
 use crate::config::Config;
@@ -50,6 +51,7 @@ pub struct BotState {
     pub game_state: GameStateManager,
     pub risk: RiskManager,
     pub order_manager: OrderManager,
+    pub started_at: DateTime<Utc>,
 }
 
 pub type SharedState = Arc<Mutex<BotState>>;
@@ -100,6 +102,7 @@ pub fn create_bot_state(config: &Config) -> Result<(BotState, TradeLogger, Marke
             config.risk.min_edge_threshold,
         ),
         order_manager: OrderManager::new(),
+        started_at: Utc::now(),
     };
     Ok((state, logger, market_mapper))
 }
@@ -110,8 +113,16 @@ pub fn create_strategies(config: &Config) -> StrategyRegistry {
     use crate::strategies::clv_hunter::ClvHunter;
 
     let strategies: Vec<Box<dyn Strategy>> = vec![
-        Box::new(BreakEvQuoter::new(config.strategy.break_ev_min_edge)),
-        Box::new(ClvHunter::new(config.strategy.clv_hunter_min_edge)),
+        Box::new(BreakEvQuoter::new(
+            config.strategy.break_ev_min_edge,
+            config.strategy.contracts_per_pct_edge,
+            config.strategy.min_trade_contracts,
+        )),
+        Box::new(ClvHunter::new(
+            config.strategy.clv_hunter_min_edge,
+            config.strategy.contracts_per_pct_edge,
+            config.strategy.min_trade_contracts,
+        )),
     ];
 
     tracing::info!("Live strategies: {:?}", config.strategy.live_strategies);

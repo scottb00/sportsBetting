@@ -7,7 +7,7 @@ use axum::{
 use rusqlite::Connection;
 use serde::Serialize;
 
-use crate::engine::bot::{SharedState, SharedOrderBooks, SharedLogger};
+use crate::engine::bot::{SharedState, SharedOrderBooks, SharedLogger, SharedBreakLog};
 use crate::engine::market_prep::book_prices;
 
 /// Shared state for the dashboard server.
@@ -15,7 +15,7 @@ use crate::engine::market_prep::book_prices;
 struct DashboardState {
     bot: SharedState,
     order_books: SharedOrderBooks,
-    logger: SharedLogger,
+    break_log: SharedBreakLog,
     db_path: String,
     dry_run: bool,
 }
@@ -67,6 +67,7 @@ struct RiskView {
     dry_run: bool,
     open_orders: usize,
     in_flight: usize,
+    started_at: String,
 }
 
 #[derive(Serialize)]
@@ -103,7 +104,7 @@ struct FillRow {
     action: String,
     price_cents: i64,
     count: i64,
-    fee_cents: f64,
+    fee_dollars: f64,
     filled_at: String,
     edge_bps: Option<f64>,
 }
@@ -124,21 +125,82 @@ async fn index() -> impl IntoResponse {
     Html(html)
 }
 
+// Snapshot structs for lock-free view building in api_games.
+struct MarketSnapshot {
+    ticker: String,
+    is_home: bool,
+    fair_value: Option<f64>,
+    bid: Option<f64>,
+    ask: Option<f64>,
+    mid: Option<f64>,
+    volume: Option<i64>,
+    has_resting: bool,
+    committed: i64,
+    position: i64,
+}
+
+struct GameSnapshot {
+    espn_event_id: String,
+    home_team: String,
+    away_team: String,
+    home_score: Option<i32>,
+    away_score: Option<i32>,
+    phase: String,
+    status_detail: String,
+    espn_home_win_prob: Option<f64>,
+    start_time_ts: Option<i64>,
+    markets: Vec<MarketSnapshot>,
+}
+
 async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
-    let books = state.order_books.read().await;
-    let s = state.bot.lock().await;
-    let mut games: Vec<GameView> = s.game_state.games.values().filter(|g| {
-        // Skip games with TBD teams (e.g. tournament bracket placeholders)
-        !g.home_team.eq_ignore_ascii_case("TBD") && !g.away_team.eq_ignore_ascii_case("TBD")
-    }).map(|g| {
-        let markets: Vec<MarketView> = g.kalshi_markets.iter().map(|m| {
-            let fair_value = g.fair_value_for_market(m);
-            let prices = book_prices(&books, &m.ticker);
-            // Compute tradeable edge: pick the better side (YES or NO)
-            let (edge, edge_side) = match (fair_value, prices.mid) {
+    // Phase 1: Snapshot all data under locks (O(1) lookups only, no string formatting).
+    let snapshots: Vec<GameSnapshot> = {
+        let books = state.order_books.read().await;
+        let s = state.bot.lock().await;
+        s.game_state.games.values()
+            .filter(|g| {
+                !g.home_team.eq_ignore_ascii_case("TBD") && !g.away_team.eq_ignore_ascii_case("TBD")
+            })
+            .map(|g| {
+                let markets = g.kalshi_markets.iter().map(|m| {
+                    let prices = book_prices(&books, &m.ticker);
+                    MarketSnapshot {
+                        ticker: m.ticker.clone(),
+                        is_home: m.is_home,
+                        fair_value: g.fair_value_for_market(m),
+                        bid: prices.bid,
+                        ask: prices.ask,
+                        mid: prices.mid,
+                        volume: m.volume,
+                        has_resting: s.order_manager.has_resting_order(&m.ticker),
+                        committed: s.order_manager.committed_contracts(&m.ticker),
+                        position: s.risk.net_position(&m.ticker),
+                    }
+                }).collect();
+                GameSnapshot {
+                    espn_event_id: g.espn_event_id.clone(),
+                    home_team: g.home_team.clone(),
+                    away_team: g.away_team.clone(),
+                    home_score: g.home_score,
+                    away_score: g.away_score,
+                    phase: format!("{:?}", g.phase),
+                    status_detail: g.status_detail.clone(),
+                    espn_home_win_prob: g.espn_home_win_prob,
+                    start_time_ts: g.start_time_ts,
+                    markets,
+                }
+            })
+            .collect()
+        // books and s (both locks) drop here
+    };
+
+    // Phase 2: Build view structs and sort — no locks held.
+    let mut games: Vec<GameView> = snapshots.into_iter().map(|g| {
+        let markets = g.markets.into_iter().map(|m| {
+            let (edge, edge_side) = match (m.fair_value, m.mid) {
                 (Some(fv), Some(mid)) => {
                     let mid_prob = mid / 100.0;
-                    let yes_edge = fv - mid_prob;       // positive = YES is cheap
+                    let yes_edge = fv - mid_prob;
                     if yes_edge >= 0.0 {
                         (Some(yes_edge), Some("YES".to_string()))
                     } else {
@@ -148,34 +210,34 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
                 _ => (None, None),
             };
             MarketView {
-                ticker: m.ticker.clone(),
+                ticker: m.ticker,
                 is_home: m.is_home,
-                yes_bid: prices.bid,
-                yes_ask: prices.ask,
-                yes_mid: prices.mid,
-                fair_value,
+                yes_bid: m.bid,
+                yes_ask: m.ask,
+                yes_mid: m.mid,
+                fair_value: m.fair_value,
                 edge,
                 edge_side,
                 volume: m.volume,
-                has_resting_order: s.order_manager.has_resting_order(&m.ticker),
-                exposure: s.order_manager.committed_contracts(&m.ticker) as f64,
-                position: s.risk.net_position(&m.ticker),
+                has_resting_order: m.has_resting,
+                exposure: m.committed as f64,
+                position: m.position,
             }
         }).collect();
-
         GameView {
-            espn_event_id: g.espn_event_id.clone(),
-            home_team: g.home_team.clone(),
-            away_team: g.away_team.clone(),
+            espn_event_id: g.espn_event_id,
+            home_team: g.home_team,
+            away_team: g.away_team,
             home_score: g.home_score,
             away_score: g.away_score,
-            phase: format!("{:?}", g.phase),
-            status_detail: g.status_detail.clone(),
+            phase: g.phase,
+            status_detail: g.status_detail,
             espn_home_win_prob: g.espn_home_win_prob,
             start_time_ts: g.start_time_ts,
             markets,
         }
     }).collect();
+
     // Sort: Live/Break first, then by start time (soonest first), Final last
     games.sort_by(|a, b| {
         let phase_ord = |p: &str| -> u8 {
@@ -210,7 +272,36 @@ async fn api_risk(State(state): State<DashboardState>) -> impl IntoResponse {
         dry_run: state.dry_run,
         open_orders: s.order_manager.open_order_count(),
         in_flight: s.order_manager.in_flight_count(),
+        started_at: s.started_at.to_rfc3339(),
     })
+}
+
+/// Per-ticker enrichment data snapshotted from live game state.
+struct TickerEnrich {
+    game_name: String,
+    home_team: String,
+    away_team: String,
+    is_home: bool,
+    fair_value: Option<f64>,
+}
+
+/// Build a ticker → enrichment map with a single pass over game state, then release the lock.
+async fn snapshot_ticker_enrich(state: &SharedState) -> std::collections::HashMap<String, TickerEnrich> {
+    let s = state.lock().await;
+    let mut map = std::collections::HashMap::new();
+    for game in s.game_state.games.values() {
+        let game_name = format!("{} vs {}", game.away_team, game.home_team);
+        for market in &game.kalshi_markets {
+            map.insert(market.ticker.clone(), TickerEnrich {
+                game_name: game_name.clone(),
+                home_team: game.home_team.clone(),
+                away_team: game.away_team.clone(),
+                is_home: market.is_home,
+                fair_value: game.fair_value_for_market(market),
+            });
+        }
+    }
+    map // lock dropped here
 }
 
 async fn api_orders(State(state): State<DashboardState>) -> impl IntoResponse {
@@ -221,23 +312,19 @@ async fn api_orders(State(state): State<DashboardState>) -> impl IntoResponse {
             vec![]
         }
     };
-    // Enrich with live game state (overrides DB values with fresher data, computes live edge)
-    let s = state.bot.lock().await;
+    // Snapshot enrichment data under one pass, then release state lock before iterating rows.
+    let enrich = snapshot_ticker_enrich(&state.bot).await;
     for row in &mut rows {
-        if let Some(game) = s.game_state.get_by_kalshi_ticker(&row.ticker) {
-            // Live state overrides persisted game info (fresher team names/matchups)
-            row.game_name = Some(format!("{} vs {}", game.away_team, game.home_team));
-            row.home_team = Some(game.home_team.clone());
-            row.away_team = Some(game.away_team.clone());
-            // Compute perceived edge: fair_value vs order price
-            if let Some(market) = game.kalshi_markets.iter().find(|m| m.ticker == row.ticker) {
-                row.is_home = Some(market.is_home);
-                if let Some(fv) = game.fair_value_for_market(market) {
-                    row.edge = Some(compute_order_edge(fv, row.price_cents, &row.side, &row.action));
-                }
+        if let Some(e) = enrich.get(&row.ticker) {
+            row.game_name = Some(e.game_name.clone());
+            row.home_team = Some(e.home_team.clone());
+            row.away_team = Some(e.away_team.clone());
+            row.is_home = Some(e.is_home);
+            if let Some(fv) = e.fair_value {
+                row.edge = Some(compute_order_edge(fv, row.price_cents, &row.side, &row.action));
             }
         }
-        // DB values (game_name, home_team, away_team, is_home) remain as fallback from query
+        // DB values remain as fallback for tickers no longer in live game state
     }
     Json(rows)
 }
@@ -250,34 +337,31 @@ async fn api_fills(State(state): State<DashboardState>) -> impl IntoResponse {
             vec![]
         }
     };
-    // Enrich with live game state (overrides DB values with fresher data, computes edge fallback)
-    let s = state.bot.lock().await;
+    // Snapshot enrichment data under one pass, then release state lock before iterating rows.
+    let enrich = snapshot_ticker_enrich(&state.bot).await;
     for row in &mut rows {
-        if let Some(game) = s.game_state.get_by_kalshi_ticker(&row.ticker) {
-            row.game_name = Some(format!("{} vs {}", game.away_team, game.home_team));
-            row.home_team = Some(game.home_team.clone());
-            row.away_team = Some(game.away_team.clone());
-            if let Some(market) = game.kalshi_markets.iter().find(|m| m.ticker == row.ticker) {
-                row.is_home = Some(market.is_home);
-                // Compute edge from live state if not stored in DB (e.g. synced/historical orders)
-                if row.edge_bps.is_none()
-                    && let Some(fv) = game.fair_value_for_market(market)
-                {
-                    row.edge_bps = Some(compute_order_edge(fv, row.price_cents, &row.side, &row.action) * 10000.0);
-                }
+        if let Some(e) = enrich.get(&row.ticker) {
+            row.game_name = Some(e.game_name.clone());
+            row.home_team = Some(e.home_team.clone());
+            row.away_team = Some(e.away_team.clone());
+            row.is_home = Some(e.is_home);
+            if row.edge_bps.is_none()
+                && let Some(fv) = e.fair_value
+            {
+                row.edge_bps = Some(compute_order_edge(fv, row.price_cents, &row.side, &row.action) * 10000.0);
             }
         }
-        // DB values (game_name, home_team, away_team, is_home) remain as fallback from query
+        // DB values remain as fallback for tickers no longer in live game state
     }
     Json(rows)
 }
 
 async fn api_edge(State(state): State<DashboardState>) -> impl IntoResponse {
-    let log = state.logger.lock().unwrap();
+    // Use read-only connections — no logger lock needed.
     let (total_edge_dollars, total_fills, avg_edge_bps) =
-        log.edge_summary().unwrap_or((0.0, 0, 0.0));
+        query_edge_summary(&state.db_path).unwrap_or((0.0, 0, 0.0));
     let (today_edge_dollars, today_fills) =
-        log.edge_summary_today().unwrap_or((0.0, 0));
+        query_edge_summary_today(&state.db_path).unwrap_or((0.0, 0));
     Json(EdgeSummary {
         total_edge_dollars,
         total_fills,
@@ -285,6 +369,29 @@ async fn api_edge(State(state): State<DashboardState>) -> impl IntoResponse {
         today_edge_dollars,
         today_fills,
     })
+}
+
+async fn api_break_evals(State(state): State<DashboardState>) -> impl IntoResponse {
+    let log = state.break_log.lock().unwrap();
+    let evals: Vec<_> = log.iter().cloned().collect();
+    Json(evals)
+}
+
+#[derive(Serialize)]
+struct DailyChartPoint {
+    ts: String,
+    fill_edge: Option<f64>,
+    fill_pnl: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct DailyChart {
+    points: Vec<DailyChartPoint>,
+}
+
+async fn api_daily_chart(State(state): State<DashboardState>) -> impl IntoResponse {
+    let points = query_daily_chart(&state.db_path).unwrap_or_default();
+    Json(DailyChart { points })
 }
 
 // --- SQLite queries (read-only connection) ---
@@ -356,7 +463,7 @@ fn query_fills(db_path: &str) -> anyhow::Result<Vec<FillRow>> {
             action: row.get(4)?,
             price_cents: row.get(5)?,
             count: row.get(6)?,
-            fee_cents: row.get(7)?,
+            fee_dollars: row.get(7)?,
             filled_at: row.get(8)?,
             edge_bps: row.get(10)?,
         })
@@ -364,13 +471,66 @@ fn query_fills(db_path: &str) -> anyhow::Result<Vec<FillRow>> {
     Ok(rows)
 }
 
+fn query_edge_summary(db_path: &str) -> anyhow::Result<(f64, i64, f64)> {
+    let conn = open_read_only(db_path)?;
+    let (total_edge_dollars, fill_count): (f64, i64) = conn.query_row(
+        "SELECT COALESCE(SUM(o.edge_bps / 10000.0 * f.price_cents * f.count / 100.0), 0.0),
+                COUNT(*)
+         FROM fills f
+         JOIN orders o ON f.order_id = o.order_id
+         WHERE o.edge_bps IS NOT NULL",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let avg_edge_bps = if fill_count > 0 {
+        total_edge_dollars / fill_count as f64 * 10000.0
+    } else {
+        0.0
+    };
+    Ok((total_edge_dollars, fill_count, avg_edge_bps))
+}
+
+fn query_edge_summary_today(db_path: &str) -> anyhow::Result<(f64, i64)> {
+    let conn = open_read_only(db_path)?;
+    let (total_edge_dollars, fill_count): (f64, i64) = conn.query_row(
+        "SELECT COALESCE(SUM(o.edge_bps / 10000.0 * f.price_cents * f.count / 100.0), 0.0),
+                COUNT(*)
+         FROM fills f
+         JOIN orders o ON f.order_id = o.order_id
+         WHERE o.edge_bps IS NOT NULL AND date(f.filled_at) = date('now')",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok((total_edge_dollars, fill_count))
+}
+
+fn query_daily_chart(db_path: &str) -> anyhow::Result<Vec<DailyChartPoint>> {
+    let conn = open_read_only(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT f.filled_at,
+                CASE WHEN o.edge_bps IS NOT NULL THEN o.edge_bps / 10000.0 * f.price_cents * f.count / 100.0 ELSE NULL END AS fill_edge
+         FROM fills f
+         LEFT JOIN orders o ON f.order_id = o.order_id
+         WHERE date(f.filled_at) = date('now')
+         ORDER BY f.filled_at ASC"
+    )?;
+    let points = stmt.query_map([], |row| {
+        Ok(DailyChartPoint {
+            ts: row.get(0)?,
+            fill_edge: row.get(1)?,
+            fill_pnl: None,
+        })
+    })?.filter_map(|r| r.ok()).collect();
+    Ok(points)
+}
+
 // --- Server ---
 
-pub async fn serve(bot_state: SharedState, order_books: SharedOrderBooks, logger: SharedLogger, db_path: &str, port: u16, dry_run: bool) -> anyhow::Result<()> {
+pub async fn serve(bot_state: SharedState, order_books: SharedOrderBooks, _logger: SharedLogger, break_log: SharedBreakLog, db_path: &str, port: u16, dry_run: bool) -> anyhow::Result<()> {
     let state = DashboardState {
         bot: bot_state,
         order_books,
-        logger,
+        break_log,
         db_path: db_path.to_string(),
         dry_run,
     };
@@ -382,6 +542,8 @@ pub async fn serve(bot_state: SharedState, order_books: SharedOrderBooks, logger
         .route("/api/orders", get(api_orders))
         .route("/api/fills", get(api_fills))
         .route("/api/edge", get(api_edge))
+        .route("/api/break_evals", get(api_break_evals))
+        .route("/api/daily_chart", get(api_daily_chart))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");

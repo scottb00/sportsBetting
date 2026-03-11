@@ -15,11 +15,13 @@ use super::common::evaluate_edge;
 /// posts passive limit orders at top of book.
 pub struct BreakEvQuoter {
     pub min_edge: f64,
+    pub contracts_per_pct_edge: f64,
+    pub min_trade_contracts: i64,
 }
 
 impl BreakEvQuoter {
-    pub fn new(min_edge: f64) -> Self {
-        Self { min_edge }
+    pub fn new(min_edge: f64, contracts_per_pct_edge: f64, min_trade_contracts: i64) -> Self {
+        Self { min_edge, contracts_per_pct_edge, min_trade_contracts }
     }
 }
 
@@ -39,6 +41,9 @@ impl Strategy for BreakEvQuoter {
         current_game_exposure: f64,
         order_books: &HashMap<String, LocalOrderBook>,
     ) -> Option<OrderSignal> {
-        evaluate_edge(game, risk, current_game_exposure, self.min_edge, self.name(), order_books)
+        evaluate_edge(
+            game, risk, current_game_exposure, self.min_edge, self.name(), order_books,
+            self.contracts_per_pct_edge, self.min_trade_contracts,
+        )
     }
 }
