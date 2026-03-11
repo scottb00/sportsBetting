@@ -117,12 +117,12 @@ pub async fn handle_scoreboard_tick(
         }
     }
 
-    // Send notifications for break_ev orders only
+    // Send notifications for break_ev, clv_hunter, and any reduce orders
     if let Some(n) = notifier {
-        let break_ev_orders: Vec<_> = placed.into_iter()
-            .filter(|o| o.strategy == "break_ev")
+        let notify_orders: Vec<_> = placed.into_iter()
+            .filter(|o| o.strategy == "break_ev" || o.strategy == "clv_hunter" || o.reduce_only)
             .collect();
-        n.notify_orders_batch(&break_ev_orders).await;
+        n.notify_orders_batch(&notify_orders).await;
     }
 }
 

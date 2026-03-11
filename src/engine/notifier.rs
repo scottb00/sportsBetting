@@ -59,10 +59,11 @@ impl Notifier {
 
         if orders.len() == 1 {
             let o = &orders[0];
-            let title = format!("Order: {} {}", o.action, o.ticker);
+            let order_type = order_type_label(o);
+            let title = format!("{} Order: {} {}", order_type, o.action, o.ticker);
             let mut body = String::new();
             if !o.game_label.is_empty() {
-                body.push_str(&format!("{}", o.game_label));
+                body.push_str(&o.game_label);
                 if !o.score.is_empty() {
                     body.push_str(&format!(" | {}", o.score));
                 }
@@ -85,6 +86,7 @@ impl Notifier {
         let mut lines = Vec::new();
         for o in orders {
             let mut line = String::new();
+            line.push_str(&format!("[{}] ", order_type_label(o)));
             if !o.game_label.is_empty() {
                 line.push_str(&format!("[{}]", o.game_label));
                 if !o.score.is_empty() {
@@ -107,6 +109,17 @@ impl Notifier {
         self.send(&title, &lines.join("\n")).await;
     }
 
+}
+
+/// Return a short label describing the order type for notification titles.
+fn order_type_label(o: &PlacedOrder) -> &'static str {
+    if o.reduce_only {
+        "REDUCE"
+    } else if o.strategy == "clv_hunter" {
+        "CLV"
+    } else {
+        "Break"
+    }
 }
 
 /// Escape special characters for Telegram MarkdownV2.

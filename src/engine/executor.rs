@@ -307,6 +307,8 @@ pub struct PlacedOrder {
     pub score: String,
     /// Game clock/status, e.g. "Halftime" or "2nd Half, 8:23"
     pub clock: String,
+    /// True if this order reduces existing game-level risk exposure.
+    pub reduce_only: bool,
 }
 
 /// Execute an order signal via Kalshi REST API (or log if dry_run).
@@ -325,7 +327,7 @@ pub async fn execute_signal(
 ) -> Option<PlacedOrder> {
     // Re-check risk AND contract limits under the lock right before building the order.
     // This closes the TOCTOU gap: state may have changed since evaluate_strategies ran.
-    let signal = {
+    let (signal, is_reduce) = {
         let s = state.lock().await;
 
         // Get game markets for reduce detection and cap computation.
@@ -377,7 +379,7 @@ pub async fn execute_signal(
         // Update max_contracts with the freshest cap
         let mut signal = signal;
         signal.max_contracts = Some(contracts_remaining);
-        signal
+        (signal, is_reduce)
     };
 
     let order_req = match OrderManager::signal_to_order(&signal) {
@@ -501,6 +503,7 @@ pub async fn execute_signal(
                 game_label,
                 score,
                 clock,
+                reduce_only: is_reduce,
             })
         }
         Err(e) => {
