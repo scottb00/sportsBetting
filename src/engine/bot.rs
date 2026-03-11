@@ -136,7 +136,7 @@ pub fn populate_game_states(
 ) {
     for game in games {
         let kalshi_market_infos: Vec<_> = mapper.kalshi_markets_for_game(&game.event_id).to_vec();
-        let poly_token = mapper.polymarket_token(&game.event_id).map(|t| t.to_string());
+        let poly_token = mapper.polymarket_token(&game.event_id).map(ToString::to_string);
         let poly_is_home = mapper.polymarket_is_home_team(&game.event_id);
 
         let gs = s.game_state.upsert(

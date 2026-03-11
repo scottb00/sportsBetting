@@ -326,7 +326,7 @@ async fn connect_kalshi_ws(
     let kalshi_ws = KalshiWsClient::new(auth.clone(), config.kalshi.demo);
     if !kalshi_tickers.is_empty() {
         tracing::info!("Connecting Kalshi WS for {} markets", kalshi_tickers.len());
-        let (rx, handle) = kalshi_ws.connect(kalshi_tickers).await?;
+        let (rx, handle) = kalshi_ws.connect(kalshi_tickers)?;
         Ok((Some(rx), Some(handle)))
     } else {
         tracing::warn!("No Kalshi markets mapped, skipping WS connection");
@@ -347,7 +347,7 @@ async fn connect_poly_ws(
 
     if !poly_tokens.is_empty() {
         tracing::info!("Connecting Polymarket WS for {} tokens", poly_tokens.len());
-        Ok(Some(PolymarketClient::connect_ws(poly_tokens).await?))
+        Ok(Some(PolymarketClient::connect_ws(poly_tokens)?))
     } else {
         tracing::warn!("No Polymarket tokens mapped, skipping WS connection");
         Ok(None)

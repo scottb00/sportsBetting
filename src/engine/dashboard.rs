@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::engine::bot::{SharedState, SharedOrderBooks, SharedBreakLog, SharedLogger};
 use crate::engine::market_prep::book_prices;
-use crate::engine::risk::RiskManager;
+use crate::strategies::common::compute_edge_and_alo;
 
 /// Shared state for the dashboard server.
 #[derive(Clone)]
@@ -161,28 +161,15 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
             let has_resting = s.order_manager.has_resting_order(&m.ticker);
             let (alo_price, edge_raw, edge_after_fees, eval_result) = if has_resting {
                 (None, None, None, Some("resting_order".to_string()))
-            } else if let (Some(fv), Some(bid), Some(ask), Some(mid)) = (fair_value, prices.bid, prices.ask, prices.mid) {
-                let bid_i = bid as i64;
-                let ask_i = ask as i64;
-                if bid_i <= 0 || ask_i >= 100 || bid_i >= ask_i {
-                    (None, None, None, Some("bad_book".to_string()))
-                } else {
-                    let mid_prob = mid / 100.0;
-                    let buying_yes = fv > mid_prob;
-                    let price = if buying_yes {
-                        (ask_i - 1).max(1)
-                    } else {
-                        (100 - bid_i - 1).max(1)
-                    };
-                    let order_prob = price as f64 / 100.0;
-                    let raw = if buying_yes { fv - order_prob } else { (1.0 - fv) - order_prob };
-                    if raw <= 0.0 {
-                        (Some(price), Some(raw), None, Some("no_edge".to_string()))
-                    } else {
-                        let fee = RiskManager::maker_fee(1, price) / 100.0;
-                        let net = raw - fee;
-                        let result = if net >= 0.015 { "signal" } else if net > 0.0 { "near_miss" } else { "fees_eaten" };
-                        (Some(price), Some(raw), Some(net), Some(result.to_string()))
+            } else if let (Some(fv), Some(bid), Some(ask)) = (fair_value, prices.bid, prices.ask) {
+                match compute_edge_and_alo(bid as i64, ask as i64, fv) {
+                    None if bid as i64 <= 0 || ask as i64 >= 100 || bid as i64 >= ask as i64 => {
+                        (None, None, None, Some("bad_book".to_string()))
+                    }
+                    None => (None, None, None, Some("no_edge".to_string())),
+                    Some(r) => {
+                        let result = if r.edge_after_fees >= 0.015 { "signal" } else if r.edge_after_fees > 0.0 { "near_miss" } else { "fees_eaten" };
+                        (Some(r.alo_price), Some(r.edge_raw), Some(r.edge_after_fees), Some(result.to_string()))
                     }
                 }
             } else {
@@ -384,7 +371,7 @@ fn query_orders(db_path: &str) -> anyhow::Result<Vec<OrderRow>> {
             created_at: row.get(8)?,
             edge: None,
         })
-    })?.filter_map(|r| r.ok()).collect();
+    })?.filter_map(Result::ok).collect();
     Ok(rows)
 }
 
@@ -417,7 +404,7 @@ fn query_fills(db_path: &str) -> anyhow::Result<Vec<FillRow>> {
             filled_at: row.get(8)?,
             edge_bps: row.get(10)?,
         })
-    })?.filter_map(|r| r.ok()).collect();
+    })?.filter_map(Result::ok).collect();
     Ok(rows)
 }
 

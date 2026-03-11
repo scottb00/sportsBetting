@@ -275,7 +275,7 @@ impl OrderManager {
 
     /// Get the strategy that placed an order (if known from this session).
     pub fn get_strategy(&self, order_id: &str) -> Option<&str> {
-        self.order_strategies.get(order_id).map(|s| s.as_str())
+        self.order_strategies.get(order_id).map(String::as_str)
     }
 
     /// Import strategies from DB into the in-memory map (for startup recovery).

@@ -62,13 +62,13 @@ impl KalshiWsClient {
 
     /// Start the WebSocket connection and return a receiver for events
     /// plus a handle for subscribing to additional tickers mid-session.
-    pub async fn connect(
+    pub fn connect(
         &self,
         market_tickers: Vec<String>,
     ) -> Result<(mpsc::UnboundedReceiver<KalshiWsEvent>, KalshiWsHandle)> {
         let (tx, rx) = mpsc::unbounded_channel();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        let all_tickers = Arc::new(StdMutex::new(market_tickers.clone()));
+        let all_tickers = Arc::new(StdMutex::new(market_tickers));
         let auth = self.auth.clone();
         let demo = self.demo;
         let tickers_for_task = all_tickers.clone();
@@ -229,7 +229,7 @@ impl KalshiWsClient {
 
         match msg_type {
             "orderbook_snapshot" => {
-                let ticker = data.get("market_ticker").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let ticker = data.get("market_ticker").and_then(|v| v.as_str()).map(ToString::to_string);
                 match serde_json::from_value::<OrderBookSnapshot>(data) {
                     Ok(snapshot) => {
                         if let Some(ticker) = ticker {

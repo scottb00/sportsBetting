@@ -26,13 +26,13 @@ impl KalshiRestClient {
         format!("{}{}", self.base_url, path)
     }
 
-    fn api_path(&self, path: &str) -> String {
+    fn api_path(path: &str) -> String {
         format!("/trade-api/v2{}", path)
     }
 
     /// Send an authenticated request, check status, and return the raw response.
     async fn request(&self, method: &str, path: &str, builder: reqwest::RequestBuilder) -> Result<reqwest::Response> {
-        let api_path = self.api_path(path);
+        let api_path = Self::api_path(path);
         let headers = self.auth.sign_request(method, &api_path)?;
 
         let resp = headers
@@ -133,16 +133,6 @@ impl KalshiRestClient {
     }
 
     // --- Market Data ---
-
-    pub async fn get_events(
-        &self,
-        category: Option<&str>,
-        status: Option<&str>,
-        cursor: Option<&str>,
-        limit: Option<i32>,
-    ) -> Result<GetEventsResponse> {
-        self.get_events_with_series(category, None, status, cursor, limit).await
-    }
 
     pub async fn get_events_with_series(
         &self,

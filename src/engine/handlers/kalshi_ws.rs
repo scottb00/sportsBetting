@@ -66,7 +66,7 @@ pub async fn handle_kalshi_event(
             let action = fill.action.clone();
             let count = fill.count;
             let fee_cents = RiskManager::maker_fee(count, price_cents);
-            let strategy = s.order_manager.get_strategy(&order_id).map(|s| s.to_string()).unwrap_or_default();
+            let strategy = s.order_manager.get_strategy(&order_id).map(ToString::to_string).unwrap_or_default();
             let game_info = GameInfo::from_game_state(&s.game_state, &ticker);
             drop(s);
             // Log under logger lock (separate from state lock)
@@ -88,12 +88,7 @@ pub async fn handle_kalshi_event(
                 );
             }
         }
-        KalshiWsEvent::Trade(trade) => {
-            tracing::debug!(
-                "Trade: {} {} contracts @ {} taker={}",
-                trade.market_ticker, trade.count, trade.yes_price, trade.taker_side
-            );
-        }
+        KalshiWsEvent::Trade(_) => {} // Ignored; public trades not used
         KalshiWsEvent::Connected => tracing::info!("Kalshi WebSocket connected"),
         KalshiWsEvent::Disconnected => tracing::warn!("Kalshi WebSocket disconnected"),
         KalshiWsEvent::Error(e) => tracing::error!("Kalshi WebSocket error: {}", e),

@@ -40,9 +40,6 @@ impl Strategy for ClvHunter {
         current_game_exposure: f64,
         order_books: &HashMap<String, LocalOrderBook>,
     ) -> Option<OrderSignal> {
-        if !self.can_evaluate(game) {
-            return None;
-        }
         let mut signal = evaluate_edge(game, risk, current_game_exposure, self.min_edge, self.name(), order_books)?;
         // Set expiration to game start time so Kalshi auto-expires the order at tipoff
         signal.expiration_ts = game.start_time_ts;

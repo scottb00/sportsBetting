@@ -8,6 +8,7 @@ use crate::engine::order_manager::{OrderManager, OrderSignal};
 use crate::engine::risk::RiskManager;
 use crate::kalshi::orderbook::LocalOrderBook;
 use crate::kalshi::rest::KalshiRestClient;
+use crate::strategies::common::compute_edge_and_alo;
 
 /// Snapshot of state needed for strategy evaluation (taken under lock, evaluated without lock).
 pub struct EvalSnapshot {
@@ -44,6 +45,60 @@ pub fn build_eval_snapshot(
     EvalSnapshot { games, risk, committed_contracts, resting_tickers }
 }
 
+/// Check whether a game should be skipped for strategy evaluation.
+/// Returns `Some(contracts_remaining)` if the game is eligible, `None` if it should be skipped.
+fn game_contracts_remaining(
+    game: &GameState,
+    snapshot: &EvalSnapshot,
+    order_books: &HashMap<String, LocalOrderBook>,
+    registry: &StrategyRegistry,
+) -> Option<i64> {
+    if !game.has_kalshi() {
+        return None;
+    }
+
+    // Skip low-volume games
+    let total_vol = game.kalshi_total_volume();
+    if total_vol < registry.min_volume {
+        if game.phase.is_live_or_break() {
+            tracing::debug!(
+                "SKIP (volume): {} v {} | vol={} < min={}",
+                game.away_team, game.home_team, total_vol, registry.min_volume,
+            );
+        }
+        return None;
+    }
+
+    // Skip extreme prices — check if any market has mid in tradeable range
+    let has_tradeable_mid = game.kalshi_markets.iter().any(|m| {
+        book_prices(order_books, &m.ticker).mid.is_some_and(|mid| {
+            (registry.min_price_cents..=registry.max_price_cents).contains(&mid)
+        })
+    });
+    if !has_tradeable_mid {
+        let mids: Vec<_> = game.kalshi_markets.iter()
+            .map(|m| format!("{}={:?}", m.ticker, book_prices(order_books, &m.ticker).mid))
+            .collect();
+        if game.phase.is_live_or_break() || game.phase == crate::espn::types::GamePhase::PreGame {
+            tracing::debug!(
+                "SKIP (no tradeable mid): {} v {} | mids={:?}",
+                game.away_team, game.home_team, mids,
+            );
+        }
+        return None;
+    }
+
+    // Check hard contract cap across all markets for this game
+    let game_committed: i64 = game.kalshi_markets.iter()
+        .map(|m| snapshot.committed_contracts.get(&m.ticker).copied().unwrap_or(0))
+        .sum();
+    if game_committed >= registry.max_contracts_per_game {
+        return None;
+    }
+
+    Some(registry.max_contracts_per_game - game_committed)
+}
+
 /// Run all strategies and collect order signals.
 /// Evaluates across ALL markets per game, picks the best signal per game.
 ///
@@ -62,49 +117,10 @@ pub fn evaluate_strategies(
     }
 
     for game in snapshot.games.values() {
-        if !game.has_kalshi() {
-            continue;
-        }
-
-        // Skip low-volume games
-        let total_vol = game.kalshi_total_volume();
-        if total_vol < registry.min_volume {
-            if game.phase.is_live_or_break() {
-                tracing::debug!(
-                    "SKIP (volume): {} v {} | vol={} < min={}",
-                    game.away_team, game.home_team, total_vol, registry.min_volume,
-                );
-            }
-            continue;
-        }
-
-        // Skip extreme prices — check if any market has mid in tradeable range
-        let has_tradeable_mid = game.kalshi_markets.iter().any(|m| {
-            book_prices(order_books, &m.ticker).mid.is_some_and(|mid| {
-                (registry.min_price_cents..=registry.max_price_cents).contains(&mid)
-            })
-        });
-        if !has_tradeable_mid {
-            let mids: Vec<_> = game.kalshi_markets.iter()
-                .map(|m| format!("{}={:?}", m.ticker, book_prices(order_books, &m.ticker).mid))
-                .collect();
-            if game.phase.is_live_or_break() || game.phase == crate::espn::types::GamePhase::PreGame {
-                tracing::debug!(
-                    "SKIP (no tradeable mid): {} v {} | mids={:?}",
-                    game.away_team, game.home_team, mids,
-                );
-            }
-            continue;
-        }
-
-        // Check hard contract cap across all markets for this game
-        let game_committed: i64 = game.kalshi_markets.iter()
-            .map(|m| snapshot.committed_contracts.get(&m.ticker).copied().unwrap_or(0))
-            .sum();
-        if game_committed >= registry.max_contracts_per_game {
-            continue;
-        }
-        let contracts_remaining = registry.max_contracts_per_game - game_committed;
+        let contracts_remaining = match game_contracts_remaining(game, snapshot, order_books, registry) {
+            Some(r) => r,
+            None => continue,
+        };
 
         // Compute exposure for Kelly sizing from committed contracts across all game tickers
         let current_exposure: f64 = game.kalshi_markets.iter()
@@ -137,21 +153,15 @@ pub fn evaluate_strategies(
 
                 // Compute ALO price and edge for the eval log
                 let (alo_price, edge_raw, edge_after_fees, side) =
-                    if let (Some(fv), Some(bid), Some(ask), Some(mid)) = (fair, prices.bid, prices.ask, prices.mid) {
-                        let bid_i = bid as i64;
-                        let ask_i = ask as i64;
-                        let mid_prob = mid / 100.0;
-                        if bid_i > 0 && ask_i < 100 && bid_i < ask_i {
-                            let buying_yes = fv > mid_prob;
-                            let price = if buying_yes { (ask_i - 1).max(1) } else { (100 - bid_i - 1).max(1) };
-                            let order_prob = price as f64 / 100.0;
-                            let raw = if buying_yes { fv - order_prob } else { (1.0 - fv) - order_prob };
-                            let fee = RiskManager::maker_fee(1, price) / 100.0;
-                            let net = if raw > 0.0 { raw - fee } else { raw };
-                            let side_str = if buying_yes { "YES" } else { "NO" };
-                            (Some(price), Some(raw), Some(net), Some(side_str.to_string()))
-                        } else {
-                            (None, None, None, None)
+                    if let (Some(fv), Some(bid), Some(ask)) = (fair, prices.bid, prices.ask) {
+                        match compute_edge_and_alo(bid as i64, ask as i64, fv) {
+                            Some(r) => (
+                                Some(r.alo_price),
+                                Some(r.edge_raw),
+                                Some(r.edge_after_fees),
+                                Some(if r.buying_yes { "YES" } else { "NO" }.to_string()),
+                            ),
+                            None => (None, None, None, None),
                         }
                     } else {
                         (None, None, None, None)

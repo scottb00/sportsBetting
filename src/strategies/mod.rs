@@ -24,8 +24,7 @@ pub trait Strategy: Send + Sync {
     fn can_evaluate(&self, game: &GameState) -> bool;
 
     /// Evaluate the game and optionally return an order signal.
-    /// Implementations should call `can_evaluate` internally as a guard,
-    /// so `evaluate` is safe to call directly without checking first.
+    /// The caller (executor) must check `can_evaluate` before calling this.
     /// `order_books` provides live bid/ask/mid prices (source of truth).
     fn evaluate(
         &self,

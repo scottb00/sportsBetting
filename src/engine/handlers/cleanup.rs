@@ -8,7 +8,7 @@ pub async fn cleanup_finished_games(state: &SharedState, order_books: &SharedOrd
 
     let finished_tickers: Vec<String> = s.game_state.games.values()
         .filter(|g| g.phase == GamePhase::Final)
-        .flat_map(|g| g.kalshi_tickers().into_iter().map(|t| t.to_string()))
+        .flat_map(|g| g.kalshi_tickers().into_iter().map(ToString::to_string))
         .collect();
 
     // Remove tracked orders for finished tickers

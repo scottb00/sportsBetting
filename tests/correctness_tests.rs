@@ -334,12 +334,12 @@ fn e2e_clv_only_pregame() {
 
     for phase in [GamePhase::Live, GamePhase::Halftime, GamePhase::Break, GamePhase::Final] {
         let (gs, books) = make_game_with_book(0.70, phase.clone(), 48.0, 52.0);
-        assert!(hunter.evaluate(&gs, &risk, 0.0, &books).is_none(),
+        assert!(!hunter.can_evaluate(&gs) || hunter.evaluate(&gs, &risk, 0.0, &books).is_none(),
             "CLV should not fire on phase {:?}", phase);
     }
 
     let (gs, books) = make_game_with_book(0.70, GamePhase::PreGame, 48.0, 52.0);
-    assert!(hunter.evaluate(&gs, &risk, 0.0, &books).is_some(),
+    assert!(hunter.can_evaluate(&gs) && hunter.evaluate(&gs, &risk, 0.0, &books).is_some(),
         "CLV should fire on PreGame with edge");
 }
 
@@ -350,13 +350,13 @@ fn e2e_break_ev_only_break_phases() {
 
     for phase in [GamePhase::PreGame, GamePhase::Live, GamePhase::Final] {
         let (gs, books) = make_game_with_book(0.70, phase.clone(), 48.0, 52.0);
-        assert!(quoter.evaluate(&gs, &risk, 0.0, &books).is_none(),
+        assert!(!quoter.can_evaluate(&gs) || quoter.evaluate(&gs, &risk, 0.0, &books).is_none(),
             "Break EV should not fire on phase {:?}", phase);
     }
 
     for phase in [GamePhase::Halftime, GamePhase::Break] {
         let (gs, books) = make_game_with_book(0.70, phase.clone(), 48.0, 52.0);
-        assert!(quoter.evaluate(&gs, &risk, 0.0, &books).is_some(),
+        assert!(quoter.can_evaluate(&gs) && quoter.evaluate(&gs, &risk, 0.0, &books).is_some(),
             "Break EV should fire on phase {:?}", phase);
     }
 }

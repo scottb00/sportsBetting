@@ -100,7 +100,7 @@ impl PolymarketClient {
     // --- WebSocket ---
 
     /// Connect to Polymarket WebSocket and stream price updates for given token IDs.
-    pub async fn connect_ws(
+    pub fn connect_ws(
         token_ids: Vec<String>,
     ) -> Result<mpsc::UnboundedReceiver<PolymarketEvent>> {
         let (tx, rx) = mpsc::unbounded_channel();

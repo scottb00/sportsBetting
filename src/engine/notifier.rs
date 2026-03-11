@@ -23,7 +23,7 @@ impl Notifier {
     }
 
     /// Send a notification. Fire-and-forget — errors are logged, not propagated.
-    pub async fn send(&self, title: &str, body: &str, _priority: Priority) {
+    pub async fn send(&self, title: &str, body: &str) {
         let text = format!("*{}*\n{}", escape_markdown(title), escape_markdown(body));
 
         let result = self.client
@@ -65,7 +65,7 @@ impl Notifier {
                 o.action, o.side, o.count, o.price_cents,
                 o.size_dollars, o.edge_after_fees * 100.0, o.strategy,
             );
-            self.send(&title, &body, Priority::High).await;
+            self.send(&title, &body).await;
             return;
         }
 
@@ -81,13 +81,9 @@ impl Notifier {
         }
         lines.push(format!("Total: ${:.2}", total_size));
 
-        self.send(&title, &lines.join("\n"), Priority::High).await;
+        self.send(&title, &lines.join("\n")).await;
     }
 
-}
-
-pub enum Priority {
-    High,
 }
 
 /// Escape special characters for Telegram MarkdownV2.

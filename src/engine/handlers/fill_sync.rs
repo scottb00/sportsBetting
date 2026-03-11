@@ -7,10 +7,9 @@ use crate::kalshi::rest::KalshiRestClient;
 /// Uses a high-water mark (latest fill timestamp) to only fetch new fills.
 ///
 /// Lock strategy: state and logger locks are never held simultaneously.
-/// Phase 1: read metadata under state lock
-/// Phase 2: log to SQLite under logger lock only
-/// Phase 3: apply state updates under state lock only
-/// Phase 4: collect order statuses under state lock, then write under logger lock
+/// Phase 1: read metadata + mark fills processed under state lock
+/// Phase 2: log fills + order statuses under logger lock only
+/// Phase 3: apply risk/order updates under state lock only
 pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest: &Arc<KalshiRestClient>) {
     // Read high-water mark from OrderManager (stored as unix seconds)
     let min_ts = {
@@ -33,89 +32,80 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
         return;
     }
 
-    // Phase 1: Collect metadata from state (game info, strategies) under state lock
-    struct FillContext {
-        game_info: Option<crate::engine::logger::GameInfo>,
-        strategy: Option<String>,
-        price_cents: i64,
-        fee_cents: f64,
-    }
-
-    let fill_contexts: Vec<FillContext> = {
-        let s = state.lock().await;
-        fills.iter().map(|fill| {
+    // Phase 1: Collect metadata from state and determine which fills are new, under state lock
+    let fill_data: Vec<(
+        usize,                                      // index
+        i64,                                        // price_cents
+        f64,                                        // fee_cents
+        Option<crate::engine::logger::GameInfo>,    // game_info
+        Option<String>,                             // strategy
+        bool,                                       // is_new (not already processed)
+    )> = {
+        let mut s = state.lock().await;
+        fills.iter().enumerate().map(|(i, fill)| {
             let price_cents = if fill.side == "yes" { fill.yes_price } else { fill.no_price };
             let fee_cents = fill.fee_cost.unwrap_or(0.0);
             let game_info = crate::engine::logger::GameInfo::from_game_state(&s.game_state, &fill.ticker);
-            let strategy = s.order_manager.get_strategy(&fill.order_id).map(|s| s.to_string());
-            FillContext { game_info, strategy, price_cents, fee_cents }
+            let strategy = s.order_manager.get_strategy(&fill.order_id).map(ToString::to_string);
+            let is_new = !s.order_manager.is_fill_processed(&fill.trade_id);
+            if is_new {
+                s.order_manager.mark_fill_processed(&fill.trade_id);
+            }
+            (i, price_cents, fee_cents, game_info, strategy, is_new)
         }).collect()
     };
     // state lock released
 
-    // Phase 2: Log to SQLite under logger lock only (no state lock held)
-    let new_fill_indices: Vec<usize> = {
-        let log = logger.lock().unwrap();
-        let mut new_indices = Vec::new();
+    let new_count: usize = fill_data.iter().filter(|d| d.5).count();
 
-        for (i, (fill, ctx)) in fills.iter().zip(fill_contexts.iter()).enumerate() {
+    // Phase 2: Log to SQLite and update order statuses under logger lock only
+    {
+        let log = logger.lock().unwrap();
+        for (i, price_cents, fee_cents, game_info, strategy, _is_new) in &fill_data {
+            let fill = &fills[*i];
+
             // Backfill stub order row
             let _ = log.log_order_if_missing(
                 &fill.order_id,
                 &fill.ticker,
                 &fill.action,
                 &fill.side,
-                ctx.price_cents,
+                *price_cents,
                 fill.count,
                 "filled",
                 Some(&fill.created_time),
-                ctx.game_info.as_ref(),
+                game_info.as_ref(),
             );
-            if let Some(ref strat) = ctx.strategy {
+            if let Some(strat) = strategy {
                 let _ = log.update_order_strategy(&fill.order_id, strat);
             }
 
-            // INSERT OR IGNORE: returns true if new row inserted, false if duplicate
-            match log.log_fill(
+            // INSERT OR IGNORE: log the fill
+            if let Err(e) = log.log_fill(
                 &fill.trade_id,
                 &fill.order_id,
                 &fill.ticker,
                 &fill.side,
                 &fill.action,
-                ctx.price_cents,
+                *price_cents,
                 fill.count,
-                ctx.fee_cents,
+                *fee_cents,
                 Some(&fill.created_time),
             ) {
-                Ok(true) => {
-                    new_indices.push(i);
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::warn!("Failed to log fill {}: {:?}", fill.trade_id, e);
-                }
+                tracing::warn!("Failed to log fill {}: {:?}", fill.trade_id, e);
             }
         }
-
-        new_indices
-    };
+    }
     // logger lock released
 
     // Phase 3: Apply state updates under state lock only (no logger lock)
-    // Also collect order statuses for Phase 4
-    let order_statuses: Vec<(String, String)>;
     {
         let mut s = state.lock().await;
-        for &i in &new_fill_indices {
-            let fill = &fills[i];
-            let _ctx = &fill_contexts[i];
-
-            // In-memory dedup: skip if WS handler already processed this fill
-            if s.order_manager.is_fill_processed(&fill.trade_id) {
+        for (i, _price_cents, _fee_cents, _game_info, _strategy, is_new) in &fill_data {
+            if !is_new {
                 continue;
             }
-            s.order_manager.mark_fill_processed(&fill.trade_id);
-
+            let fill = &fills[*i];
             s.order_manager.record_fill(&fill.order_id, fill.count);
             // NOTE: Do NOT call s.risk.record_fill() here. Risk state (exposure, positions)
             // is already seeded correctly from Kalshi positions API at startup via seed_positions().
@@ -129,8 +119,8 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
             s.order_manager.set_last_fill_sync_ts(dt.timestamp());
         }
 
-        // Collect order statuses while we hold the state lock
-        order_statuses = fills.iter().map(|fill| {
+        // Update order statuses in logger
+        let order_statuses: Vec<(String, String)> = fills.iter().map(|fill| {
             let status = if s.order_manager.has_resting_order(&fill.ticker) {
                 "partial_fill"
             } else {
@@ -138,18 +128,16 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
             };
             (fill.order_id.clone(), status.to_string())
         }).collect();
-    }
-    // state lock released
 
-    // Phase 4: Write order statuses under logger lock only (no state lock)
-    {
+        drop(s);
+        // Write order statuses under logger lock
         let log = logger.lock().unwrap();
         for (order_id, status) in &order_statuses {
             let _ = log.update_order_status(order_id, status);
         }
     }
 
-    if !new_fill_indices.is_empty() {
-        tracing::info!("Fill sync: logged {} new fills from Kalshi REST", new_fill_indices.len());
+    if new_count > 0 {
+        tracing::info!("Fill sync: logged {} new fills from Kalshi REST", new_count);
     }
 }

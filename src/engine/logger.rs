@@ -69,15 +69,6 @@ impl TradeLogger {
 
             CREATE UNIQUE INDEX IF NOT EXISTS idx_fills_trade_id ON fills(trade_id);
 
-            CREATE TABLE IF NOT EXISTS pnl_snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                strategy TEXT,
-                unrealized_pnl REAL,
-                realized_pnl REAL,
-                total_exposure REAL,
-                snapshot_at TEXT NOT NULL DEFAULT (datetime('now'))
-            );
-
             CREATE TABLE IF NOT EXISTS clv_checks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 order_id TEXT NOT NULL,
@@ -161,21 +152,6 @@ impl TradeLogger {
             rusqlite::params![trade_id, order_id, ticker, side, action, price_cents, count, fee_cents, filled_at],
         )?;
         Ok(rows > 0)
-    }
-
-    pub fn log_pnl_snapshot(
-        &self,
-        strategy: &str,
-        unrealized: f64,
-        realized: f64,
-        exposure: f64,
-    ) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO pnl_snapshots (strategy, unrealized_pnl, realized_pnl, total_exposure)
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![strategy, unrealized, realized, exposure],
-        )?;
-        Ok(())
     }
 
     /// Log a CLV (closing line value) check for a pre-game order.

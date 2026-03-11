@@ -39,9 +39,6 @@ impl Strategy for BreakEvQuoter {
         current_game_exposure: f64,
         order_books: &HashMap<String, LocalOrderBook>,
     ) -> Option<OrderSignal> {
-        if !self.can_evaluate(game) {
-            return None;
-        }
         evaluate_edge(game, risk, current_game_exposure, self.min_edge, self.name(), order_books)
     }
 }

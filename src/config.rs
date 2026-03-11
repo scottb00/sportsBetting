@@ -91,7 +91,6 @@ pub struct StrategyConfig {
 #[derive(Debug, Deserialize)]
 pub struct PollingConfig {
     pub scoreboard_interval_secs: u64,
-    pub summary_on_break_only: bool,
 }
 
 #[derive(Debug, Deserialize)]

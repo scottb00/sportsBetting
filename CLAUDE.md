@@ -51,7 +51,7 @@ src/
 │       └── position_sync.rs — Reconcile positions with Kalshi REST
 ├── strategies/
 │   ├── mod.rs           — Strategy trait + StrategyRegistry
-│   ├── common.rs        — evaluate_edge(), evaluate_market(), ALO price calc
+│   ├── common.rs        — evaluate_market(), compute_edge_and_alo(), ALO price calc
 │   ├── break_ev.rs      — Break-based +EV quoter (halftime/TV timeout)
 │   └── clv_hunter.rs    — Pre-game CLV hunting
 ├── kalshi/              — Auth (RSA-PSS), REST, WebSocket, orderbook, types
@@ -108,6 +108,7 @@ Required: `break_ev_min_edge`, `clv_hunter_min_edge`
 Optional (with defaults): `live_strategies` (["clv_hunter"]), `min_volume` (20000), `min_price_cents` (10.0), `max_price_cents` (90.0), `order_ttl_secs` (120), `max_contracts_per_game` (20)
 
 **Note**: There is NO `arb_scanner_min_edge` field. The arb_scanner strategy was planned but never implemented.
+**Note**: The `summary_on_break_only` polling config field was removed (was parsed but never used).
 
 ## Deployment
 
@@ -162,7 +163,9 @@ ssh root@165.227.117.108 'chown bot:bot /home/bot/app/config.toml && chmod 600 /
 - Strategies return `Vec<OrderSignal>`, deduped to best-per-ticker in `scoreboard.rs` handler
 - `has_strategy_order()` on OrderManager prevents duplicate orders across ticks
 - `evaluate_market()` in `strategies/common.rs` is the shared edge calculation used by both strategies
-- Error handling uses `anyhow::Result` throughout; `thiserror` for typed errors in kalshi module
+- `compute_edge_and_alo()` in `strategies/common.rs` is the shared edge/ALO helper used by strategies, executor, and dashboard
+- The executor checks `can_evaluate()` before calling `evaluate()` — strategies do NOT self-guard
+- Error handling uses `anyhow::Result` throughout
 
 ## Main Event Loop (src/main.rs)
 

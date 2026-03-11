@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
         {
             println!("=== {} — {} events ===", series, resp.events.len());
             for event in &resp.events {
-                let market_count = event.markets.as_ref().map(|m| m.len()).unwrap_or(0);
+                let market_count = event.markets.as_ref().map(Vec::len).unwrap_or(0);
                 println!("  {} | {} | markets={}", event.event_ticker, event.title, market_count);
                 if let Some(markets) = &event.markets {
                     for m in markets {

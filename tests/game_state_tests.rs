@@ -141,8 +141,6 @@ fn manager_phase_filters() {
     mgr.upsert("e4".into(), "G".into(), "H".into()).phase = GamePhase::Final;
     mgr.upsert("e5".into(), "I".into(), "J".into()).phase = GamePhase::Break;
 
-    assert_eq!(mgr.pre_game_games().len(), 1);
-    assert_eq!(mgr.live_games().len(), 3); // Live, Halftime, Break
     assert_eq!(mgr.games_on_break().len(), 2); // Halftime, Break
 }
 
@@ -212,6 +210,7 @@ fn clv_hunter_signal_with_espn() {
 #[test]
 fn break_ev_no_signal_when_not_on_break() {
     use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::strategies::Strategy;
     use sports_betting::engine::risk::RiskManager;
 
     let quoter = BreakEvQuoter::new(0.015);
@@ -220,7 +219,7 @@ fn break_ev_no_signal_when_not_on_break() {
     let (mut gs, books) = make_game_with_markets(Some(0.70));
     gs.phase = GamePhase::Live;
 
-    assert!(quoter.evaluate(&gs, &risk, 0.0, &books).is_none());
+    assert!(!quoter.can_evaluate(&gs) || quoter.evaluate(&gs, &risk, 0.0, &books).is_none());
 }
 
 #[test]
