@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::engine::bot::{SharedState, SharedOrderBooks, SharedMapper, populate_game_states, fetch_and_apply_summary};
@@ -11,6 +12,8 @@ use crate::kalshi::rest::KalshiRestClient;
 use crate::kalshi::websocket::KalshiWsHandle;
 
 /// Discover new Kalshi markets that appeared after startup.
+/// `unmapped_tickers` tracks tickers that were previously attempted but could not be mapped,
+/// so we avoid re-fetching and re-logging them every maintenance tick.
 pub async fn discover_new_markets(
     kalshi_rest: &Arc<KalshiRestClient>,
     espn_poller: &EspnPoller,
@@ -18,6 +21,7 @@ pub async fn discover_new_markets(
     order_books: &SharedOrderBooks,
     mapper: &SharedMapper,
     ws_handle: Option<&KalshiWsHandle>,
+    unmapped_tickers: &mut HashSet<String>,
 ) {
     let (today, _, date_tags) = today_and_tomorrow_tags();
     let mut kalshi_events = fetch_all_kalshi_cbb_events(kalshi_rest).await;
@@ -34,7 +38,9 @@ pub async fn discover_new_markets(
     let new_events: Vec<_> = kalshi_for_matching
         .iter()
         .filter(|(_, _, markets)| {
-            markets.iter().any(|(ticker, _)| !already_mapped.contains(ticker))
+            markets.iter().any(|(ticker, _)| {
+                !already_mapped.contains(ticker) && !unmapped_tickers.contains(ticker)
+            })
         })
         .collect();
 
@@ -76,6 +82,19 @@ pub async fn discover_new_markets(
         .difference(&tickers_before)
         .cloned()
         .collect();
+
+    // Track tickers that were attempted but not mapped, so we skip them next tick
+    let new_ticker_set: HashSet<&String> = new_tickers.iter().collect();
+    for (_, _, markets) in &new_events {
+        for (ticker, _) in markets {
+            if !already_mapped.contains(ticker) && !new_ticker_set.contains(ticker) {
+                unmapped_tickers.insert(ticker.clone());
+            }
+        }
+    }
+    if !unmapped_tickers.is_empty() {
+        tracing::debug!("Discovery: {} tickers in unmapped skip set", unmapped_tickers.len());
+    }
 
     if new_tickers.is_empty() {
         return;

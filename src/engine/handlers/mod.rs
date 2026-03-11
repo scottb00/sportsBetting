@@ -16,6 +16,7 @@ pub use polymarket_ws::handle_polymarket_event;
 pub use position_sync::reconcile_positions;
 pub use scoreboard::handle_scoreboard_tick;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use crate::engine::bot::{SharedState, SharedOrderBooks, SharedMapper, SharedLogger};
 use crate::espn::poller::EspnPoller;
@@ -24,6 +25,7 @@ use crate::kalshi::websocket::KalshiWsHandle;
 
 /// Combined maintenance tick: cleanup finished games, discover new markets,
 /// then sync orders, fills, and reconcile positions from Kalshi REST.
+/// `unmapped_tickers` tracks tickers that failed mapping to avoid redundant retries.
 pub async fn handle_maintenance_tick(
     state: &SharedState,
     order_books: &SharedOrderBooks,
@@ -32,9 +34,10 @@ pub async fn handle_maintenance_tick(
     espn_poller: &EspnPoller,
     mapper: &SharedMapper,
     ws_handle: Option<&KalshiWsHandle>,
+    unmapped_tickers: &mut HashSet<String>,
 ) {
     cleanup_finished_games(state, order_books, logger).await;
-    discover_new_markets(kalshi_rest, espn_poller, state, order_books, mapper, ws_handle).await;
+    discover_new_markets(kalshi_rest, espn_poller, state, order_books, mapper, ws_handle, unmapped_tickers).await;
     sync_orders(state, logger, kalshi_rest).await;
     sync_fills(state, logger, kalshi_rest).await;
     reconcile_positions(state, kalshi_rest).await;

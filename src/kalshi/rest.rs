@@ -31,23 +31,65 @@ impl KalshiRestClient {
     }
 
     /// Send an authenticated request, check status, and return the raw response.
+    /// Retries up to 3 times with exponential backoff on HTTP 429 (Too Many Requests).
     async fn request(&self, method: &str, path: &str, builder: reqwest::RequestBuilder) -> Result<reqwest::Response> {
         let api_path = Self::api_path(path);
         let headers = self.auth.sign_request(method, &api_path)?;
 
-        let resp = headers
+        let request = headers
             .apply(builder)
-            .send()
-            .await
-            .with_context(|| format!("{} {} failed", method, path))?;
+            .build()
+            .with_context(|| format!("Failed to build {} {} request", method, path))?;
 
-        let status = resp.status();
-        if !status.is_success() {
+        let max_retries = 3u32;
+        let mut last_body = String::new();
+        let mut last_status = reqwest::StatusCode::OK;
+
+        for attempt in 0..=max_retries {
+            let req = request
+                .try_clone()
+                .with_context(|| format!("Failed to clone {} {} request", method, path))?;
+
+            let resp = self
+                .client
+                .execute(req)
+                .await
+                .with_context(|| format!("{} {} failed", method, path))?;
+
+            let status = resp.status();
+            if status.is_success() {
+                return Ok(resp);
+            }
+
             let body = resp.text().await.unwrap_or_default();
+
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < max_retries {
+                let delay = 1u64 << attempt; // 1s, 2s, 4s
+                tracing::warn!(
+                    "{} {} returned 429, retrying in {}s (attempt {}/{})",
+                    method,
+                    path,
+                    delay,
+                    attempt + 1,
+                    max_retries
+                );
+                tokio::time::sleep(tokio::time::Duration::from_secs(delay)).await;
+                last_body = body;
+                last_status = status;
+                continue;
+            }
+
             anyhow::bail!("{} {} returned {}: {}", method, path, status, body);
         }
 
-        Ok(resp)
+        anyhow::bail!(
+            "{} {} returned {} after {} retries: {}",
+            method,
+            path,
+            last_status,
+            max_retries,
+            last_body
+        );
     }
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {

@@ -264,8 +264,22 @@ async fn main() -> Result<()> {
     }
 
     // --- Connect WebSockets ---
-    let (mut kalshi_rx, kalshi_ws_handle) = connect_kalshi_ws(&auth, &config, &mapper).await?;
-    let mut poly_rx = connect_poly_ws(&state).await?;
+    // WS failures are non-fatal: discovery/maintenance will retry, and the event loop
+    // already handles None receivers via std::future::pending().
+    let (mut kalshi_rx, kalshi_ws_handle) = match connect_kalshi_ws(&auth, &config, &mapper).await {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!("Kalshi WS connection failed on startup (will retry via discovery): {:?}", e);
+            (None, None)
+        }
+    };
+    let mut poly_rx = match connect_poly_ws(&state).await {
+        Ok(rx) => rx,
+        Err(e) => {
+            tracing::warn!("Polymarket WS connection failed on startup: {:?}", e);
+            None
+        }
+    };
 
     // --- Main event loop ---
     let mut game_tracker = GameTracker::new();
@@ -275,6 +289,7 @@ async fn main() -> Result<()> {
         tokio::time::interval(tokio::time::Duration::from_secs(config.intervals.maintenance_interval_secs));
     let mut current_day = today;
     let dry_run = config.kalshi.dry_run;
+    let mut unmapped_tickers = std::collections::HashSet::<String>::new();
 
     tracing::info!("Entering main event loop");
 
@@ -286,6 +301,7 @@ async fn main() -> Result<()> {
                     tracing::info!("New trading day: {} -> {}", current_day, now_day);
                     let mut s = state.lock().await;
                     s.risk.reset_daily();
+                    unmapped_tickers.clear();
                     current_day = now_day;
                 }
                 handlers::handle_scoreboard_tick(
@@ -298,6 +314,7 @@ async fn main() -> Result<()> {
                 handlers::handle_maintenance_tick(
                     &state, &order_books, &logger, &kalshi_rest, &espn_poller,
                     &mapper, kalshi_ws_handle.as_ref(),
+                    &mut unmapped_tickers,
                 ).await;
             }
             Some(event) = async {
