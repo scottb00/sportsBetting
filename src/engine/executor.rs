@@ -444,9 +444,14 @@ pub async fn execute_signal(
                 let s = state.lock().await;
                 let gi = crate::engine::logger::GameInfo::from_game_state(&s.game_state, &signal.kalshi_ticker);
                 let (label, sc, cl) = if let Some(game) = s.game_state.get_by_kalshi_ticker(&signal.kalshi_ticker) {
+                    let score = if game.phase.is_live_or_break() {
+                        format!("{}-{}", game.away_score.unwrap_or(0), game.home_score.unwrap_or(0))
+                    } else {
+                        String::new()
+                    };
                     (
                         format!("{} at {}", game.away_team, game.home_team),
-                        format!("{}-{}", game.away_score.unwrap_or(0), game.home_score.unwrap_or(0)),
+                        score,
                         game.status_detail.clone(),
                     )
                 } else {

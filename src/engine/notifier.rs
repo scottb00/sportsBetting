@@ -60,7 +60,8 @@ impl Notifier {
         if orders.len() == 1 {
             let o = &orders[0];
             let order_type = order_type_label(o);
-            let title = format!("{} Order: {} {}", order_type, o.action, o.ticker);
+            let contract = ticker_contract_label(&o.ticker, &o.side);
+            let title = format!("{} Order: {}", order_type, contract);
             let mut body = String::new();
             if !o.game_label.is_empty() {
                 body.push_str(&o.game_label);
@@ -73,8 +74,8 @@ impl Notifier {
                 body.push('\n');
             }
             body.push_str(&format!(
-                "{} {} {} contracts @ {}c\nSize: ${:.2}\nEdge: {:.1}%\nStrategy: {}",
-                o.action, o.side, o.count, o.price_cents,
+                "{} {} contracts @ {}c\nSize: ${:.2}\nEdge: {:.1}%\nStrategy: {}",
+                contract, o.count, o.price_cents,
                 o.size_dollars, o.edge_after_fees * 100.0, o.strategy,
             ));
             self.send(&title, &body).await;
@@ -85,6 +86,7 @@ impl Notifier {
         let title = format!("{} Orders Placed", orders.len());
         let mut lines = Vec::new();
         for o in orders {
+            let contract = ticker_contract_label(&o.ticker, &o.side);
             let mut line = String::new();
             line.push_str(&format!("[{}] ", order_type_label(o)));
             if !o.game_label.is_empty() {
@@ -98,8 +100,8 @@ impl Notifier {
                 line.push_str(" - ");
             }
             line.push_str(&format!(
-                "{} {} {}ct @ {}c ${:.2} (edge {:.1}%)",
-                o.action, o.side, o.count, o.price_cents,
+                "{} {}ct @ {}c ${:.2} (edge {:.1}%)",
+                contract, o.count, o.price_cents,
                 o.size_dollars, o.edge_after_fees * 100.0,
             ));
             lines.push(line);
@@ -109,6 +111,14 @@ impl Notifier {
         self.send(&title, &lines.join("\n")).await;
     }
 
+}
+
+/// Return a human-readable contract label, e.g. "Buy NO SFAUST".
+/// Uses only the team-code suffix of the Kalshi ticker (last `-`-delimited segment).
+fn ticker_contract_label(ticker: &str, side: &str) -> String {
+    let team_code = ticker.rsplit('-').next().unwrap_or(ticker);
+    let direction = if side == "Yes" { "Buy YES" } else { "Buy NO" };
+    format!("{} {}", direction, team_code)
 }
 
 /// Return a short label describing the order type for notification titles.

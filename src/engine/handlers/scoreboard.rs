@@ -182,6 +182,9 @@ async fn refresh_stale_clv_orders(
             Ok(()) => {
                 let mut s = state.lock().await;
                 s.order_manager.remove_order(order_id);
+                // Mark in-flight after cancel so the strategy cannot immediately re-place
+                // on the same tick. The 60s prune window acts as a cooldown.
+                s.order_manager.mark_in_flight(ticker);
                 tracing::info!("CLV stale: cancelled {} on {}, will re-evaluate", order_id, ticker);
             }
             Err(e) => {
