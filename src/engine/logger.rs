@@ -51,6 +51,7 @@ impl TradeLogger {
                 count INTEGER NOT NULL,
                 status TEXT NOT NULL,
                 edge_bps REAL,
+                fair_value_cents INTEGER,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
@@ -99,6 +100,7 @@ impl TradeLogger {
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN home_team TEXT");
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN away_team TEXT");
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN is_home INTEGER");
+        let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN fair_value_cents INTEGER");
         let _ = conn.execute_batch("ALTER TABLE fills ADD COLUMN fill_pnl REAL");
 
         Ok(Self { conn })
@@ -116,13 +118,28 @@ impl TradeLogger {
         count: i64,
         status: &str,
         edge_bps: Option<f64>,
+        fair_value_cents: Option<i64>,
         game_info: Option<&GameInfo>,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps, game_name, home_team, away_team, is_home, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            "INSERT INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps, fair_value_cents, game_name, home_team, away_team, is_home, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             ON CONFLICT(order_id) DO UPDATE SET
+               strategy = ?3,
+               action = ?4,
+               side = ?5,
+               price_cents = ?6,
+               count = ?7,
+               status = ?8,
+               edge_bps = COALESCE(?9, edge_bps),
+               fair_value_cents = COALESCE(?10, fair_value_cents),
+               game_name = COALESCE(?11, game_name),
+               home_team = COALESCE(?12, home_team),
+               away_team = COALESCE(?13, away_team),
+               is_home = COALESCE(?14, is_home)",
             rusqlite::params![
                 order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps,
+                fair_value_cents,
                 game_info.map(|g| g.game_name.as_str()),
                 game_info.map(|g| g.home_team.as_str()),
                 game_info.map(|g| g.away_team.as_str()),
@@ -149,8 +166,11 @@ impl TradeLogger {
         filled_at: Option<&str>,
     ) -> Result<bool> {
         let rows = self.conn.execute(
-            "INSERT OR IGNORE INTO fills (trade_id, order_id, ticker, side, action, price_cents, count, fee_cents, filled_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, datetime('now')))",
+            "INSERT INTO fills (trade_id, order_id, ticker, side, action, price_cents, count, fee_cents, filled_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, datetime('now')))
+             ON CONFLICT(trade_id) DO UPDATE SET
+               fee_cents = CASE WHEN excluded.fee_cents > 0 THEN excluded.fee_cents ELSE fee_cents END,
+               filled_at = CASE WHEN excluded.filled_at IS NOT NULL THEN excluded.filled_at ELSE filled_at END",
             rusqlite::params![trade_id, order_id, ticker, side, action, price_cents, count, fee_cents, filled_at],
         )?;
         Ok(rows > 0)

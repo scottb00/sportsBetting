@@ -17,7 +17,8 @@ pub use position_sync::reconcile_positions;
 pub use scoreboard::handle_scoreboard_tick;
 
 use std::sync::Arc;
-use crate::engine::bot::{SharedState, SharedOrderBooks, SharedMapper, SharedLogger};
+use crate::engine::bot::{SharedState, SharedOrderBooks, SharedMapper, SharedLogger, fetch_and_apply_summary};
+use crate::engine::notifier::Notifier;
 use crate::espn::poller::EspnPoller;
 use crate::kalshi::rest::KalshiRestClient;
 use crate::kalshi::websocket::KalshiWsHandle;
@@ -32,10 +33,28 @@ pub async fn handle_maintenance_tick(
     espn_poller: &EspnPoller,
     mapper: &SharedMapper,
     ws_handle: Option<&KalshiWsHandle>,
+    notifier: Option<&Notifier>,
 ) {
     cleanup_finished_games(state, order_books, logger, kalshi_rest).await;
-    discover_new_markets(kalshi_rest, espn_poller, state, mapper, ws_handle).await;
+    discover_new_markets(kalshi_rest, espn_poller, state, order_books, mapper, ws_handle).await;
+    refresh_missing_espn_probs(espn_poller, state).await;
     sync_orders(state, logger, kalshi_rest).await;
     sync_fills(state, logger, kalshi_rest).await;
-    reconcile_positions(state, kalshi_rest).await;
+    reconcile_positions(state, kalshi_rest, notifier).await;
+}
+
+/// Re-fetch ESPN summaries for games that have Kalshi markets but no win probability.
+/// ESPN BPI projections aren't always available at startup — this retries until they appear.
+async fn refresh_missing_espn_probs(espn_poller: &EspnPoller, state: &SharedState) {
+    let event_ids: Vec<String> = {
+        let s = state.lock().await;
+        s.game_state.games.values()
+            .filter(|gs| gs.has_kalshi() && gs.espn_home_win_prob.is_none())
+            .map(|gs| gs.espn_event_id.clone())
+            .collect()
+    };
+
+    for event_id in &event_ids {
+        fetch_and_apply_summary(espn_poller, state, event_id, "RefreshProb ").await;
+    }
 }

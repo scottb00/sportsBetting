@@ -293,6 +293,10 @@ impl MarketMapper {
             .replace("n.c.", "north carolina")
             .replace("s.c.", "south carolina")
             .replace(" state state", " state")
+            .replace("umass", "massachusetts")
+            // Strip parentheses so "Miami (OH)" → "miami oh", distinct from "miami hurricanes"
+            .replace('(', "")
+            .replace(')', "")
     }
 
     /// Check if a market's YES side is for the home team by comparing
@@ -450,6 +454,26 @@ mod tests {
     #[test]
     fn team_name_no_match() {
         assert!(!MarketMapper::team_name_matches("duke blue devils", "kentucky wildcats"));
+    }
+
+    #[test]
+    fn miami_ohio_does_not_match_miami_florida() {
+        // "Miami (OH)" should NOT match "Miami Hurricanes" (Florida)
+        assert!(!MarketMapper::team_name_matches("miami hurricanes", "miami (oh)"));
+        assert!(!MarketMapper::team_name_matches("miami (oh) redhawks", "miami hurricanes"));
+        // But "Miami (OH)" SHOULD match ESPN's "Miami (OH) RedHawks"
+        assert!(MarketMapper::team_name_matches("miami (oh) redhawks", "miami (oh)"));
+    }
+
+    #[test]
+    fn umass_matches_massachusetts() {
+        // Kalshi title uses "UMass", ESPN uses "Massachusetts Minutemen"
+        assert!(MarketMapper::team_name_matches("massachusetts minutemen", "umass"));
+        assert!(MarketMapper::fuzzy_game_match(
+            "Massachusetts Minutemen @ Morehead State Eagles",
+            "UMass at Morehead State Winner?",
+            " at ", " Winner?"
+        ));
     }
 
     // --- market_is_home_team ---

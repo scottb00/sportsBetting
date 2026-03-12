@@ -384,6 +384,21 @@ pub async fn execute_signal(
         }
     };
 
+    // Sanity checks — warn but do not block (validate in prod before circuit-breaking)
+    let price = order_req.yes_price.or(order_req.no_price).unwrap_or(0);
+    if !(1..=99).contains(&price) {
+        tracing::warn!(
+            "ORDER ANOMALY: {} {} price={}c outside [1,99]",
+            signal.kalshi_ticker, signal.strategy, price,
+        );
+    }
+    if matches!(order_req.action, crate::kalshi::types::OrderAction::Buy) && signal.edge_after_fees < -0.001 {
+        tracing::warn!(
+            "ORDER ANOMALY: {} {} BUY with negative edge ({:.4}) — direction may be flipped",
+            signal.kalshi_ticker, signal.strategy, signal.edge_after_fees,
+        );
+    }
+
     // Strategy is live only if it's in the configured live_strategies list
     let strategy_is_live = live_strategies.iter().any(|s| s == &signal.strategy);
     let effective_dry_run = dry_run || !strategy_is_live;
@@ -493,6 +508,7 @@ pub async fn execute_signal(
                     order_req.count,
                     &resp.order.status,
                     edge_bps,
+                    signal.fair_value_cents,
                     game_info.as_ref(),
                 ) {
                     tracing::warn!("Failed to log order {}: {:?}", resp.order.order_id, e);

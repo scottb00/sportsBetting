@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::engine::bot::{SharedState, SharedMapper, populate_game_states, fetch_and_apply_summary};
+use crate::engine::bot::{SharedState, SharedOrderBooks, SharedMapper, populate_game_states, fetch_and_apply_summary};
 use crate::engine::market_prep::{
     build_espn_for_matching, build_kalshi_for_matching,
     build_kalshi_volume, filter_events_for_dates, fetch_all_kalshi_cbb_events,
@@ -15,6 +15,7 @@ pub async fn discover_new_markets(
     kalshi_rest: &Arc<KalshiRestClient>,
     espn_poller: &EspnPoller,
     state: &SharedState,
+    order_books: &SharedOrderBooks,
     mapper: &SharedMapper,
     ws_handle: Option<&KalshiWsHandle>,
 ) {
@@ -97,11 +98,28 @@ pub async fn discover_new_markets(
 
     // Subscribe to new tickers on the live WS connection
     if let Some(handle) = ws_handle {
-        let count = handle.subscribe_additional(new_tickers);
+        let count = handle.subscribe_additional(new_tickers.clone());
         if count > 0 {
             tracing::info!("Discovery: subscribed to {} new tickers on WS", count);
         }
     } else {
         tracing::warn!("Discovery: no WS handle — new markets won't receive book updates");
+    }
+
+    // Seed orderbooks via REST for new tickers (WS snapshot may not arrive for mid-session subs)
+    for ticker in &new_tickers {
+        match kalshi_rest.get_orderbook(ticker).await {
+            Ok(snapshot) => {
+                let mut books = order_books.write().await;
+                let book = books
+                    .entry(ticker.clone())
+                    .or_insert_with(|| crate::kalshi::orderbook::LocalOrderBook::new(ticker.clone()));
+                book.apply_snapshot(&snapshot);
+                tracing::info!("Discovery: seeded orderbook for {} via REST", ticker);
+            }
+            Err(e) => {
+                tracing::warn!("Discovery: failed to fetch orderbook for {}: {:?}", ticker, e);
+            }
+        }
     }
 }

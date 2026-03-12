@@ -52,6 +52,12 @@ pub struct BotState {
     pub risk: RiskManager,
     pub order_manager: OrderManager,
     pub started_at: DateTime<Utc>,
+    /// Timestamp of last successful ESPN scoreboard fetch (for staleness detection).
+    pub last_espn_update: std::time::Instant,
+    /// Timestamp of last successful Kalshi fill sync (for staleness detection).
+    pub last_kalshi_sync: std::time::Instant,
+    /// Number of position auto-corrections applied today (resets at midnight).
+    pub position_corrections: u32,
 }
 
 pub type SharedState = Arc<Mutex<BotState>>;
@@ -97,6 +103,9 @@ pub fn create_bot_state(config: &Config) -> Result<(BotState, TradeLogger, Marke
         risk: RiskManager::new(),
         order_manager: OrderManager::new(),
         started_at: Utc::now(),
+        last_espn_update: std::time::Instant::now(),
+        last_kalshi_sync: std::time::Instant::now(),
+        position_corrections: 0,
     };
     Ok((state, logger, market_mapper))
 }

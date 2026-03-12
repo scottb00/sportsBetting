@@ -35,6 +35,7 @@ pub async fn handle_scoreboard_tick(
     let breaks_ended = game_tracker.breaks_ended(&games);
     let new_breaks = game_tracker.update(&games);
     let mut s = state.lock().await;
+    s.last_espn_update = std::time::Instant::now();
 
     // Update game states (no volume update on polls — volume is set at startup)
     for game in &games {

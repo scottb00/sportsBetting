@@ -102,8 +102,12 @@ async fn main() -> Result<()> {
         };
         let mut s = state.lock().await;
         for pos in &positions {
+            // Seed committed_contracts with current position size (not lifetime total_traded)
+            let current_pos = pos.position.unsigned_abs() as i64;
+            if current_pos > 0 {
+                s.order_manager.record_startup_position(&pos.ticker, current_pos);
+            }
             if pos.total_traded > 0 {
-                s.order_manager.record_startup_position(&pos.ticker, pos.total_traded);
                 tracing::info!(
                     "Position: {} | traded={} position={} exposure={} pnl={}",
                     pos.ticker, pos.total_traded, pos.position,
@@ -125,6 +129,11 @@ async fn main() -> Result<()> {
         tracing::info!("Loaded positions from Kalshi, seeded risk manager");
     }
     handlers::sync_orders(&state, &logger, &kalshi_rest).await;
+    // Add resting order counts to committed_contracts (position was seeded above)
+    {
+        let mut s = state.lock().await;
+        s.order_manager.seed_committed_from_resting();
+    }
     // Backfill fills from Kalshi REST (catches any missed WS fill events)
     handlers::sync_fills(&state, &logger, &kalshi_rest).await;
 
@@ -151,6 +160,7 @@ async fn main() -> Result<()> {
                     tracing::info!("New trading day: {} -> {}", current_day, now_day);
                     let mut s = state.lock().await;
                     s.risk.reset_daily();
+                    s.position_corrections = 0;
                     current_day = now_day;
                 }
                 handlers::handle_scoreboard_tick(
@@ -162,7 +172,7 @@ async fn main() -> Result<()> {
             _ = maintenance_interval.tick() => {
                 handlers::handle_maintenance_tick(
                     &state, &order_books, &logger, &kalshi_rest, &espn_poller,
-                    &mapper, kalshi_ws_handle.as_ref(),
+                    &mapper, kalshi_ws_handle.as_ref(), notifier.as_ref(),
                 ).await;
             }
             Some(event) = async {

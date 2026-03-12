@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use crate::engine::bot::SharedState;
+use crate::engine::notifier::Notifier;
 use crate::kalshi::rest::KalshiRestClient;
 
 /// Reconcile local risk positions with Kalshi API (source of truth).
 /// Logs discrepancies and auto-corrects to prevent drift from missed fills.
-pub async fn reconcile_positions(state: &SharedState, kalshi_rest: &Arc<KalshiRestClient>) {
+pub async fn reconcile_positions(state: &SharedState, kalshi_rest: &Arc<KalshiRestClient>, notifier: Option<&Notifier>) {
     let positions = match kalshi_rest.get_positions().await {
         Ok(resp) => resp.market_positions,
         Err(e) => {
@@ -39,10 +40,17 @@ pub async fn reconcile_positions(state: &SharedState, kalshi_rest: &Arc<KalshiRe
             // Position is zero — clear any local entries
             s.risk.reseed_position(&pos.ticker, "yes", 0, 0);
         }
+        s.position_corrections += 1;
         corrections += 1;
     }
 
     if corrections > 0 {
         tracing::info!("Position reconciliation: corrected {} mismatches", corrections);
+        if let Some(n) = notifier {
+            n.send_alert(
+                "Position Mismatch",
+                &format!("{} auto-correction(s) applied — check journalctl for details", corrections),
+            ).await;
+        }
     }
 }

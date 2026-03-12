@@ -95,7 +95,11 @@
 
   <h2>Today's Performance</h2>
   <div id="daily-stats-cards" class="risk-bar" style="margin-bottom:8px"></div>
-  <canvas id="daily-chart" width="1368" height="200" style="width:100%;height:200px;background:#161b22;border:1px solid #30363d;border-radius:6px;display:block;margin-bottom:16px"></canvas>
+  <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+    <span style="font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px">Lookback</span>
+    <div id="lookback-btns" style="display:flex;gap:4px"></div>
+  </div>
+  <canvas id="daily-chart" width="1368" height="220" style="width:100%;height:220px;background:#161b22;border:1px solid #30363d;border-radius:6px;display:block;margin-bottom:16px"></canvas>
 
   <h2>Tracked Games</h2>
   <div class="filters" id="game-filters">
@@ -289,6 +293,34 @@
 <script>
 const $ = s => document.querySelector(s);
 
+// Lookback state: null = today, number = hours, -1 = all
+let chartLookback = null;
+
+const LOOKBACK_OPTIONS = [
+  { label: 'Today', value: null },
+  { label: '1h',    value: 1 },
+  { label: '6h',    value: 6 },
+  { label: '12h',   value: 12 },
+  { label: '24h',   value: 24 },
+  { label: '7d',    value: 168 },
+  { label: 'All',   value: -1 },
+];
+
+function renderLookbackBtns() {
+  const container = document.getElementById('lookback-btns');
+  container.innerHTML = LOOKBACK_OPTIONS.map(opt => {
+    const active = opt.value === chartLookback;
+    return `<button onclick="setLookback(${opt.value === null ? 'null' : opt.value})"
+      style="background:${active ? '#1f6feb' : '#161b22'};color:${active ? '#ffffff' : '#c9d1d9'};border:1px solid ${active ? '#58a6ff' : '#30363d'};border-radius:4px;padding:3px 9px;font-size:11px;font-family:inherit;cursor:pointer">${opt.label}</button>`;
+  }).join('');
+}
+
+function setLookback(v) {
+  chartLookback = v;
+  renderLookbackBtns();
+  refresh();
+}
+
 // Pagination state per table
 const pageState = { games: { page: 0, perPage: 20 }, breakEvals: { page: 0, perPage: 20 }, orders: { page: 0, perPage: 20 }, fills: { page: 0, perPage: 20 } };
 
@@ -411,16 +443,18 @@ function renderDailyChart(data, risk) {
   const totalFills = points.length;
   const settledFills = pnlVals.length;
 
-  function stddev(arr) {
-    if (arr.length < 2) return 0;
-    const mean = arr.reduce((s, v) => s + v, 0) / arr.length;
-    const meanSq = arr.reduce((s, v) => s + v * v, 0) / arr.length;
-    return Math.sqrt(Math.max(0, meanSq - mean * mean));
+  // Bernoulli σ: each fill is a binary bet — all N contracts settle together (perfectly correlated).
+  // Var(fill_i) = N_i² * q_i * (1 - q_i), where q_i = price/100 + edge_bps/10000 = P(win for this bet)
+  // Total σ = sqrt(Σ Var_i) assuming independence across different games.
+  let totalVar = 0;
+  for (const p of points) {
+    if (p.edge_bps != null) {
+      const q = Math.max(0.001, Math.min(0.999, p.price_cents / 100 + p.edge_bps / 10000));
+      totalVar += p.count * p.count * q * (1 - q);
+    }
   }
-  const edgeStdDev = stddev(edgeVals);
-  const pnlStdDev = stddev(pnlVals);
-  const meanEdge = edgeVals.length > 0 ? totalEdge / edgeVals.length : 0;
-  const sharpe = edgeStdDev > 0 ? meanEdge / edgeStdDev : null;
+  const pnlSigma = Math.sqrt(totalVar);
+  const sharpe = pnlSigma > 0 ? totalEdge / pnlSigma : null;
 
   // Render stat cards
   const cardsEl = document.getElementById('daily-stats-cards');
@@ -432,27 +466,27 @@ function renderDailyChart(data, risk) {
     statCard('Status', risk.halted ? 'HALTED' : risk.dry_run ? 'DRY RUN' : 'LIVE', risk.halted ? 'negative' : risk.dry_run ? 'neutral' : 'positive'),
     statCard('Deployed', `<span title="${risk.started_at}">${fmtAge(risk.started_at)}</span>`, 'neutral'),
   ] : [];
+  const sigmaLabel = pnlSigma > 0
+    ? `$${pnlSigma.toFixed(2)} <span style="font-size:12px;opacity:0.6">(${(pnlSigma > 0 ? totalEdge / pnlSigma : 0).toFixed(1)}σ from 0)</span>`
+    : '-';
   cardsEl.innerHTML = [
     statCard('Theor. Edge', fmt$(totalEdge), pnlClass(totalEdge)),
     statCard('Realized P&L', fmt$(totalPnl), pnlClass(totalPnl)),
-    statCard('Edge Std Dev', '$' + edgeStdDev.toFixed(2), 'neutral'),
-    statCard('P&L Std Dev', '$' + pnlStdDev.toFixed(2), 'neutral'),
-    statCard('Sharpe-like', sharpe != null ? sharpe.toFixed(2) : '-', sharpe != null ? pnlClass(sharpe) : 'neutral'),
+    statCard('PnL σ (Bernoulli)', sigmaLabel, 'neutral'),
+    statCard('Edge/σ', sharpe != null ? sharpe.toFixed(2) : '-', sharpe != null ? pnlClass(sharpe) : 'neutral'),
     statCard('Fills', `${settledFills} settled / ${totalFills} total`, 'neutral'),
     ...riskCards,
   ].join('');
 
-  // Render canvas chart
+  // Render canvas chart (dual-axis: PnL left, Edge right with 0 at bottom)
   const canvas = document.getElementById('daily-chart');
   const ctx = canvas.getContext('2d');
   const dpr = window.devicePixelRatio || 1;
   const cssW = canvas.clientWidth || 1368;
-  const cssH = canvas.clientHeight || 200;
+  const cssH = canvas.clientHeight || 220;
   canvas.width = cssW * dpr;
   canvas.height = cssH * dpr;
   ctx.scale(dpr, dpr);
-
-  // Clear
   ctx.clearRect(0, 0, cssW, cssH);
 
   if (points.length === 0) {
@@ -460,11 +494,13 @@ function renderDailyChart(data, risk) {
     ctx.font = '13px -apple-system, monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('No fills today', cssW / 2, cssH / 2);
+    ctx.fillText('No fills in selected window', cssW / 2, cssH / 2);
     return;
   }
 
-  const PAD = { top: 16, right: 72, bottom: 28, left: 56 };
+  const PAD = { top: 20, right: 72, bottom: 28, left: 60 };
+  const chartH = cssH - PAD.top - PAD.bottom;
+  const chartW = cssW - PAD.left - PAD.right;
 
   // Build cumulative series
   let cumEdge = 0, cumPnl = 0;
@@ -478,42 +514,59 @@ function renderDailyChart(data, risk) {
   }
 
   // X axis bounds
-  const allTimes = edgeSeries.map(p => p.t).filter(Boolean);
+  const allTimes = [...edgeSeries, ...pnlSeries].map(p => p.t).filter(Boolean);
   const tMin = allTimes[0];
   const tMax = allTimes[allTimes.length - 1];
   const tRange = Math.max(tMax - tMin, 60000);
 
-  // Y axis bounds (include 0)
-  const allY = [...edgeSeries.map(p => p.y), ...pnlSeries.map(p => p.y), 0];
-  const yMin = Math.min(...allY);
-  const yMax = Math.max(...allY);
-  const yPad = Math.max((yMax - yMin) * 0.15, 0.05);
-  const yLo = yMin - yPad, yHi = yMax + yPad;
+  // Left Y axis: PnL — includes 0, can go negative
+  const pnlAllY = pnlSeries.map(p => p.y);
+  const pnlMin = Math.min(...pnlAllY, 0);
+  const pnlMax = Math.max(...pnlAllY, 0);
+  const pnlPad = Math.max((pnlMax - pnlMin) * 0.15, 0.05);
+  const pnlLo = pnlMin - pnlPad, pnlHi = pnlMax + pnlPad;
 
-  function toX(t) { return PAD.left + (t - tMin) / tRange * (cssW - PAD.left - PAD.right); }
-  function toY(v) { return PAD.top + (1 - (v - yLo) / (yHi - yLo)) * (cssH - PAD.top - PAD.bottom); }
+  // Right Y axis: Edge — always starts at 0 at the bottom
+  const edgeMax = Math.max(...edgeSeries.map(p => p.y), 0.01);
+  const edgeHi = edgeMax * 1.15;
+  const edgeLo = 0;
 
-  // Horizontal grid + y labels
+  function toX(t) { return PAD.left + (t - tMin) / tRange * chartW; }
+  function toYpnl(v) { return PAD.top + (1 - (v - pnlLo) / (pnlHi - pnlLo)) * chartH; }
+  function toYedge(v) { return PAD.top + (1 - (v - edgeLo) / (edgeHi - edgeLo)) * chartH; }
+
+  // Horizontal grid lines (from Edge axis since it's on the left) + left labels (Edge, blue)
   ctx.font = '10px monospace';
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
-  const ySteps = 4;
+  const ySteps = 5;
   for (let i = 0; i <= ySteps; i++) {
-    const v = yLo + (yHi - yLo) * i / ySteps;
-    const y = toY(v);
+    const v = edgeLo + (edgeHi - edgeLo) * i / ySteps;
+    const y = toYedge(v);
     ctx.strokeStyle = '#21262d';
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(cssW - PAD.right, y); ctx.stroke();
-    ctx.fillStyle = '#484f58';
-    ctx.fillText((v >= 0 ? '+' : '') + '$' + Math.abs(v).toFixed(2), PAD.left - 4, y);
+    ctx.fillStyle = '#1f6feb99';
+    ctx.fillText('$' + v.toFixed(2), PAD.left - 4, y);
   }
 
-  // Zero line
-  ctx.strokeStyle = '#30363d';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.moveTo(PAD.left, toY(0)); ctx.lineTo(cssW - PAD.right, toY(0)); ctx.stroke();
+  // Right axis labels (PnL, green/red)
+  ctx.textAlign = 'left';
+  ctx.fillStyle = (totalPnl >= 0 ? '#3fb950' : '#f85149') + '99';
+  for (let i = 0; i <= ySteps; i++) {
+    const v = pnlLo + (pnlHi - pnlLo) * i / ySteps;
+    const y = toYpnl(v);
+    ctx.fillText((v >= 0 ? '+' : '') + '$' + Math.abs(v).toFixed(2), cssW - PAD.right + 4, y);
+  }
 
-  // X axis time labels
+  // PnL zero line (right axis — draw when PnL range crosses zero)
+  if (pnlLo < 0 && pnlHi > 0) {
+    ctx.strokeStyle = '#30363d';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(PAD.left, toYpnl(0)); ctx.lineTo(cssW - PAD.right, toYpnl(0)); ctx.stroke();
+  }
+
+  // X axis labels
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   ctx.fillStyle = '#484f58';
@@ -524,11 +577,34 @@ function renderDailyChart(data, risk) {
     ctx.strokeStyle = '#21262d';
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(x, PAD.top); ctx.lineTo(x, cssH - PAD.bottom); ctx.stroke();
-    ctx.fillText(t.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}), x, cssH - PAD.bottom + 4);
+    // Show date+time if range > 1 day, otherwise just time
+    const label = tRange > 86400000
+      ? t.toLocaleDateString([], {month:'short',day:'numeric'}) + ' ' + t.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})
+      : t.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    ctx.fillText(label, x, cssH - PAD.bottom + 4);
   }
 
-  // Draw a line series with dots
-  function drawLine(series, color) {
+  // Axis labels (rotated)
+  ctx.save();
+  ctx.translate(12, cssH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.font = '10px monospace';
+  ctx.fillStyle = '#58a6ffaa';
+  ctx.fillText('Edge', 0, 0);
+  ctx.restore();
+
+  ctx.save();
+  ctx.translate(cssW - 10, cssH / 2);
+  ctx.rotate(Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.font = '10px monospace';
+  ctx.fillStyle = (totalPnl >= 0 ? '#3fb950' : '#f85149') + 'aa';
+  ctx.fillText('P&L', 0, 0);
+  ctx.restore();
+
+  // Draw line series
+  function drawLine(series, toY, color) {
     ctx.strokeStyle = color;
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -539,27 +615,31 @@ function renderDailyChart(data, risk) {
       if (first) { ctx.moveTo(x, y); first = false; } else ctx.lineTo(x, y);
     }
     ctx.stroke();
-    ctx.fillStyle = color;
-    for (const pt of series) {
-      if (!pt.t) continue;
-      ctx.beginPath(); ctx.arc(toX(pt.t), toY(pt.y), 3, 0, Math.PI * 2); ctx.fill();
+    // Only draw dots if few points
+    if (series.length <= 60) {
+      ctx.fillStyle = color;
+      for (const pt of series) {
+        if (!pt.t) continue;
+        ctx.beginPath(); ctx.arc(toX(pt.t), toY(pt.y), 3, 0, Math.PI * 2); ctx.fill();
+      }
     }
   }
 
-  drawLine(pnlSeries, totalPnl >= 0 ? '#3fb950' : '#f85149');
-  drawLine(edgeSeries, '#58a6ff');
+  // Edge on left axis, PnL on right axis
+  drawLine(edgeSeries, toYedge, '#58a6ff');
+  drawLine(pnlSeries, toYpnl, totalPnl >= 0 ? '#3fb950' : '#f85149');
 
   // Legend
-  const lx = cssW - PAD.right + 6, ly = PAD.top;
+  const lx = PAD.left + 8, ly = PAD.top + 4;
   ctx.font = '10px monospace';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
   ctx.fillStyle = '#58a6ff';
   ctx.beginPath(); ctx.arc(lx + 4, ly + 5, 3, 0, Math.PI * 2); ctx.fill();
-  ctx.fillText('Edge', lx + 11, ly);
+  ctx.fillText('Edge (left, 0=bottom)', lx + 11, ly);
   ctx.fillStyle = totalPnl >= 0 ? '#3fb950' : '#f85149';
   ctx.beginPath(); ctx.arc(lx + 4, ly + 19, 3, 0, Math.PI * 2); ctx.fill();
-  ctx.fillText('P&L', lx + 11, ly + 14);
+  ctx.fillText('P&L (right)', lx + 11, ly + 14);
 }
 
 async function fetchJson(url) {
@@ -568,13 +648,16 @@ async function fetchJson(url) {
 }
 
 async function refresh() {
+  const chartUrl = chartLookback === null
+    ? '/api/daily_chart'
+    : `/api/daily_chart?lookback_hours=${chartLookback}`;
   const [risk, games, orders, fills, breakEvals, dailyChart] = await Promise.all([
     fetchJson('/api/risk'),
     fetchJson('/api/games'),
     fetchJson('/api/orders'),
     fetchJson('/api/fills'),
     fetchJson('/api/break_evals'),
-    fetchJson('/api/daily_chart'),
+    fetchJson(chartUrl),
   ]);
 
   renderDailyChart(dailyChart, risk);
@@ -749,7 +832,7 @@ async function refresh() {
           <td class="num">${o.count}</td>
           <td class="num">${o.price_cents}¢</td>
           <td class="num">${o.espn_fair != null ? (o.espn_fair * 100).toFixed(1) + '¢' : '-'}</td>
-          <td class="num">${fmtEdgeWithDollars(o.edge, o.count)}</td>
+          <td class="num">${o.edge_bps != null ? fmtEdgeBps(o.edge_bps, o.count) : fmtEdgeWithDollars(o.edge, o.count)}</td>
           <td class="num">$${cost}</td>
           <td><span class="${statusCls}">${o.status}</span></td>
         </tr>`;
@@ -821,6 +904,7 @@ async function refresh() {
   $('#updated').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
 }
 
+renderLookbackBtns();
 refresh();
 setInterval(refresh, 5000);
 </script>

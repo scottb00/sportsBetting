@@ -101,6 +101,9 @@ fn make_bot_state_with_games(
         game_state: gsm,
         risk,
         order_manager: OrderManager::new(),
+        last_espn_update: std::time::Instant::now(),
+        last_kalshi_sync: std::time::Instant::now(),
+        position_corrections: 0,
     };
     (state, books)
 }
@@ -297,6 +300,7 @@ fn signal_to_order_respects_max_contracts() {
         post_only: true,
         expiration_ts: None,
         edge_after_fees: 0.05,
+        fair_value_cents: None,
         max_contracts: Some(5),
     };
 
@@ -316,6 +320,7 @@ fn signal_to_order_uses_natural_count_when_below_cap() {
         post_only: true,
         expiration_ts: None,
         edge_after_fees: 0.05,
+        fair_value_cents: None,
         max_contracts: Some(100),
     };
 
@@ -370,6 +375,9 @@ fn low_volume_games_produce_no_signals() {
         game_state: gsm,
         risk,
         order_manager: OrderManager::new(),
+        last_espn_update: std::time::Instant::now(),
+        last_kalshi_sync: std::time::Instant::now(),
+        position_corrections: 0,
     };
 
     let registry = make_registry(20);
@@ -407,6 +415,9 @@ fn extreme_price_games_produce_no_signals() {
         game_state: gsm,
         risk,
         order_manager: OrderManager::new(),
+        last_espn_update: std::time::Instant::now(),
+        last_kalshi_sync: std::time::Instant::now(),
+        position_corrections: 0,
     };
 
     let registry = make_registry(20);
@@ -639,6 +650,9 @@ fn make_single_game(
         game_state: gsm,
         risk,
         order_manager: OrderManager::new(),
+        last_espn_update: std::time::Instant::now(),
+        last_kalshi_sync: std::time::Instant::now(),
+        position_corrections: 0,
     };
     (state, books)
 }

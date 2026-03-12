@@ -28,6 +28,12 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
         }
     };
 
+    // Mark successful sync even if no new fills
+    {
+        let mut s = state.lock().await;
+        s.last_kalshi_sync = std::time::Instant::now();
+    }
+
     if fills.is_empty() {
         return;
     }

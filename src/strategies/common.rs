@@ -166,6 +166,7 @@ fn evaluate_market(
             post_only: true,
             expiration_ts: None,
             edge_after_fees: edge,
+            fair_value_cents: Some((fair_value * 100.0).round() as i64),
             max_contracts: None,
         })
     } else if net_ticker != 0 {
@@ -199,6 +200,7 @@ fn evaluate_market(
             post_only: true,
             expiration_ts: None,
             edge_after_fees: 0.0, // close orders have no required edge
+            fair_value_cents: None, // close orders don't have an entry fair value
             max_contracts: None,
         })
     } else {

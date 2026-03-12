@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Query, State},
     response::{Html, IntoResponse},
     routing::get,
 };
@@ -84,7 +84,11 @@ struct OrderRow {
     count: i64,
     status: String,
     created_at: String,
-    /// Perceived edge: fair_value - order_price (positive = buying below fair value)
+    /// Edge at placement time in basis points (from DB). Preferred over live-computed edge.
+    edge_bps: Option<f64>,
+    /// Fair value in cents (0–100) at placement time. None for close orders.
+    fair_value_cents: Option<i64>,
+    /// Perceived edge fraction for display when edge_bps is unavailable (legacy fallback only).
     edge: Option<f64>,
 }
 
@@ -116,7 +120,32 @@ struct EdgeSummary {
     today_fills: i64,
 }
 
+#[derive(Serialize)]
+struct HealthView {
+    status: &'static str,
+    last_espn_update_secs_ago: u64,
+    last_kalshi_sync_secs_ago: u64,
+    position_corrections_today: u32,
+    dry_run: bool,
+}
+
 // --- Handlers ---
+
+async fn api_health(State(state): State<DashboardState>) -> impl IntoResponse {
+    let s = state.bot.lock().await;
+    let espn_secs = s.last_espn_update.elapsed().as_secs();
+    let kalshi_secs = s.last_kalshi_sync.elapsed().as_secs();
+    let status = if espn_secs > 120 { "stale_espn" }
+                 else if kalshi_secs > 300 { "stale_kalshi" }
+                 else { "ok" };
+    Json(HealthView {
+        status,
+        last_espn_update_secs_ago: espn_secs,
+        last_kalshi_sync_secs_ago: kalshi_secs,
+        position_corrections_today: s.position_corrections,
+        dry_run: state.dry_run,
+    })
+}
 
 async fn index() -> impl IntoResponse {
     let html = include_str!("../../static/dashboard.html");
@@ -262,9 +291,11 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
 }
 
 async fn api_risk(State(state): State<DashboardState>) -> impl IntoResponse {
+    // Read daily PnL from DB (persisted, includes fees, survives restarts)
+    let daily_pnl = query_daily_realized_pnl(&state.db_path);
     let s = state.bot.lock().await;
     Json(RiskView {
-        daily_pnl: s.risk.daily_pnl,
+        daily_pnl,
         dry_run: state.dry_run,
         open_orders: s.order_manager.open_order_count(),
         in_flight: s.order_manager.in_flight_count(),
@@ -316,8 +347,14 @@ async fn api_orders(State(state): State<DashboardState>) -> impl IntoResponse {
             row.home_team = Some(e.home_team.clone());
             row.away_team = Some(e.away_team.clone());
             row.is_home = Some(e.is_home);
-            if let Some(fv) = e.fair_value {
-                row.edge = Some(compute_order_edge(fv, row.price_cents, &row.side, &row.action));
+        }
+        // Use stored edge_bps from DB as the canonical edge; only fall back to live
+        // fair value for old orders that predate edge_bps logging.
+        if row.edge_bps.is_none() {
+            if let Some(e) = enrich.get(&row.ticker) {
+                if let Some(fv) = e.fair_value {
+                    row.edge = Some(compute_order_edge(fv, row.price_cents, &row.side, &row.action));
+                }
             }
         }
         // DB values remain as fallback for tickers no longer in live game state
@@ -376,8 +413,13 @@ async fn api_break_evals(State(state): State<DashboardState>) -> impl IntoRespon
 #[derive(Serialize)]
 struct DailyChartPoint {
     ts: String,
+    /// Dollar edge for this fill: edge_bps/10000 * count (each contract pays $1).
     fill_edge: Option<f64>,
     fill_pnl: Option<f64>,
+    count: i64,
+    price_cents: i64,
+    /// Raw edge_bps from the order, used by frontend for Bernoulli variance calc.
+    edge_bps: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -385,8 +427,14 @@ struct DailyChart {
     points: Vec<DailyChartPoint>,
 }
 
-async fn api_daily_chart(State(state): State<DashboardState>) -> impl IntoResponse {
-    let points = query_daily_chart(&state.db_path).unwrap_or_default();
+#[derive(serde::Deserialize)]
+struct ChartParams {
+    /// Lookback window in hours. 0 or absent = today only, -1 = all time.
+    lookback_hours: Option<i64>,
+}
+
+async fn api_daily_chart(State(state): State<DashboardState>, Query(params): Query<ChartParams>) -> impl IntoResponse {
+    let points = query_daily_chart(&state.db_path, params.lookback_hours).unwrap_or_default();
     Json(DailyChart { points })
 }
 
@@ -412,7 +460,7 @@ fn compute_order_edge(fair_value: f64, price_cents: i64, side: &str, action: &st
 fn query_orders(db_path: &str) -> anyhow::Result<Vec<OrderRow>> {
     let conn = open_read_only(db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT order_id, ticker, COALESCE(strategy,''), action, side, price_cents, count, status, created_at, game_name, home_team, away_team, is_home
+        "SELECT order_id, ticker, COALESCE(strategy,''), action, side, price_cents, count, status, created_at, game_name, home_team, away_team, is_home, edge_bps, fair_value_cents
          FROM orders ORDER BY datetime(created_at) DESC LIMIT 50"
     )?;
     let rows = stmt.query_map([], |row| {
@@ -431,6 +479,8 @@ fn query_orders(db_path: &str) -> anyhow::Result<Vec<OrderRow>> {
             count: row.get(6)?,
             status: row.get(7)?,
             created_at: row.get(8)?,
+            edge_bps: row.get(13)?,
+            fair_value_cents: row.get(14)?,
             edge: None,
         })
     })?.filter_map(|r| r.ok()).collect();
@@ -470,7 +520,7 @@ fn query_fills(db_path: &str) -> anyhow::Result<Vec<FillRow>> {
 fn query_edge_summary(db_path: &str) -> anyhow::Result<(f64, i64, f64)> {
     let conn = open_read_only(db_path)?;
     let (total_edge_dollars, fill_count): (f64, i64) = conn.query_row(
-        "SELECT COALESCE(SUM(o.edge_bps / 10000.0 * f.price_cents * f.count / 100.0), 0.0),
+        "SELECT COALESCE(SUM(o.edge_bps / 10000.0 * f.count), 0.0),
                 COUNT(*)
          FROM fills f
          JOIN orders o ON f.order_id = o.order_id
@@ -489,7 +539,7 @@ fn query_edge_summary(db_path: &str) -> anyhow::Result<(f64, i64, f64)> {
 fn query_edge_summary_today(db_path: &str) -> anyhow::Result<(f64, i64)> {
     let conn = open_read_only(db_path)?;
     let (total_edge_dollars, fill_count): (f64, i64) = conn.query_row(
-        "SELECT COALESCE(SUM(o.edge_bps / 10000.0 * f.price_cents * f.count / 100.0), 0.0),
+        "SELECT COALESCE(SUM(o.edge_bps / 10000.0 * f.count), 0.0),
                 COUNT(*)
          FROM fills f
          JOIN orders o ON f.order_id = o.order_id
@@ -500,22 +550,42 @@ fn query_edge_summary_today(db_path: &str) -> anyhow::Result<(f64, i64)> {
     Ok((total_edge_dollars, fill_count))
 }
 
-fn query_daily_chart(db_path: &str) -> anyhow::Result<Vec<DailyChartPoint>> {
+fn query_daily_realized_pnl(db_path: &str) -> f64 {
+    let conn = match open_read_only(db_path) {
+        Ok(c) => c,
+        Err(_) => return 0.0,
+    };
+    conn.query_row(
+        "SELECT COALESCE(SUM(fill_pnl), 0.0) FROM fills WHERE date(filled_at) = date('now') AND fill_pnl IS NOT NULL",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0.0)
+}
+
+fn query_daily_chart(db_path: &str, lookback_hours: Option<i64>) -> anyhow::Result<Vec<DailyChartPoint>> {
     let conn = open_read_only(db_path)?;
-    let mut stmt = conn.prepare(
-        "SELECT f.filled_at,
-                CASE WHEN o.edge_bps IS NOT NULL THEN o.edge_bps / 10000.0 * f.price_cents * f.count / 100.0 ELSE NULL END AS fill_edge,
-                f.fill_pnl
+    let base_select = "SELECT f.filled_at,
+                CASE WHEN o.edge_bps IS NOT NULL THEN o.edge_bps / 10000.0 * f.count ELSE NULL END AS fill_edge,
+                f.fill_pnl,
+                f.count,
+                f.price_cents,
+                o.edge_bps
          FROM fills f
-         LEFT JOIN orders o ON f.order_id = o.order_id
-         WHERE date(f.filled_at) = date('now')
-         ORDER BY f.filled_at ASC"
-    )?;
+         LEFT JOIN orders o ON f.order_id = o.order_id";
+    let sql = match lookback_hours {
+        None | Some(0) => format!("{base_select} WHERE date(f.filled_at) = date('now') ORDER BY f.filled_at ASC"),
+        Some(-1) => format!("{base_select} ORDER BY f.filled_at ASC"),
+        Some(h) => format!("{base_select} WHERE f.filled_at >= datetime('now', '-{h} hours') ORDER BY f.filled_at ASC"),
+    };
+    let mut stmt = conn.prepare(&sql)?;
     let points = stmt.query_map([], |row| {
         Ok(DailyChartPoint {
             ts: row.get(0)?,
             fill_edge: row.get(1)?,
             fill_pnl: row.get(2)?,
+            count: row.get(3)?,
+            price_cents: row.get(4)?,
+            edge_bps: row.get(5)?,
         })
     })?.filter_map(|r| r.ok()).collect();
     Ok(points)
@@ -541,6 +611,7 @@ pub async fn serve(bot_state: SharedState, order_books: SharedOrderBooks, _logge
         .route("/api/edge", get(api_edge))
         .route("/api/break_evals", get(api_break_evals))
         .route("/api/daily_chart", get(api_daily_chart))
+        .route("/api/health", get(api_health))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");

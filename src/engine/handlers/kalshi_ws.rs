@@ -1,4 +1,6 @@
 use crate::engine::bot::{SharedState, SharedOrderBooks, SharedLogger};
+use crate::engine::logger::GameInfo;
+use crate::engine::risk::RiskManager;
 use crate::kalshi::websocket::KalshiWsEvent;
 
 /// Handle a Kalshi WebSocket event.
@@ -31,25 +33,40 @@ pub async fn handle_kalshi_event(
                 fill.yes_price, fill.no_price,
             );
             let price_cents = if fill.side == "yes" { fill.yes_price } else { fill.no_price };
-            let new_status = {
+            // Calculate maker fee locally (WS fills don't include fee_cost)
+            let fee_dollars = RiskManager::maker_fee(fill.count, price_cents) / 100.0;
+            // Extract strategy and game_info while holding state lock
+            let (new_status, strategy, game_info) = {
                 let mut s = state.lock().await;
                 s.risk.record_fill(
                     &fill.market_ticker, &fill.action, &fill.side,
                     price_cents, fill.count,
                 );
-                // Decrement remaining count; only removes order when fully filled
                 let was_resting = s.order_manager.has_resting_order(&fill.market_ticker);
+                let strat = s.order_manager.get_strategy(&fill.order_id)
+                    .unwrap_or_default().to_string();
+                let gi = GameInfo::from_game_state(&s.game_state, &fill.market_ticker);
                 s.order_manager.record_fill(&fill.order_id, fill.count);
                 let still_resting = s.order_manager.has_resting_order(&fill.market_ticker);
-                if was_resting && !still_resting { "filled" } else { "partial_fill" }
+                let status = if was_resting && !still_resting { "filled" } else { "partial_fill" };
+                (status, strat, gi)
             };
             // Log under logger lock (separate from state lock)
             {
                 let log = logger.lock().unwrap();
                 let _ = log.update_order_status(&fill.order_id, new_status);
+                // Backfill order stub with strategy and game_info
+                let _ = log.log_order_if_missing(
+                    &fill.order_id, &fill.market_ticker, &fill.action,
+                    &fill.side, price_cents, fill.count, new_status,
+                    None, game_info.as_ref(),
+                );
+                if !strategy.is_empty() {
+                    let _ = log.update_order_strategy(&fill.order_id, &strategy);
+                }
                 let _ = log.log_fill(
                     &fill.trade_id, &fill.order_id, &fill.market_ticker,
-                    &fill.side, &fill.action, price_cents, fill.count, 0.0,
+                    &fill.side, &fill.action, price_cents, fill.count, fee_dollars,
                     None, // WS fills don't include timestamp; use current time
                 );
             }

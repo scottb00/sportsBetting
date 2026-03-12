@@ -110,6 +110,11 @@ impl Notifier {
         format!("{}\n{}\n{}", game_line, edge_line, pos_line)
     }
 
+    /// Send an alert notification (for anomalies, not trades).
+    pub async fn send_alert(&self, title: &str, body: &str) {
+        self.send(title, body).await;
+    }
+
     /// Send a single batched notification for multiple placed orders.
     pub async fn notify_orders_batch(&self, orders: &[PlacedOrder]) {
         if orders.is_empty() {

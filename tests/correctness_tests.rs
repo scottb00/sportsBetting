@@ -383,6 +383,7 @@ fn signal_yes_produces_yes_price_only() {
         post_only: true,
         expiration_ts: None,
         edge_after_fees: 0.05,
+        fair_value_cents: None,
         max_contracts: None,
     };
 
@@ -404,6 +405,7 @@ fn signal_no_produces_no_price_only() {
         post_only: true,
         expiration_ts: None,
         edge_after_fees: 0.05,
+        fair_value_cents: None,
         max_contracts: None,
     };
 
@@ -425,6 +427,7 @@ fn signal_to_order_contract_count() {
         post_only: true,
         expiration_ts: None,
         edge_after_fees: 0.05,
+        fair_value_cents: None,
         max_contracts: None,
     };
 
@@ -444,6 +447,7 @@ fn signal_to_order_contract_count_floors() {
         post_only: true,
         expiration_ts: None,
         edge_after_fees: 0.05,
+        fair_value_cents: None,
         max_contracts: None,
     };
 
@@ -463,6 +467,7 @@ fn signal_to_order_min_one_contract() {
         post_only: true,
         expiration_ts: None,
         edge_after_fees: 0.05,
+        fair_value_cents: None,
         max_contracts: None,
     };
 

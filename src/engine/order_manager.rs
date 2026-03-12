@@ -17,6 +17,8 @@ pub struct OrderSignal {
     pub expiration_ts: Option<i64>,
     /// Edge after fees (used for comparing signals across markets).
     pub edge_after_fees: f64,
+    /// Fair value in cents (0–100) at order placement time. None for close orders.
+    pub fair_value_cents: Option<i64>,
     /// Hard cap on contracts for this signal (from per-game limit).
     pub max_contracts: Option<i64>,
 }
@@ -113,9 +115,10 @@ impl OrderManager {
 
         let new_count = self.resting_orders.len();
         if old_count != 0 || new_count != 0 {
+            let tickers: Vec<&str> = self.resting_orders.values().map(|o| o.ticker.as_str()).collect();
             tracing::info!(
-                "Order sync: {} resting orders (was {}), {} CLV tracked",
-                new_count, old_count, self.clv_orders.len(),
+                "Order sync: {} resting orders (was {}), {} CLV tracked | tickers={:?}",
+                new_count, old_count, self.clv_orders.len(), tickers,
             );
         }
     }
@@ -207,6 +210,14 @@ impl OrderManager {
             post_only: Some(signal.post_only),
             expiration_ts: signal.expiration_ts,
         })
+    }
+
+    /// Add resting order remaining counts to committed_contracts.
+    /// Call after apply_synced_orders to account for outstanding orders.
+    pub fn seed_committed_from_resting(&mut self) {
+        for order in self.resting_orders.values() {
+            *self.committed_contracts.entry(order.ticker.clone()).or_insert(0) += order.remaining_count;
+        }
     }
 
     /// Get total contracts committed for a market (resting + filled).
@@ -495,6 +506,7 @@ mod tests {
             post_only: true,
             expiration_ts: None,
             edge_after_fees: 0.05,
+            fair_value_cents: Some(55),
             max_contracts: Some(0),
         };
         assert!(OrderManager::signal_to_order(&signal).is_none());
