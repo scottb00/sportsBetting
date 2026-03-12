@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use chrono;
 use proptest::prelude::*;
 
 use sports_betting::engine::game_state::{GameState, GameStateManager, KalshiMarketState};
@@ -339,7 +340,7 @@ fn e2e_break_ev_only_break_phases() {
     // TV timeout (Break phase + last_play_type containing "Official TV Timeout") is tradeable
     let (mut gs, books) = make_game_with_book(0.70, GamePhase::Break, 48.0, 52.0);
     gs.last_play_type = Some("OfficialTVTimeOut".into());
-    gs.break_started_at = Some(std::time::Instant::now());
+    gs.break_expires_at = Some(chrono::Utc::now().timestamp() + 90);
     assert!(quoter.can_evaluate(&gs) && quoter.evaluate(&gs, &risk, 0.0, &books).is_some(),
         "Break EV should fire on TV timeout Break");
 
@@ -384,6 +385,7 @@ fn signal_yes_produces_yes_price_only() {
         expiration_ts: None,
         edge_after_fees: 0.05,
         fair_value_cents: None,
+        is_close: false,
         max_contracts: None,
     };
 
@@ -406,6 +408,7 @@ fn signal_no_produces_no_price_only() {
         expiration_ts: None,
         edge_after_fees: 0.05,
         fair_value_cents: None,
+        is_close: false,
         max_contracts: None,
     };
 
@@ -428,6 +431,7 @@ fn signal_to_order_contract_count() {
         expiration_ts: None,
         edge_after_fees: 0.05,
         fair_value_cents: None,
+        is_close: false,
         max_contracts: None,
     };
 
@@ -448,6 +452,7 @@ fn signal_to_order_contract_count_floors() {
         expiration_ts: None,
         edge_after_fees: 0.05,
         fair_value_cents: None,
+        is_close: false,
         max_contracts: None,
     };
 
@@ -468,6 +473,7 @@ fn signal_to_order_min_one_contract() {
         expiration_ts: None,
         edge_after_fees: 0.05,
         fair_value_cents: None,
+        is_close: false,
         max_contracts: None,
     };
 

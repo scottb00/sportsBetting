@@ -294,7 +294,12 @@ impl MarketMapper {
             .replace("s.c.", "south carolina")
             .replace(" state state", " state")
             .replace("umass", "massachusetts")
-            // Strip parentheses so "Miami (OH)" → "miami oh", distinct from "miami hurricanes"
+            // Expand Kalshi parenthetical qualifiers to ESPN-style names
+            // so "Miami (FL)" matches "Miami Hurricanes" and
+            // "Miami (OH)" stays distinct as "Miami Ohio"
+            .replace("(fl)", "hurricanes")
+            .replace("(oh)", "ohio")
+            // Strip remaining parentheses
             .replace('(', "")
             .replace(')', "")
     }
@@ -305,8 +310,21 @@ impl MarketMapper {
     pub fn yes_is_home_team(espn_home_team: &str, yes_sub_title: &str) -> bool {
         let home = espn_home_team.to_lowercase();
         let yes = yes_sub_title.to_lowercase();
-        Self::team_name_matches(&home, &yes)
+        if Self::team_name_matches(&home, &yes)
             || Self::team_name_matches(&yes, &home)
+        {
+            return true;
+        }
+        // Lenient fallback: check if the primary name (first word) from the
+        // yes_sub_title appears in the home team name. Handles cases like
+        // "Miami (FL)" matching "Miami Hurricanes" where the qualifier and
+        // mascot differ but the city/school name is the same.
+        // Safe because this function is only called after the game is already
+        // matched — we just need to distinguish which team is YES.
+        let yes_norm = Self::normalize_team_name(&yes);
+        let home_norm = Self::normalize_team_name(&home);
+        let yes_primary = yes_norm.split_whitespace().next().unwrap_or("");
+        yes_primary.len() >= 3 && home_norm.contains(yes_primary)
     }
 
     /// Check if two team name strings refer to the same team.
@@ -463,6 +481,21 @@ mod tests {
         assert!(!MarketMapper::team_name_matches("miami (oh) redhawks", "miami hurricanes"));
         // But "Miami (OH)" SHOULD match ESPN's "Miami (OH) RedHawks"
         assert!(MarketMapper::team_name_matches("miami (oh) redhawks", "miami (oh)"));
+    }
+
+    #[test]
+    fn miami_fl_matches_miami_hurricanes() {
+        // Kalshi uses "Miami (FL)" which normalizes to "Miami Hurricanes"
+        assert!(MarketMapper::team_name_matches("miami hurricanes", "miami (fl)"));
+        assert!(MarketMapper::yes_is_home_team("Miami Hurricanes", "Miami (FL)"));
+        // Louisville should NOT match Miami
+        assert!(!MarketMapper::yes_is_home_team("Miami Hurricanes", "Louisville"));
+        // fuzzy_game_match should work with (FL) qualifier
+        assert!(MarketMapper::fuzzy_game_match(
+            "Louisville Cardinals @ Miami Hurricanes",
+            "Louisville at Miami (FL) Winner?",
+            " at ", " Winner?"
+        ));
     }
 
     #[test]

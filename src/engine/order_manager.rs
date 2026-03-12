@@ -17,8 +17,10 @@ pub struct OrderSignal {
     pub expiration_ts: Option<i64>,
     /// Edge after fees (used for comparing signals across markets).
     pub edge_after_fees: f64,
-    /// Fair value in cents (0–100) at order placement time. None for close orders.
+    /// Fair value in cents (0–100) at order placement time.
     pub fair_value_cents: Option<i64>,
+    /// Whether this is a closing order (unwinding existing position, no edge threshold).
+    pub is_close: bool,
     /// Hard cap on contracts for this signal (from per-game limit).
     pub max_contracts: Option<i64>,
 }
@@ -507,6 +509,7 @@ mod tests {
             expiration_ts: None,
             edge_after_fees: 0.05,
             fair_value_cents: Some(55),
+            is_close: false,
             max_contracts: Some(0),
         };
         assert!(OrderManager::signal_to_order(&signal).is_none());

@@ -90,6 +90,30 @@ pub struct StrategyRegistry {
     pub max_contracts_per_game: i64,
 }
 
+impl BotState {
+    /// Apply a fill to risk and order tracking, skipping duplicates.
+    /// Returns `true` if the fill was new (and therefore applied), `false` if already seen.
+    /// Both the WS handler and REST fill_sync call this so each fill is processed exactly once.
+    pub fn apply_fill_if_new(
+        &mut self,
+        trade_id: &str,
+        ticker: &str,
+        order_id: &str,
+        action: &str,
+        side: &str,
+        price_cents: i64,
+        count: i64,
+    ) -> bool {
+        if self.order_manager.is_fill_processed(trade_id) {
+            return false;
+        }
+        self.order_manager.mark_fill_processed(trade_id);
+        self.risk.record_fill(ticker, action, side, price_cents, count);
+        self.order_manager.record_fill(order_id, count);
+        true
+    }
+}
+
 /// Build initial BotState, TradeLogger, and MarketMapper from config.
 /// Logger and mapper are returned separately so they can be wrapped in their own locks.
 pub fn create_bot_state(config: &Config) -> Result<(BotState, TradeLogger, MarketMapper)> {

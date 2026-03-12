@@ -208,6 +208,15 @@ pub fn evaluate_strategies(
             }
 
             if let Some(mut signal) = strategy.evaluate(game, &snapshot.risk, current_exposure, order_books) {
+                // Skip break_ev ADD orders when not enough time remains in break
+                if signal.strategy == "break_ev" && !signal.is_close && !game.break_has_time_for_order(45) {
+                    tracing::info!(
+                        "BREAK SKIP: {} v {} | break_ev ADD skipped — insufficient time remaining in break",
+                        game.away_team, game.home_team,
+                    );
+                    continue;
+                }
+
                 // Determine if this signal reduces existing game-level exposure.
                 let is_reduce = snapshot.risk.is_reduce_order(
                     &game.kalshi_markets, &signal.kalshi_ticker, &signal.side,
@@ -462,17 +471,29 @@ pub async fn execute_signal(
                     } else {
                         String::new()
                     };
-                    // For pre-game, show scheduled start time instead of generic "Scheduled"
                     let cl = if game.phase == crate::espn::types::GamePhase::PreGame {
+                        // For pre-game, show scheduled start time instead of generic "Scheduled"
                         if let Some(ts) = game.start_time_ts {
-                            // Eastern time: CBB season spans EST (UTC-5) and EDT (UTC-4).
-                            // Use UTC-5 as a reasonable approximation; may be off 1h post-DST.
                             let eastern = chrono::FixedOffset::west_opt(5 * 3600).unwrap();
                             chrono::DateTime::from_timestamp(ts, 0)
                                 .map(|dt| dt.with_timezone(&eastern).format("Starts %I:%M %p ET").to_string())
                                 .unwrap_or_else(|| game.status_detail.clone())
                         } else {
                             game.status_detail.clone()
+                        }
+                    } else if game.phase.is_live_or_break() {
+                        // For live/break, build clock from period + display_clock for richer detail
+                        let period_label = match game.period {
+                            Some(1) => "1st Half",
+                            Some(2) => "2nd Half",
+                            Some(p) if p > 2 => "OT",
+                            _ => "",
+                        };
+                        match (period_label.is_empty(), &game.display_clock) {
+                            (false, Some(dc)) => format!("{}, {}", period_label, dc),
+                            (false, None) => period_label.to_string(),
+                            (true, Some(dc)) => dc.clone(),
+                            _ => game.status_detail.clone(),
                         }
                     } else {
                         game.status_detail.clone()
@@ -509,6 +530,7 @@ pub async fn execute_signal(
                     &resp.order.status,
                     edge_bps,
                     signal.fair_value_cents,
+                    signal.is_close,
                     game_info.as_ref(),
                 ) {
                     tracing::warn!("Failed to log order {}: {:?}", resp.order.order_id, e);

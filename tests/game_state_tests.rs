@@ -372,6 +372,7 @@ fn signal_to_order_passes_expiration_in_seconds() {
         expiration_ts: Some(1772996400),
         edge_after_fees: 0.05,
         fair_value_cents: None,
+        is_close: false,
         max_contracts: None,
     };
 
@@ -396,6 +397,7 @@ fn signal_to_order_none_expiration() {
         expiration_ts: None,
         edge_after_fees: 0.05,
         fair_value_cents: None,
+        is_close: false,
         max_contracts: None,
     };
 

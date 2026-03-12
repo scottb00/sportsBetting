@@ -423,6 +423,13 @@ function shortDateTime(ts) {
   const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   return `${date} ${time}`;
 }
+function gameClockLabel(g) {
+  const periodLabel = g.period === 1 ? '1st Half' : g.period === 2 ? '2nd Half' : g.period > 2 ? 'OT' : '';
+  if (periodLabel && g.display_clock) return `${periodLabel}, ${g.display_clock}`;
+  if (periodLabel) return periodLabel;
+  if (g.display_clock) return g.display_clock;
+  return g.status_detail || '';
+}
 function gameDateTime(epochSecs) {
   if (!epochSecs) return { display: '-', date: '', sortKey: Infinity };
   const d = new Date(epochSecs * 1000);
@@ -740,7 +747,7 @@ async function refresh() {
           <td style="font-size:11px">${g._dt.display}</td>
           <td>${g.away_team} @ ${g.home_team}</td>
           <td class="num">${score}</td>
-          <td><span class="phase phase-${g.phase}">${g.phase}</span>${(g.phase === 'Live' || g.phase === 'Break' || g.phase === 'Halftime') && g.status_detail ? `<div style="font-size:11px;color:#8b949e;margin-top:2px">${g.status_detail}</div>` : ''}</td>
+          <td><span class="phase phase-${g.phase}">${g.phase}</span>${(g.phase === 'Live' || g.phase === 'Break' || g.phase === 'Halftime') ? `<div style="font-size:11px;color:#8b949e;margin-top:2px">${gameClockLabel(g)}</div>` : ''}</td>
           <td class="num">${fmtPct(g.espn_home_win_prob)}</td>
           <td class="num">${g._bid != null || g._ask != null ? (g._bid != null ? g._bid.toFixed(0) : '-') + ' / ' + (g._ask != null ? g._ask.toFixed(0) : '-') : '-'}</td>
           <td class="num">${fmtEdgeWithDollars(g._edge, 1)}${(g.phase === 'Break' || g.phase === 'Halftime' || g.phase === 'Live') && g._evalResult ? '<br>' + fmtEvalBadge(g._evalResult, g._evalEdgeAfterFees, g._evalAloPrice) : ''}</td>
@@ -826,12 +833,12 @@ async function refresh() {
         const cost = (o.price_cents * o.count / 100).toFixed(2);
         return `<tr>
           <td style="font-size:11px">${shortDateTime(o.created_at)}</td>
-          <td><span class="${stratCls}">${stratLabel}</span></td>
+          <td><span class="${stratCls}">${stratLabel}</span>${o.is_close ? ' <span style="color:#f0883e;font-size:10px;font-weight:600">CLOSE</span>' : ''}</td>
           <td><div class="ticker-cell"><span>${gameLabel}</span>${o.game_name ? `<span class="game-name">${o.ticker}</span>` : ''}</div></td>
           <td>${fmtPosition(o)}</td>
           <td class="num">${o.count}</td>
           <td class="num">${o.price_cents}¢</td>
-          <td class="num">${o.espn_fair != null ? (o.espn_fair * 100).toFixed(1) + '¢' : '-'}</td>
+          <td class="num">${o.fair_value_cents != null ? o.fair_value_cents.toFixed(1) + '¢' : '-'}</td>
           <td class="num">${o.edge_bps != null ? fmtEdgeBps(o.edge_bps, o.count) : fmtEdgeWithDollars(o.edge, o.count)}</td>
           <td class="num">$${cost}</td>
           <td><span class="${statusCls}">${o.status}</span></td>
@@ -884,12 +891,12 @@ async function refresh() {
         const pnlCls = pnl != null ? (pnl > 0 ? 'edge-pos' : pnl < 0 ? 'edge-neg' : '') : '';
         return `<tr>
           <td style="font-size:11px">${shortDateTime(f.filled_at)}</td>
-          <td><span class="${stratCls}">${stratLabel}</span></td>
+          <td><span class="${stratCls}">${stratLabel}</span>${f.is_close ? ' <span style="color:#f0883e;font-size:10px;font-weight:600">CLOSE</span>' : ''}</td>
           <td><div class="ticker-cell"><span>${gameLabel}</span>${f.game_name ? `<span class="game-name">${f.ticker}</span>` : ''}</div></td>
           <td>${fmtPosition(f)}</td>
           <td class="num">${f.count}</td>
           <td class="num">${f.price_cents}¢</td>
-          <td class="num">${f.espn_fair != null ? (f.espn_fair * 100).toFixed(1) + '¢' : '-'}</td>
+          <td class="num">${f.fair_value_cents != null ? f.fair_value_cents.toFixed(1) + '¢' : '-'}</td>
           <td class="num">${fmtEdgeBps(f.edge_bps, f.count)}</td>
           <td class="num">$${cost}</td>
           <td class="num">$${f.fee_dollars.toFixed(2)}</td>

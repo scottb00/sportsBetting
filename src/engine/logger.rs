@@ -101,7 +101,12 @@ impl TradeLogger {
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN away_team TEXT");
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN is_home INTEGER");
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN fair_value_cents INTEGER");
+        // Migrate legacy espn_fair → fair_value_cents (old DBs had REAL column named espn_fair)
+        let _ = conn.execute_batch(
+            "UPDATE orders SET fair_value_cents = CAST(espn_fair * 100 AS INTEGER) WHERE espn_fair IS NOT NULL AND fair_value_cents IS NULL"
+        );
         let _ = conn.execute_batch("ALTER TABLE fills ADD COLUMN fill_pnl REAL");
+        let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN is_close INTEGER");
 
         Ok(Self { conn })
     }
@@ -119,11 +124,12 @@ impl TradeLogger {
         status: &str,
         edge_bps: Option<f64>,
         fair_value_cents: Option<i64>,
+        is_close: bool,
         game_info: Option<&GameInfo>,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps, fair_value_cents, game_name, home_team, away_team, is_home, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            "INSERT INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps, fair_value_cents, is_close, game_name, home_team, away_team, is_home, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?15, ?11, ?12, ?13, ?14, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
              ON CONFLICT(order_id) DO UPDATE SET
                strategy = ?3,
                action = ?4,
@@ -133,6 +139,7 @@ impl TradeLogger {
                status = ?8,
                edge_bps = COALESCE(?9, edge_bps),
                fair_value_cents = COALESCE(?10, fair_value_cents),
+               is_close = COALESCE(?15, is_close),
                game_name = COALESCE(?11, game_name),
                home_team = COALESCE(?12, home_team),
                away_team = COALESCE(?13, away_team),
@@ -144,6 +151,7 @@ impl TradeLogger {
                 game_info.map(|g| g.home_team.as_str()),
                 game_info.map(|g| g.away_team.as_str()),
                 game_info.map(|g| g.is_home as i32),
+                is_close as i32,
             ],
         )?;
         Ok(())

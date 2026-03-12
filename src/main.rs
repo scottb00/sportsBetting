@@ -127,6 +127,12 @@ async fn main() -> Result<()> {
             }
         }
         tracing::info!("Loaded positions from Kalshi, seeded risk manager");
+
+        // Set fill sync watermark to "now" so first maintenance tick only fetches
+        // truly new fills. Positions are already correct from seed_positions() above —
+        // running sync_fills with no watermark would re-apply ALL historical fills
+        // on top of seeded positions, doubling them.
+        s.order_manager.set_last_fill_sync_ts(chrono::Utc::now().timestamp());
     }
     handlers::sync_orders(&state, &logger, &kalshi_rest).await;
     // Add resting order counts to committed_contracts (position was seeded above)
@@ -134,8 +140,6 @@ async fn main() -> Result<()> {
         let mut s = state.lock().await;
         s.order_manager.seed_committed_from_resting();
     }
-    // Backfill fills from Kalshi REST (catches any missed WS fill events)
-    handlers::sync_fills(&state, &logger, &kalshi_rest).await;
 
     // --- Connect WebSockets ---
     let (mut kalshi_rx, kalshi_ws_handle) = connect_kalshi_ws(&auth, &config, &mapper).await?;

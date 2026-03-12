@@ -36,21 +36,24 @@ pub async fn handle_kalshi_event(
             // Calculate maker fee locally (WS fills don't include fee_cost)
             let fee_dollars = RiskManager::maker_fee(fill.count, price_cents) / 100.0;
             // Extract strategy and game_info while holding state lock
-            let (new_status, strategy, game_info) = {
+            let (new_status, strategy, game_info, is_new) = {
                 let mut s = state.lock().await;
-                s.risk.record_fill(
-                    &fill.market_ticker, &fill.action, &fill.side,
-                    price_cents, fill.count,
-                );
                 let was_resting = s.order_manager.has_resting_order(&fill.market_ticker);
                 let strat = s.order_manager.get_strategy(&fill.order_id)
                     .unwrap_or_default().to_string();
                 let gi = GameInfo::from_game_state(&s.game_state, &fill.market_ticker);
-                s.order_manager.record_fill(&fill.order_id, fill.count);
+                let is_new = s.apply_fill_if_new(
+                    &fill.trade_id, &fill.market_ticker, &fill.order_id,
+                    &fill.action, &fill.side, price_cents, fill.count,
+                );
                 let still_resting = s.order_manager.has_resting_order(&fill.market_ticker);
                 let status = if was_resting && !still_resting { "filled" } else { "partial_fill" };
-                (status, strat, gi)
+                (status, strat, gi, is_new)
             };
+            if !is_new {
+                tracing::debug!("WS fill {} already processed — skipping", fill.trade_id);
+                return;
+            }
             // Log under logger lock (separate from state lock)
             {
                 let log = logger.lock().unwrap();

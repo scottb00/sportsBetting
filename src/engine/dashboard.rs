@@ -31,6 +31,8 @@ struct GameView {
     away_score: Option<i32>,
     phase: String,
     status_detail: String,
+    display_clock: Option<String>,
+    period: Option<i32>,
     espn_home_win_prob: Option<f64>,
     /// Game start time as unix seconds (from ESPN).
     start_time_ts: Option<i64>,
@@ -86,8 +88,10 @@ struct OrderRow {
     created_at: String,
     /// Edge at placement time in basis points (from DB). Preferred over live-computed edge.
     edge_bps: Option<f64>,
-    /// Fair value in cents (0–100) at placement time. None for close orders.
+    /// Fair value in cents (0–100) at placement time.
     fair_value_cents: Option<i64>,
+    /// Whether this is a closing order (unwinding existing position).
+    is_close: Option<bool>,
     /// Perceived edge fraction for display when edge_bps is unavailable (legacy fallback only).
     edge: Option<f64>,
 }
@@ -109,6 +113,13 @@ struct FillRow {
     fee_dollars: f64,
     filled_at: String,
     edge_bps: Option<f64>,
+    fair_value_cents: Option<i64>,
+    /// Whether this fill's parent order was a closing order.
+    is_close: Option<bool>,
+    /// Settlement PnL from DB (used to back-derive mark for settled fills).
+    fill_pnl: Option<f64>,
+    /// Mark price in cents (0–100). Settled fills: 0 or 100. Open fills: live fair value.
+    mark_cents: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -174,6 +185,8 @@ struct GameSnapshot {
     away_score: Option<i32>,
     phase: String,
     status_detail: String,
+    display_clock: Option<String>,
+    period: Option<i32>,
     espn_home_win_prob: Option<f64>,
     start_time_ts: Option<i64>,
     net_game_contracts: i64,
@@ -213,6 +226,8 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
                     away_score: g.away_score,
                     phase: format!("{:?}", g.phase),
                     status_detail: g.status_detail.clone(),
+                    display_clock: g.display_clock.clone(),
+                    period: g.period,
                     espn_home_win_prob: g.espn_home_win_prob,
                     start_time_ts: g.start_time_ts,
                     net_game_contracts: s.risk.net_game_home_risk(&g.kalshi_markets),
@@ -261,6 +276,8 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
             away_score: g.away_score,
             phase: g.phase,
             status_detail: g.status_detail,
+            display_clock: g.display_clock,
+            period: g.period,
             espn_home_win_prob: g.espn_home_win_prob,
             start_time_ts: g.start_time_ts,
             net_game_contracts: g.net_game_contracts,
@@ -357,6 +374,14 @@ async fn api_orders(State(state): State<DashboardState>) -> impl IntoResponse {
                 }
             }
         }
+        // Enrich fair_value_cents from live state when missing in DB
+        if row.fair_value_cents.is_none() {
+            if let Some(e) = enrich.get(&row.ticker) {
+                if let Some(fv) = e.fair_value {
+                    row.fair_value_cents = Some((fv * 100.0).round() as i64);
+                }
+            }
+        }
         // DB values remain as fallback for tickers no longer in live game state
     }
     Json(rows)
@@ -384,7 +409,35 @@ async fn api_fills(State(state): State<DashboardState>) -> impl IntoResponse {
                 row.edge_bps = Some(compute_order_edge(fv, row.price_cents, &row.side, &row.action) * 10000.0);
             }
         }
-        // DB values remain as fallback for tickers no longer in live game state
+        // Enrich fair_value_cents from live state when missing in DB
+        if row.fair_value_cents.is_none() {
+            if let Some(e) = enrich.get(&row.ticker) {
+                if let Some(fv) = e.fair_value {
+                    row.fair_value_cents = Some((fv * 100.0).round() as i64);
+                }
+            }
+        }
+
+        // Compute mark_cents
+        if let Some(pnl) = row.fill_pnl {
+            // Settled fill: back-derive mark (0 or 100) from fill_pnl.
+            // settle_fills formula: Buy → (settlement - price) * count/100 - fee
+            //                       Sell → (price - settlement) * count/100 - fee
+            // where settlement = 100 if the fill's side won, 0 otherwise.
+            let fee = row.fee_dollars;
+            let gross = pnl + fee;
+            let is_buy = row.action.eq_ignore_ascii_case("buy");
+            let side_won = if is_buy { gross >= 0.0 } else { gross <= 0.0 };
+            let is_yes = row.side.eq_ignore_ascii_case("yes");
+            // mark_cents is the YES price: 100 if YES won, 0 if NO won
+            let yes_won = if is_yes { side_won } else { !side_won };
+            row.mark_cents = Some(if yes_won { 100.0 } else { 0.0 });
+        } else if let Some(e) = enrich.get(&row.ticker) {
+            // Open fill: use live fair value as mark-to-market (already YES-aligned)
+            if let Some(fv) = e.fair_value {
+                row.mark_cents = Some((fv * 100.0).round());
+            }
+        }
     }
     Json(rows)
 }
@@ -460,11 +513,12 @@ fn compute_order_edge(fair_value: f64, price_cents: i64, side: &str, action: &st
 fn query_orders(db_path: &str) -> anyhow::Result<Vec<OrderRow>> {
     let conn = open_read_only(db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT order_id, ticker, COALESCE(strategy,''), action, side, price_cents, count, status, created_at, game_name, home_team, away_team, is_home, edge_bps, fair_value_cents
+        "SELECT order_id, ticker, COALESCE(strategy,''), action, side, price_cents, count, status, created_at, game_name, home_team, away_team, is_home, edge_bps, fair_value_cents, is_close
          FROM orders ORDER BY datetime(created_at) DESC LIMIT 50"
     )?;
     let rows = stmt.query_map([], |row| {
         let is_home_int: Option<i32> = row.get(12)?;
+        let is_close_int: Option<i32> = row.get(15)?;
         Ok(OrderRow {
             order_id: row.get(0)?,
             ticker: row.get(1)?,
@@ -481,6 +535,7 @@ fn query_orders(db_path: &str) -> anyhow::Result<Vec<OrderRow>> {
             created_at: row.get(8)?,
             edge_bps: row.get(13)?,
             fair_value_cents: row.get(14)?,
+            is_close: is_close_int.map(|v| v != 0),
             edge: None,
         })
     })?.filter_map(|r| r.ok()).collect();
@@ -490,12 +545,13 @@ fn query_orders(db_path: &str) -> anyhow::Result<Vec<OrderRow>> {
 fn query_fills(db_path: &str) -> anyhow::Result<Vec<FillRow>> {
     let conn = open_read_only(db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT f.trade_id, f.order_id, f.ticker, f.side, f.action, f.price_cents, f.count, COALESCE(f.fee_cents,0), f.filled_at, COALESCE(o.strategy,''), o.edge_bps, o.game_name, o.home_team, o.away_team, o.is_home
+        "SELECT f.trade_id, f.order_id, f.ticker, f.side, f.action, f.price_cents, f.count, COALESCE(f.fee_cents,0), f.filled_at, COALESCE(o.strategy,''), o.edge_bps, o.game_name, o.home_team, o.away_team, o.is_home, o.fair_value_cents, o.is_close, f.fill_pnl
          FROM fills f LEFT JOIN orders o ON f.order_id = o.order_id
          ORDER BY f.filled_at DESC LIMIT 200"
     )?;
     let rows = stmt.query_map([], |row| {
         let is_home_int: Option<i32> = row.get(14)?;
+        let is_close_int: Option<i32> = row.get(16)?;
         Ok(FillRow {
             trade_id: row.get(0)?,
             order_id: row.get(1)?,
@@ -512,6 +568,10 @@ fn query_fills(db_path: &str) -> anyhow::Result<Vec<FillRow>> {
             fee_dollars: row.get(7)?,
             filled_at: row.get(8)?,
             edge_bps: row.get(10)?,
+            fair_value_cents: row.get(15)?,
+            is_close: is_close_int.map(|v| v != 0),
+            fill_pnl: row.get(17)?,
+            mark_cents: None, // populated in api_fills after enrichment
         })
     })?.filter_map(|r| r.ok()).collect();
     Ok(rows)

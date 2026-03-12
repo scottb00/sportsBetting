@@ -54,9 +54,10 @@ pub struct GameState {
     pub last_play_type: Option<String>,
 
     pub last_updated: std::time::Instant,
-    /// Wall-clock time when the current break started. Set on phase transition into break.
-    /// Used to compute per-break-type order TTLs.
-    pub break_started_at: Option<std::time::Instant>,
+    /// Absolute unix timestamp (seconds) when break_ev orders should expire.
+    /// Computed once on break entry (start + duration - safety buffer).
+    /// All orders during the same break share this expiration.
+    pub break_expires_at: Option<i64>,
 }
 
 impl GameState {
@@ -79,7 +80,7 @@ impl GameState {
             last_play: None,
             last_play_type: None,
             last_updated: std::time::Instant::now(),
-            break_started_at: None,
+            break_expires_at: None,
         }
     }
 
@@ -146,33 +147,37 @@ impl GameState {
         }
     }
 
-    /// Compute expiration unix timestamp (seconds) for a break_ev order.
-    /// Halftime: 840s TTL (60s safety buffer). TV timeout: 90s TTL (45s buffer).
-    /// Returns None if break timing is unknown (executor will use the config fallback TTL).
+    /// Returns the absolute expiration timestamp (unix seconds) for break_ev orders.
+    /// Computed once when the break starts; all orders during the same break share this value.
     pub fn break_expiration_ts(&self) -> Option<i64> {
-        let started = self.break_started_at?;
-        let (duration, safety_buffer): (u64, u64) = match self.phase {
-            GamePhase::Halftime => (900, 60),
-            GamePhase::Break => (135, 45), // TV timeouts only — team timeouts not traded
-            _ => return None,
-        };
-        let elapsed = started.elapsed().as_secs();
-        let ttl = duration
-            .saturating_sub(elapsed)
-            .saturating_sub(safety_buffer)
-            .max(1);
-        Some(chrono::Utc::now().timestamp() + ttl as i64)
+        self.break_expires_at
+    }
+
+    /// Returns true if there's enough time left in the break for a new order to fill.
+    pub fn break_has_time_for_order(&self, min_remaining_secs: i64) -> bool {
+        match self.break_expires_at {
+            Some(expires) => {
+                let remaining = expires - chrono::Utc::now().timestamp();
+                remaining >= min_remaining_secs
+            }
+            None => true, // unknown break timing (e.g. bot restart mid-break) — allow
+        }
     }
 
     /// Update game state fields from an ESPN scoreboard poll.
     pub fn update_from_espn(&mut self, game: &crate::espn::types::GameInfo) {
         let was_break = self.phase.is_break();
         self.phase = game.game_phase.clone();
-        // Track break start time for per-break-type order TTL computation
+        // Compute absolute break expiration once on break entry
         if self.phase.is_break() && !was_break {
-            self.break_started_at = Some(std::time::Instant::now());
+            let (duration, safety_buffer): (i64, i64) = match self.phase {
+                GamePhase::Halftime => (900, 60),
+                GamePhase::Break => (135, 45),
+                _ => (60, 30),
+            };
+            self.break_expires_at = Some(chrono::Utc::now().timestamp() + duration - safety_buffer);
         } else if !self.phase.is_break() {
-            self.break_started_at = None;
+            self.break_expires_at = None;
         }
         self.home_score = game.home_score;
         self.away_score = game.away_score;

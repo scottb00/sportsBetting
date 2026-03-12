@@ -6,6 +6,8 @@ Rust-based automated CBB (college basketball) betting bot on Kalshi. Uses ESPN +
 
 **IMPORTANT**: If you notice anything in this file that is wrong, outdated, or missing — update it immediately. This file must stay in sync with the actual codebase. When you add new files, change config fields, fix bugs, or alter behavior, update the relevant sections here before finishing your task. Future agents depend on this file being accurate.
 
+**IMPORTANT**: Do NOT run the bot locally unless explicitly asked. The bot runs on the DigitalOcean droplet. Local builds and tests are fine, but never `cargo run` locally.
+
 ## Quick Reference
 
 - **Build**: `cargo build` (or `cargo build --release`)
@@ -89,11 +91,13 @@ This is the #1 source of bugs. Each venue defines "YES" differently:
 - Post-only must post at `bid + 1` or `(100 - ask) + 1`, NOT at the existing bid/ask
 - `expiration_ts` takes unix SECONDS (not milliseconds)
 - Kalshi does NOT send WS notifications for expired orders — `prune_expired()` handles cleanup locally
-- **break_ev order safety**: Two-layer protection against stale orders during live play:
+- **break_ev order safety**: Three-layer protection against stale orders during live play:
   1. **Active cancellation**: `cancel_break_ev_orders()` in `scoreboard.rs` fires when ESPN detects break→live transition (via `breaks_ended()`), immediately cancels all resting break_ev orders
-  2. **Per-break TTL**: `GameState::break_expiration_ts(45)` sets order expiry to estimated break end minus 45s buffer. TV timeouts (135s) → ~90s TTL, team timeouts (30s conservative) → ~1s TTL, halftime (900s) → ~600s TTL. Falls back to config `order_ttl_secs` if `break_started_at` is unknown (e.g. bot restart mid-break)
+  2. **Fixed break expiration**: `break_expires_at` is computed once on break entry (start + duration - safety buffer) and stored on `GameState`. All orders during the same break share the same absolute expiration. TV timeouts: 90s effective, halftime: 840s effective. Falls back to config `order_ttl_secs` if `break_expires_at` is None (e.g. bot restart mid-break).
+  3. **Late-break order cutoff**: `break_has_time_for_order(45)` in executor blocks new break_ev ADD orders when <45s remain before expiration. Prevents stale late-break orders after fills. CLOSE orders (position unwinding) are always allowed.
 
 ### API Gotchas
+- **Kalshi API v2 dollar-string migration (2026-03)**: Kalshi migrated all prices from integer cents to decimal dollar strings, and counts from integers to FP strings. Field names changed: `price` → `price_dollars`, `delta` → `delta_fp`, `count` → `count_fp`, `remaining_count` → `remaining_count_fp`, `yes_price`/`no_price` → `yes_price_dollars`/`no_price_dollars`. Custom deserializers in `types.rs` handle both old (int) and new (string) formats, converting to i64 cents internally. CreateOrderRequest still uses old field names (Kalshi accepts both).
 - **Kalshi WS deltas**: Use `ts` field (ISO string), not `timestamp` (i64). Wrong field = silently dropped deltas.
 - **Kalshi positions API**: Returns `position` field (signed int: positive=YES, negative=NO). Does NOT return `yes_amount`/`no_amount`.
 - **Kalshi fills API**: `fee_cost` is a JSON string (e.g. `"0.0900"`), not float — needs custom deserializer. Value is in **dollars** (stored in DB column `fee_cents` — legacy misnomer, code uses `fee_dollars`). Also sends both `ticker` and `market_ticker` fields — cannot use `serde(alias)` or it fails with "duplicate field". `min_ts` param expects unix timestamp integer, not ISO string.

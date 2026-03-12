@@ -105,17 +105,20 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
         let mut s = state.lock().await;
         for (i, _price_cents, _fee_dollars, _game_info, _strategy) in &fill_data {
             let fill = &fills[*i];
-            s.order_manager.record_fill(&fill.order_id, fill.count);
-            // Update risk manager for fills discovered via REST
+            // apply_fill_if_new deduplicates against fills already seen via WS
             let price_cents = if fill.side == "yes" { fill.yes_price } else { fill.no_price };
-            s.risk.record_fill(&fill.ticker, &fill.action, &fill.side, price_cents, fill.count);
+            s.apply_fill_if_new(
+                &fill.trade_id, &fill.ticker, &fill.order_id,
+                &fill.action, &fill.side, price_cents, fill.count,
+            );
         }
 
         // Update high-water mark
         if let Some(latest) = fills.iter().map(|f| &f.created_time).max()
             && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(latest)
         {
-            s.order_manager.set_last_fill_sync_ts(dt.timestamp());
+            // +1 to avoid re-fetching the boundary fill (Kalshi min_ts uses >=)
+            s.order_manager.set_last_fill_sync_ts(dt.timestamp() + 1);
         }
 
         // Update order statuses in logger
