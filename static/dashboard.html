@@ -210,15 +210,6 @@
   <h2>Recent Orders</h2>
   <div class="filters" id="order-filters">
     <div class="filter-group">
-      <label>Strategy</label>
-      <select id="filter-order-strategy">
-        <option value="">All</option>
-        <option value="break_ev">break_ev</option>
-        <option value="clv_hunter">clv_hunter</option>
-        <option value="__synced__">synced</option>
-      </select>
-    </div>
-    <div class="filter-group">
       <label>Side</label>
       <select id="filter-order-side">
         <option value="">All</option>
@@ -245,7 +236,6 @@
     <thead>
       <tr>
         <th>Time</th>
-        <th>Strategy</th>
         <th>Game</th>
         <th>Position</th>
         <th class="num">Qty</th>
@@ -262,14 +252,6 @@
 
   <h2 style="font-size:16px; color:#58a6ff; margin-top:28px;">Recent Fills</h2>
   <div class="filters" id="fill-filters">
-    <div class="filter-group">
-      <label>Strategy</label>
-      <select id="filter-fill-strategy">
-        <option value="">All</option>
-        <option value="break_ev">break_ev</option>
-        <option value="clv_hunter">clv_hunter</option>
-      </select>
-    </div>
     <div class="filter-group">
       <label>Side</label>
       <select id="filter-fill-side">
@@ -295,7 +277,6 @@
     <thead>
       <tr>
         <th>Time</th>
-        <th>Strategy</th>
         <th>Game</th>
         <th>Position</th>
         <th class="num">Qty</th>
@@ -873,13 +854,10 @@ async function refresh() {
   // Orders
   if (orders) {
     const tbody = $('#orders-table tbody');
-    const fOStrat = $('#filter-order-strategy').value;
     const fOSide = $('#filter-order-side').value;
     const fOStatus = $('#filter-order-status').value;
     const fOGame = ($('#filter-order-game').value || '').toLowerCase();
     const filtered = orders.filter(o => {
-      if (fOStrat === '__synced__' && o.strategy) return false;
-      if (fOStrat && fOStrat !== '__synced__' && o.strategy !== fOStrat) return false;
       if (fOSide && o.side.toLowerCase() !== fOSide) return false;
       if (fOStatus && o.status !== fOStatus) return false;
       if (fOGame && !(o.game_name || o.ticker).toLowerCase().includes(fOGame)) return false;
@@ -887,22 +865,20 @@ async function refresh() {
     });
     const op = paginate(filtered, 'orders');
     if (filtered.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="10" class="empty">No orders match filters</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="9" class="empty">No orders match filters</td></tr>';
     } else {
       tbody.innerHTML = op.rows.map(o => {
-        const stratCls = o.strategy ? `strat strat-${o.strategy}` : 'strat strat-synced';
-        const stratLabel = o.strategy || 'synced';
         const statusCls = `status status-${o.status}`;
         const gameLabel = o.game_name || o.ticker;
         const cost = (o.price_cents * o.count / 100).toFixed(2);
+        const closeTag = o.is_close ? ' <span style="color:#f0883e;font-size:10px;font-weight:600">CLOSE</span>' : '';
         return `<tr>
           <td style="font-size:11px">${shortDateTime(o.created_at)}</td>
-          <td><span class="${stratCls}">${stratLabel}</span>${o.is_close ? ' <span style="color:#f0883e;font-size:10px;font-weight:600">CLOSE</span>' : ''}</td>
-          <td><div class="ticker-cell"><span>${gameLabel}</span>${o.game_name ? `<span class="game-name">${o.ticker}</span>` : ''}</div></td>
+          <td><div class="ticker-cell"><span>${gameLabel}</span>${closeTag}${o.game_name ? `<span class="game-name">${o.ticker}</span>` : ''}</div></td>
           <td>${fmtPosition(o)}</td>
           <td class="num">${o.count}</td>
           <td class="num">${o.price_cents}¢</td>
-          <td class="num">${o.fair_value_cents != null ? ((o.side && o.side.toLowerCase() === 'no') ? (100 - o.fair_value_cents).toFixed(1) : o.fair_value_cents.toFixed(1)) + '¢' : '-'}</td>
+          <td class="num">${o.fair_value_cents != null ? o.fair_value_cents.toFixed(1) + '¢' : '-'}</td>
           <td class="num">${o.edge_bps != null ? fmtEdgeBps(o.edge_bps, o.count) : fmtEdgeWithDollars(o.edge, o.count)}</td>
           <td class="num">$${cost}</td>
           <td><span class="${statusCls}">${o.status}</span></td>
@@ -915,12 +891,10 @@ async function refresh() {
   // Fills
   if (fills) {
     const tbody = $('#fills-table tbody');
-    const fFStrat = $('#filter-fill-strategy').value;
     const fFSide = $('#filter-fill-side').value;
     const fFAction = $('#filter-fill-action').value;
     const fFGame = ($('#filter-fill-game').value || '').toLowerCase();
     const filtered = fills.filter(f => {
-      if (fFStrat && f.strategy !== fFStrat) return false;
       if (fFSide && f.side.toLowerCase() !== fFSide) return false;
       if (fFAction && f.action.toLowerCase() !== fFAction) return false;
       if (fFGame && !(f.game_name || f.ticker).toLowerCase().includes(fFGame)) return false;
@@ -928,11 +902,9 @@ async function refresh() {
     });
     const fp = paginate(filtered, 'fills');
     if (filtered.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="12" class="empty">No fills match filters</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="11" class="empty">No fills match filters</td></tr>';
     } else {
       tbody.innerHTML = fp.rows.map(f => {
-        const stratCls = f.strategy ? `strat strat-${f.strategy}` : 'strat strat-synced';
-        const stratLabel = f.strategy || 'synced';
         const gameLabel = f.game_name || f.ticker;
         const cost = (f.price_cents * f.count / 100).toFixed(2);
         const fee = f.fee_dollars;
@@ -953,14 +925,14 @@ async function refresh() {
         }
         const pnlLabel = pnl != null ? `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}` : '-';
         const pnlCls = pnl != null ? (pnl > 0 ? 'edge-pos' : pnl < 0 ? 'edge-neg' : '') : '';
+        const closeTag = f.is_close ? ' <span style="color:#f0883e;font-size:10px;font-weight:600">CLOSE</span>' : '';
         return `<tr>
           <td style="font-size:11px">${shortDateTime(f.filled_at)}</td>
-          <td><span class="${stratCls}">${stratLabel}</span>${f.is_close ? ' <span style="color:#f0883e;font-size:10px;font-weight:600">CLOSE</span>' : ''}</td>
-          <td><div class="ticker-cell"><span>${gameLabel}</span>${f.game_name ? `<span class="game-name">${f.ticker}</span>` : ''}</div></td>
+          <td><div class="ticker-cell"><span>${gameLabel}</span>${closeTag}${f.game_name ? `<span class="game-name">${f.ticker}</span>` : ''}</div></td>
           <td>${fmtPosition(f)}</td>
           <td class="num">${f.count}</td>
           <td class="num">${f.price_cents}¢</td>
-          <td class="num">${f.fair_value_cents != null ? ((f.side && f.side.toLowerCase() === 'no') ? (100 - f.fair_value_cents).toFixed(1) : f.fair_value_cents.toFixed(1)) + '¢' : '-'}</td>
+          <td class="num">${f.fair_value_cents != null ? f.fair_value_cents.toFixed(1) + '¢' : '-'}</td>
           <td class="num">${fmtEdgeBps(f.edge_bps, f.count)}</td>
           <td class="num">$${cost}</td>
           <td class="num">$${f.fee_dollars.toFixed(2)}</td>
