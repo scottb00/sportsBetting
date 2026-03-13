@@ -30,19 +30,19 @@ This document defines the trading rules for the sports betting bot. All code cha
 
 ### ADD orders (Case A: edge exists above threshold)
 
-- `target = floor((edge_after_fees - min_edge) * 100 * contracts_per_pct_edge)`, minimum 1
+- `target` is determined by conviction-based sizing (sportsbook consensus tiers), capped at `max_contracts_per_game`
 - `delta = target - effective_net_for_market` (game-level, cross-ticker aware)
 - Only add if delta has same sign as target (we're short of target)
-- `contracts = min(delta.abs(), max_contracts_per_order)`
+- `contracts = delta.abs()` (already bounded by conviction tiers and `max_contracts_per_game`)
 - Anti-scalp: skip if `delta.abs() < min_trade_contracts`
 
 ### CLOSE orders (Case B: no edge in position direction, but game-level exposure exists)
 
 - Triggered when `target == 0` AND `net_game_aligned != 0`
 - **Only closes when close-direction edge > 0 (after fees).** Never sends negative-edge close orders.
-- **Closes as much as possible**: `contracts = min(exposure, max_contracts_per_order)`
-- No edge-scaling on close size — if it's +EV to close, close the full position (up to per-order cap)
-- The `has_resting_order` dedup naturally creates drip behavior for positions larger than `max_contracts_per_order`
+- **Conviction gated**: Same veto + tier-based sizing as adds. Any sportsbook disagree → no close.
+- `contracts = min(conviction_tier_contracts, exposure, max_close_contracts)`
+- When no sportsbook data: treat as score=0 (lowest tier)
 
 ### Cross-Ticker Closing
 
@@ -56,7 +56,7 @@ This document defines the trading rules for the sports betting bot. All code cha
 
 ## Order Safety
 
-- **Per-order cap**: `max_contracts_per_order` (default 30). Combined with `has_resting_order` dedup, creates TWAP-like drip behavior.
+- **Per-close cap**: `max_close_contracts` (default 30). Limits visibility of large close orders on thin books.
 - **Per-game cap**: `max_contracts_per_game` — sum of (position + resting) across all game tickers.
 - **Resting order dedup**: Same ticker with a resting order blocks new signals (add or close).
 - **Break order expiration**: Computed once per break entry. TV timeouts ~90s, halftime ~840s.
@@ -69,5 +69,5 @@ This document defines the trading rules for the sports betting bot. All code cha
 - **No live trading.** No opens or closes during live play.
 - **No forced unwinds.** No settlement-risk closes, no final-minute emergency dumps.
 - **No negative-edge closes.** If the market doesn't give us a +EV exit, we hold.
-- **No edge-scaled close sizing.** If closing is +EV, we close as much as possible.
+- **No edge-scaled close sizing.** Close size is determined by conviction tiers, not edge magnitude.
 - **No taker orders.** Everything is post-only.

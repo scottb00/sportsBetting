@@ -33,6 +33,20 @@ pub struct BreakEvalLog {
     pub markets: Vec<BreakMarketEval>,
     /// Overall result for this game: "SIGNAL: ...", "NO_SIGNAL: reason", or skip reason
     pub result: String,
+    /// Composite sportsbook spread: best bid on home (highest across books).
+    pub spread_bid_home: Option<f64>,
+    /// Composite sportsbook spread: best offer on home (lowest across books).
+    pub spread_offer_home: Option<f64>,
+    /// Number of bookmakers contributing to the spread.
+    pub spread_books_count: usize,
+    /// ESPN home win probability (0.0–1.0).
+    pub espn_home_win_prob: Option<f64>,
+    /// Net game risk: positive = long home, negative = long away.
+    pub net_game_contracts: i64,
+    /// Phase label: "Break", "Halftime", etc.
+    pub phase: String,
+    /// Minimum edge threshold (from strategy config) for context on why signals were skipped.
+    pub min_edge: Option<f64>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -49,6 +63,14 @@ pub struct BreakMarketEval {
     pub side: Option<String>,
     /// Why this market didn't produce a signal (None if it did produce one)
     pub skip_reason: Option<String>,
+    /// Conviction score from sportsbook consensus.
+    pub conviction_score: Option<f64>,
+    /// Per-book conviction breakdown (JSON string).
+    pub conviction_details: Option<String>,
+    /// Net position on this ticker: positive = holding YES, negative = holding NO.
+    pub position: i64,
+    /// Volume on this market.
+    pub volume: Option<i64>,
 }
 
 /// Core mutable state: game data, risk, and order tracking.
@@ -94,6 +116,8 @@ pub struct StrategyRegistry {
     pub order_ttl: Duration,
     /// Hard cap on total contracts per game (across all tickers/orders).
     pub max_contracts_per_game: i64,
+    /// Break min edge threshold (for dashboard logging context).
+    pub break_min_edge: f64,
 }
 
 impl BotState {
@@ -144,25 +168,19 @@ pub fn create_bot_state(config: &Config) -> Result<(BotState, TradeLogger, Marke
 pub fn create_strategies(config: &Config) -> StrategyRegistry {
     use crate::strategies::passive_espn::PassiveEspn;
 
-    let conviction = if config.strategy.conviction_enabled {
-        use crate::strategies::common::ConvictionConfig;
-        Some(ConvictionConfig {
-            enabled: true,
-            max_contracts: config.strategy.conviction_max_contracts,
-            long_tiers: config.strategy.conviction_long_tiers.clone(),
-            short_tiers: config.strategy.conviction_short_tiers.clone(),
-        })
-    } else {
-        None
+    use crate::strategies::common::ConvictionConfig;
+    let conviction = ConvictionConfig {
+        max_contracts: config.strategy.conviction_max_contracts,
+        long_tiers: config.strategy.conviction_long_tiers.clone(),
+        short_tiers: config.strategy.conviction_short_tiers.clone(),
     };
 
     let strategies: Vec<Box<dyn Strategy>> = vec![
         Box::new(PassiveEspn::new(
             config.strategy.clv_hunter_min_edge,
             config.strategy.break_ev_min_edge,
-            config.strategy.contracts_per_pct_edge,
             config.strategy.min_trade_contracts,
-            config.strategy.max_contracts_per_order,
+            config.strategy.max_close_contracts,
             config.strategy.max_contracts_per_game,
             conviction,
         )),
@@ -178,6 +196,7 @@ pub fn create_strategies(config: &Config) -> StrategyRegistry {
         max_price_cents: config.strategy.max_price_cents,
         order_ttl: Duration::from_secs(config.strategy.order_ttl_secs),
         max_contracts_per_game: config.strategy.max_contracts_per_game,
+        break_min_edge: config.strategy.break_ev_min_edge,
     }
 }
 

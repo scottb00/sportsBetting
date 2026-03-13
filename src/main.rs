@@ -85,12 +85,8 @@ async fn main() -> Result<()> {
         let dashboard_break_log = break_log.clone();
         let db_path = config.logging.db_path.clone();
         let dashboard_dry_run = config.kalshi.dry_run;
-        let pregame_min_edge = config.strategy.clv_hunter_min_edge; // clv_hunter_min_edge is used as pregame
-        let break_min_edge = config.strategy.break_ev_min_edge;
-        let contracts_per_pct_edge = config.strategy.contracts_per_pct_edge;
-        let max_contracts_per_game = config.strategy.max_contracts_per_game;
         tokio::spawn(async move {
-            if let Err(e) = dashboard::serve(dashboard_state, dashboard_books, dashboard_logger, dashboard_break_log, &db_path, 3030, dashboard_dry_run, pregame_min_edge, break_min_edge, contracts_per_pct_edge, max_contracts_per_game).await {
+            if let Err(e) = dashboard::serve(dashboard_state, dashboard_books, dashboard_logger, dashboard_break_log, &db_path, 3030, dashboard_dry_run).await {
                 tracing::error!("Dashboard server failed: {:?}", e);
             }
         });
@@ -246,7 +242,7 @@ async fn main() -> Result<()> {
                     None => std::future::pending().await,
                 }
             } => {
-                handlers::handle_kalshi_event(event, &state, &order_books, &logger, &kalshi_rest).await;
+                handlers::handle_kalshi_event(event, &state, &order_books, &logger, &kalshi_rest, notifier.as_ref()).await;
             }
             Some(event) = async {
                 match &mut poly_rx {

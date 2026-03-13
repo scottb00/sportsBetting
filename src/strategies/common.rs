@@ -25,7 +25,7 @@ pub struct EdgeResult {
 ///
 /// Returns `None` if the book is invalid or there is no positive raw edge.
 /// Does NOT apply any minimum-edge threshold — callers decide that.
-pub fn compute_edge_and_alo(yes_bid: i64, yes_ask: i64, fair_value: f64) -> Option<EdgeResult> {
+pub fn compute_edge_and_alo(yes_bid: i64, yes_ask: i64, fair_value: f64, contracts: i64) -> Option<EdgeResult> {
     if yes_bid <= 0 || yes_ask >= 100 || yes_bid >= yes_ask {
         return None;
     }
@@ -56,7 +56,8 @@ pub fn compute_edge_and_alo(yes_bid: i64, yes_ask: i64, fair_value: f64) -> Opti
         return None;
     }
 
-    let fee_per_contract = RiskManager::maker_fee(1, alo_price) / 100.0;
+    let n = contracts.max(1);
+    let fee_per_contract = RiskManager::maker_fee(n, alo_price) / n as f64 / 100.0;
     let edge_after_fees = edge_raw - fee_per_contract;
 
     Some(EdgeResult {
@@ -70,7 +71,6 @@ pub fn compute_edge_and_alo(yes_bid: i64, yes_ask: i64, fair_value: f64) -> Opti
 /// Conviction-based sizing parameters, extracted from config.
 #[derive(Debug, Clone)]
 pub struct ConvictionConfig {
-    pub enabled: bool,
     pub max_contracts: i64,
     /// (min_score_threshold, contracts) — evaluated highest-threshold-first.
     pub long_tiers: Vec<(f64, i64)>,
@@ -89,13 +89,27 @@ fn conviction_to_contracts(score: f64, tiers: &[(f64, i64)], max_contracts: i64)
     best.min(max_contracts)
 }
 
+/// Format conviction details as a JSON array string for DB logging.
+fn format_conviction_details(details: &[(String, crate::sportsbooks::types::BookConviction, f64)]) -> String {
+    use crate::sportsbooks::types::BookConviction;
+    let entries: Vec<String> = details.iter().map(|(book, conv, weight)| {
+        let label = match conv {
+            BookConviction::Agree => "agree",
+            BookConviction::Disagree => "disagree",
+            BookConviction::NoOpinion => "no_opinion",
+        };
+        format!(r#"{{"book":"{}","conviction":"{}","weight":{:.1}}}"#, book, label, weight)
+    }).collect();
+    format!("[{}]", entries.join(","))
+}
+
 /// Evaluate edge for a specific Kalshi market within a game.
 ///
 /// Target-position model:
-/// 1. Compute target = floor(edge_pct * contracts_per_pct_edge) in the edge direction (0 if no edge).
+/// 1. Compute target from conviction-based sizing in the edge direction (0 if no edge).
 /// 2. Compare to current net_position(ticker).
-/// 3. If target > 0 and delta >= min_trade_contracts: emit add signal (capped at max_contracts_per_order).
-/// 4. If target == 0 and net != 0: emit close signal scaled by close-direction edge.
+/// 3. If target > 0 and delta >= min_trade_contracts: emit add signal.
+/// 4. If target == 0 and net != 0: emit close signal gated by conviction (same veto + tier sizing as adds).
 fn evaluate_market(
     game: &GameState,
     market: &KalshiMarketState,
@@ -103,11 +117,10 @@ fn evaluate_market(
     risk: &RiskManager,
     min_edge: f64,
     strategy_name: &str,
-    contracts_per_pct_edge: f64,
     min_trade_contracts: i64,
-    max_contracts_per_order: i64,
+    max_close_contracts: i64,
     max_contracts_per_game: i64,
-    conviction_config: Option<&ConvictionConfig>,
+    conviction_config: &ConvictionConfig,
 ) -> Option<OrderSignal> {
     let fair_value = game.fair_value_for_market(market)?;
 
@@ -118,13 +131,14 @@ fn evaluate_market(
 
     // Step 1: compute target in signed YES-units (+ = hold YES, - = hold NO)
     // Capped at max_contracts_per_game to prevent unrealistic targets on thin/wide books.
-    let target_signed: i64 = if let Some(r) = compute_edge_and_alo(yes_bid, yes_ask, fair_value) {
+    // Also capture conviction data for logging on the signal.
+    let mut signal_conviction_score: Option<f64> = None;
+    let mut signal_conviction_details: Option<String> = None;
+
+    let target_signed: i64 = if let Some(r) = compute_edge_and_alo(yes_bid, yes_ask, fair_value, 1) {
         if r.edge_after_fees >= min_edge {
-            // Conviction-based sizing: replace edge-linear formula with sportsbook consensus tiers
-            let n = if let Some(cc) = conviction_config
-                && cc.enabled
-                && let Some(spread) = &game.sportsbook_spread
-            {
+            // Conviction-based sizing: sportsbook consensus tiers
+            let n = if let Some(spread) = &game.sportsbook_spread {
                 let short_break = matches!(game.phase, GamePhase::Break);
                 let conv = spread.conviction_score(
                     r.alo_price,
@@ -133,6 +147,10 @@ fn evaluate_market(
                     short_break,
                     game.break_started_at,
                 );
+
+                // Capture conviction data for the signal
+                signal_conviction_score = Some(conv.score);
+                signal_conviction_details = Some(format_conviction_details(&conv.details));
 
                 // Any disagreement → hard veto, no trade
                 if conv.any_disagree {
@@ -143,8 +161,8 @@ fn evaluate_market(
                     return None;
                 }
 
-                let tiers = if short_break { &cc.short_tiers } else { &cc.long_tiers };
-                let contracts = conviction_to_contracts(conv.score, tiers, cc.max_contracts);
+                let tiers = if short_break { &conviction_config.short_tiers } else { &conviction_config.long_tiers };
+                let contracts = conviction_to_contracts(conv.score, tiers, conviction_config.max_contracts);
 
                 tracing::info!(
                     "Conviction {}: {} → {} contracts — {}",
@@ -153,8 +171,18 @@ fn evaluate_market(
 
                 contracts
             } else {
-                // Fallback: legacy edge-linear sizing
-                ((r.edge_after_fees - min_edge) * 100.0 * contracts_per_pct_edge).floor().max(1.0) as i64
+                // No sportsbook data — treat as 0 conviction
+                signal_conviction_score = Some(0.0);
+                let short_break = matches!(game.phase, GamePhase::Break);
+                let tiers = if short_break { &conviction_config.short_tiers } else { &conviction_config.long_tiers };
+                let contracts = conviction_to_contracts(0.0, tiers, conviction_config.max_contracts);
+
+                tracing::info!(
+                    "Conviction {}: {} → {} contracts — no sportsbook data (score=0)",
+                    strategy_name, market.ticker, contracts,
+                );
+
+                contracts
             };
             let n = n.min(max_contracts_per_game);
             if r.buying_yes { n } else { -n }
@@ -187,7 +215,7 @@ fn evaluate_market(
         let (side, action, alo, edge) = if target_signed > 0 {
             // Target is YES — buy YES
             let alo = (yes_ask - 1).max(1);
-            let edge = if let Some(r) = compute_edge_and_alo(yes_bid, yes_ask, fair_value) {
+            let edge = if let Some(r) = compute_edge_and_alo(yes_bid, yes_ask, fair_value, delta.abs()) {
                 r.edge_after_fees
             } else {
                 return None;
@@ -196,7 +224,7 @@ fn evaluate_market(
         } else {
             // Target is NO (target_signed < 0) — buy NO
             let alo = (100 - yes_bid - 1).max(1);
-            let edge = if let Some(r) = compute_edge_and_alo(yes_bid, yes_ask, fair_value) {
+            let edge = if let Some(r) = compute_edge_and_alo(yes_bid, yes_ask, fair_value, delta.abs()) {
                 r.edge_after_fees
             } else {
                 return None;
@@ -204,7 +232,7 @@ fn evaluate_market(
             (OrderSide::No, OrderAction::Buy, alo, edge)
         };
 
-        let contracts = delta.abs().min(max_contracts_per_order);
+        let contracts = delta.abs();
         let size_dollars = contracts as f64 * alo as f64 / 100.0;
 
         let mid = (yes_bid + yes_ask) as f64 / 2.0 / 100.0;
@@ -229,6 +257,8 @@ fn evaluate_market(
             fair_value_cents: Some((fair_value * 100.0).round() as i64),
             is_close: false,
             max_contracts: None,
+            conviction_score: signal_conviction_score,
+            conviction_details: signal_conviction_details,
         })
     } else if net_game_aligned != 0 {
         // Case B: no edge in position direction, but game-level exposure exists — close it.
@@ -248,7 +278,7 @@ fn evaluate_market(
         let exposure_abs = net_game_aligned.unsigned_abs() as i64;
 
         // Compute edge in the close direction
-        let close_edge = compute_edge_and_alo(yes_bid, yes_ask, fair_value)
+        let close_edge = compute_edge_and_alo(yes_bid, yes_ask, fair_value, exposure_abs)
             .filter(|r| {
                 // Edge must be in the close direction (buying opposite of game-level exposure)
                 (net_game_aligned > 0 && !r.buying_yes) || (net_game_aligned < 0 && r.buying_yes)
@@ -256,12 +286,61 @@ fn evaluate_market(
             .map(|r| r.edge_after_fees.max(0.0))
             .unwrap_or(0.0);
 
-        // Close as much as possible when +EV — only gate is positive close edge
+        // Close requires positive edge
         if close_edge <= 0.0 {
             return None;
         }
 
-        let contracts = exposure_abs.min(max_contracts_per_order);
+        // Conviction gating + tier-based sizing for closes (same as adds)
+        let buying_yes = matches!(side, OrderSide::Yes);
+        let short_break = matches!(game.phase, GamePhase::Break);
+
+        let (contracts, close_conviction_score, close_conviction_details) = if let Some(spread) = &game.sportsbook_spread {
+            let conv = spread.conviction_score(
+                alo, buying_yes, market.is_home, short_break, game.break_started_at,
+            );
+
+            let score = conv.score;
+            let details = format_conviction_details(&conv.details);
+
+            // Any disagreement → hard veto, no close
+            if conv.any_disagree {
+                tracing::info!(
+                    "Conviction VETO CLOSE {}: {} — {}",
+                    strategy_name, market.ticker, conv
+                );
+                return None;
+            }
+
+            let tiers = if short_break { &conviction_config.short_tiers } else { &conviction_config.long_tiers };
+            let tier_contracts = conviction_to_contracts(score, tiers, conviction_config.max_contracts);
+            // Cap at exposure (can't close more than we have) and max_close_contracts
+            let n = tier_contracts.min(exposure_abs).min(max_close_contracts);
+
+            tracing::info!(
+                "Conviction CLOSE {}: {} → {} contracts (tier={}, exposure={}) — {}",
+                strategy_name, market.ticker, n, tier_contracts, exposure_abs, conv
+            );
+
+            (n, Some(score), Some(details))
+        } else {
+            // No sportsbook data — treat as 0 conviction
+            let tiers = if short_break { &conviction_config.short_tiers } else { &conviction_config.long_tiers };
+            let tier_contracts = conviction_to_contracts(0.0, tiers, conviction_config.max_contracts);
+            let n = tier_contracts.min(exposure_abs).min(max_close_contracts);
+
+            tracing::info!(
+                "Conviction CLOSE {}: {} → {} contracts — no sportsbook data (score=0)",
+                strategy_name, market.ticker, n,
+            );
+
+            (n, Some(0.0), None)
+        };
+
+        if contracts == 0 {
+            return None;
+        }
+
         let size_dollars = contracts as f64 * alo as f64 / 100.0;
 
         tracing::info!(
@@ -283,6 +362,8 @@ fn evaluate_market(
             fair_value_cents: Some((fair_value * 100.0).round() as i64),
             is_close: true,
             max_contracts: None,
+            conviction_score: close_conviction_score,
+            conviction_details: close_conviction_details,
         })
     } else {
         // Case C: no target, no position — nothing to do
@@ -298,11 +379,10 @@ pub fn evaluate_edge(
     min_edge: f64,
     strategy_name: &str,
     order_books: &HashMap<String, LocalOrderBook>,
-    contracts_per_pct_edge: f64,
     min_trade_contracts: i64,
-    max_contracts_per_order: i64,
+    max_close_contracts: i64,
     max_contracts_per_game: i64,
-    conviction_config: Option<&ConvictionConfig>,
+    conviction_config: &ConvictionConfig,
 ) -> Option<OrderSignal> {
     let mut best: Option<OrderSignal> = None;
 
@@ -310,7 +390,7 @@ pub fn evaluate_edge(
         if let Some(signal) = evaluate_market(
             game, market, order_books, risk,
             min_edge, strategy_name,
-            contracts_per_pct_edge, min_trade_contracts, max_contracts_per_order,
+            min_trade_contracts, max_close_contracts,
             max_contracts_per_game, conviction_config,
         ) && best.as_ref().is_none_or(|b| signal.edge_after_fees > b.edge_after_fees)
         {

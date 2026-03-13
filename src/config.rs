@@ -56,10 +56,8 @@ fn default_min_price_cents() -> f64 { 10.0 }
 fn default_max_price_cents() -> f64 { 90.0 }
 fn default_order_ttl_secs() -> u64 { 120 }
 fn default_max_contracts_per_game() -> i64 { 20 }
-fn default_contracts_per_pct_edge() -> f64 { 20.0 }
 fn default_min_trade_contracts() -> i64 { 5 }
-fn default_max_contracts_per_order() -> i64 { 30 }
-fn default_conviction_enabled() -> bool { true }
+fn default_max_close_contracts() -> i64 { 30 }
 fn default_conviction_max_contracts() -> i64 { 100 }
 // Long break tiers: (min_score, contracts)
 fn default_conviction_long_tiers() -> Vec<(f64, i64)> {
@@ -91,23 +89,14 @@ pub struct StrategyConfig {
     /// Hard cap on total contracts per game (across all tickers/orders). Default: 20.
     #[serde(default = "default_max_contracts_per_game")]
     pub max_contracts_per_game: i64,
-    /// Contracts to target per 1% of edge above min_edge. Replaces Kelly sizing.
-    /// e.g. 20.0 means 3% edge → target 60 contracts. Default: 20.
-    #[serde(default = "default_contracts_per_pct_edge")]
-    pub contracts_per_pct_edge: f64,
     /// Minimum contract delta required to place an add order (anti-scalp guard).
     /// Prevents tiny top-up orders when position is already close to target. Default: 5.
     #[serde(default = "default_min_trade_contracts")]
     pub min_trade_contracts: i64,
-    /// Maximum contracts per single order (add or close). Limits information leakage
-    /// on thin books. The bot waits for each clip to fill/expire before placing another. Default: 30.
-    #[serde(default = "default_max_contracts_per_order")]
-    pub max_contracts_per_order: i64,
-    /// Enable conviction-based sizing from sportsbook consensus. When true, order size
-    /// is determined by how many sportsbooks agree with the trade. When false, uses
-    /// legacy edge-linear sizing. Default: true.
-    #[serde(default = "default_conviction_enabled")]
-    pub conviction_enabled: bool,
+    /// Maximum contracts per single close order. Limits visibility of large close orders
+    /// on thin books. Default: 30.
+    #[serde(default = "default_max_close_contracts")]
+    pub max_close_contracts: i64,
     /// Maximum contracts for highest conviction tier. Default: 100.
     #[serde(default = "default_conviction_max_contracts")]
     pub conviction_max_contracts: i64,

@@ -77,6 +77,10 @@
   .pagination { display: flex; align-items: center; gap: 8px; padding: 8px 0; font-size: 12px; color: #8b949e; }
   .pagination button { background: #161b22; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 4px 10px; font-size: 12px; font-family: inherit; cursor: pointer; }
   .pagination button:hover:not(:disabled) { border-color: #58a6ff; color: #58a6ff; }
+
+  /* Break eval result badges */
+  .break-signal { color: #3fb950; font-weight: 600; }
+  .break-nosignal { color: #8b949e; }
   .pagination button:disabled { opacity: 0.3; cursor: default; }
   .pagination select { background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 3px 6px; font-size: 12px; font-family: inherit; }
   .pagination .page-info { margin: 0 4px; }
@@ -95,6 +99,23 @@
   .legend-box dt { color: #c9d1d9; font-weight: 600; display: inline; }
   .legend-box dd { display: inline; margin: 0; }
   .legend-box dd::after { content: ''; display: block; }
+
+  /* Conviction badges */
+  .conv-badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 11px; font-weight: 600; cursor: pointer; user-select: none; }
+  .conv-veto { background: #f8514933; color: #f85149; }
+  .conv-low { background: #d2992233; color: #d29922; }
+  .conv-high { background: #3fb95033; color: #3fb950; }
+  .conv-none { background: #484f5833; color: #484f58; }
+
+  /* Conviction detail panel (inline expand) */
+  .conv-detail { display: none; margin-top: 4px; padding: 6px 8px; background: #161b22; border: 1px solid #30363d; border-radius: 4px; font-size: 11px; white-space: normal; }
+  .conv-detail.open { display: block; }
+  .conv-detail table { margin: 0; width: auto; }
+  .conv-detail th { font-size: 10px; padding: 2px 8px; border-bottom: 1px solid #30363d; }
+  .conv-detail td { font-size: 11px; padding: 2px 8px; border-bottom: 1px solid #21262d; white-space: nowrap; }
+  .conv-agree { color: #3fb950; font-weight: 600; }
+  .conv-disagree { color: #f85149; font-weight: 600; }
+  .conv-neutral { color: #8b949e; }
 </style>
 </head>
 <body>
@@ -174,8 +195,9 @@
       <dt>Book Spread</dt><dd> &mdash; Composite sportsbook bid/offer on home-team win prob (best across Pinnacle, DK, FD, etc.)</dd>
       <dt>Kalshi Bid/Ask</dt><dd> &mdash; Kalshi orderbook YES bid/ask, aligned to the home team</dd>
       <dt>Edge</dt><dd> &mdash; Fair value minus Kalshi mid; shows which side (team name) has +EV</dd>
+      <dt>Conv</dt><dd> &mdash; Sportsbook conviction score; weighted agreement across books. Click to expand per-book breakdown. Red=veto/0, Yellow=low(&lt;3), Green=strong(3+)</dd>
       <dt>Volume</dt><dd> &mdash; Total Kalshi contract volume across all tickers for this game</dd>
-      <dt>Net / Target</dt><dd> &mdash; Signed home-team exposure: positive = long home wins, negative = long away wins</dd>
+      <dt>Position</dt><dd> &mdash; Net home-team exposure (positive = long home wins, negative = long away wins) + resting orders</dd>
     </dl>
     <div style="margin-top:4px;font-size:11px;color:#484f58">All probabilities and positions are oriented toward the <strong style="color:#c9d1d9">home team</strong> (listed second in "Away @ Home").</div>
   </div>
@@ -190,8 +212,9 @@
         <th class="num">Book Spread</th>
         <th class="num">Kalshi Bid/Ask</th>
         <th class="num">Edge</th>
+        <th class="num">Conv</th>
         <th class="num">Volume</th>
-        <th class="num">Net / Target</th>
+        <th class="num">Position</th>
       </tr>
     </thead>
     <tbody></tbody>
@@ -211,16 +234,15 @@
         <th>Time</th>
         <th>Game</th>
         <th>Score</th>
-        <th>Period</th>
         <th>Status</th>
-        <th>Ticker</th>
-        <th>Side</th>
+        <th class="num">ESPN %</th>
+        <th class="num">Book Spread</th>
         <th class="num">Bid/Ask</th>
         <th class="num">Fair</th>
-        <th class="num">ALO Price</th>
         <th class="num">Edge</th>
-        <th class="num">Edge-Fees</th>
-        <th>Result</th>
+        <th class="num">Conv</th>
+        <th class="num">Position</th>
+        <th>Result / Reason</th>
       </tr>
     </thead>
     <tbody></tbody>
@@ -257,11 +279,15 @@
       <tr>
         <th>Time</th>
         <th>Game</th>
+        <th>Pre</th>
+        <th>Close</th>
         <th>Position</th>
         <th class="num">Qty</th>
         <th class="num">Price</th>
         <th class="num">Fair</th>
         <th class="num">Edge</th>
+        <th class="num">Book Spread</th>
+        <th class="num">Conv</th>
         <th class="num">Cost</th>
         <th>Status</th>
       </tr>
@@ -298,11 +324,15 @@
       <tr>
         <th>Time</th>
         <th>Game</th>
+        <th>Pre</th>
+        <th>Close</th>
         <th>Position</th>
         <th class="num">Qty</th>
         <th class="num">Price</th>
         <th class="num">Fair</th>
         <th class="num">Edge</th>
+        <th class="num">Book Spread</th>
+        <th class="num">Conv</th>
         <th class="num">Cost</th>
         <th class="num">Fee</th>
         <th class="num">Mark</th>
@@ -425,6 +455,43 @@ function fmtEdgeBps(bps, count) {
   const cls = bps > 0 ? 'edge-pos' : bps < 0 ? 'edge-neg' : '';
   return `<span class="${cls}">${pct > 0 ? '+' : ''}${pct.toFixed(1)}% <span style="font-size:11px;opacity:0.7">($${dollars.toFixed(2)})</span></span>`;
 }
+// Conviction badge rendering
+let convDetailCounter = 0;
+function fmtConvBadge(score, detailsJson) {
+  if (score == null) return '<span class="conv-badge conv-none">-</span>';
+  let cls = 'conv-high';
+  let hasVeto = false;
+  if (detailsJson) {
+    try {
+      const details = typeof detailsJson === 'string' ? JSON.parse(detailsJson) : detailsJson;
+      hasVeto = details.some(d => d.conviction && d.conviction.toLowerCase() === 'disagree');
+    } catch {}
+  }
+  if (hasVeto || score === 0) cls = 'conv-veto';
+  else if (score < 3) cls = 'conv-low';
+  const id = 'conv-' + (convDetailCounter++);
+  const detailPanel = detailsJson ? renderConvDetail(detailsJson, id) : '';
+  const clickAttr = detailsJson ? ` onclick="toggleConvDetail('${id}')"` : '';
+  return `<span class="conv-badge ${cls}"${clickAttr}>${score.toFixed(1)}</span>${detailPanel}`;
+}
+function renderConvDetail(detailsJson, id) {
+  try {
+    const details = typeof detailsJson === 'string' ? JSON.parse(detailsJson) : detailsJson;
+    if (!Array.isArray(details) || details.length === 0) return '';
+    const rows = details.map(d => {
+      const conv = (d.conviction || 'unknown').toLowerCase();
+      const cls = conv === 'agree' ? 'conv-agree' : conv === 'disagree' ? 'conv-disagree' : 'conv-neutral';
+      const label = conv.charAt(0).toUpperCase() + conv.slice(1);
+      return `<tr><td>${d.book || '-'}</td><td class="${cls}">${label}</td><td class="num">${d.weight != null ? d.weight.toFixed(1) : '-'}</td></tr>`;
+    }).join('');
+    return `<div class="conv-detail" id="${id}"><table><thead><tr><th>Book</th><th>Conviction</th><th>Weight</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  } catch { return ''; }
+}
+function toggleConvDetail(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle('open');
+}
+
 // Translate order side+action into a position-style team label
 // Buy YES on home market = long home team, Buy NO on home market = long away team, etc.
 function fmtPosition(o) {
@@ -437,6 +504,32 @@ function fmtPosition(o) {
   const sideLabel = isYes ? 'YES' : 'NO';
   const direction = isBuy ? 'Buy' : 'Sell';
   return `<span class="pos-badge pos-neutral">${o.count} ${direction} ${sideLabel} <span style="font-size:10px;opacity:0.7">${team}</span></span>`;
+}
+// Format strategy type badge + close tag (legacy combined)
+function fmtTypeBadge(strategy, isClose) {
+  const label = strategy === 'pregame' ? 'PRE' : strategy === 'break_ev' ? 'BRK' : strategy || '-';
+  const color = strategy === 'pregame' ? '#8b949e' : strategy === 'break_ev' ? '#f0883e' : '#484f58';
+  const closeTag = isClose ? ' <span class="close-tag">CLOSE</span>' : '';
+  return `<span style="color:${color};font-size:11px;font-weight:600">${label}</span>${closeTag}`;
+}
+// Pregame flag column
+function fmtPreBadge(strategy) {
+  if (strategy === 'pregame') return '<span style="color:#8b949e;font-size:11px;font-weight:600">PRE</span>';
+  if (strategy === 'break_ev') return '<span style="color:#f0883e;font-size:11px;font-weight:600">BRK</span>';
+  return '<span style="color:#484f58;font-size:11px">' + (strategy || '-') + '</span>';
+}
+// Close flag column
+function fmtCloseBadge(isClose) {
+  if (isClose) return '<span class="close-tag">CLOSE</span>';
+  return '<span style="color:#484f58;font-size:11px">OPEN</span>';
+}
+// Format sportsbook spread for orders/fills (reuse game-level spread from enrichment)
+function fmtOrderSpread(o) {
+  if (o.spread_bid_home == null || o.spread_offer_home == null) return '-';
+  const bid = (o.spread_bid_home * 100).toFixed(1);
+  const offer = (o.spread_offer_home * 100).toFixed(1);
+  const booksLabel = o.spread_books_count > 0 ? ` <span style="font-size:10px;color:#8b949e">(${o.spread_books_count})</span>` : '';
+  return `<span style="color:#8b949e">${bid} / ${offer}</span>${booksLabel}`;
 }
 function parseTS(ts) {
   if (!ts) return null;
@@ -476,19 +569,17 @@ function fmtPositionBar(game) {
   // All fields are game-level and home-aligned from the backend.
   // Positive = long home team wins, negative = long away team wins.
   const net = game.net_game_contracts;
-  const target = game.target_game_contracts;
   const resting = game.total_resting_contracts;
 
-  if (net === 0 && target === 0 && resting === 0) return '<span style="color:#484f58">&mdash;</span>';
+  if (net === 0 && resting === 0) return '<span style="color:#484f58">&mdash;</span>';
 
   const fmtSigned = (v) => v > 0 ? `+${v}` : `${v}`;
   const color = (v) => v > 0 ? '#3fb950' : v < 0 ? '#f85149' : '#8b949e';
 
   const netStr = `<span style="font-weight:600;color:${color(net)}">${fmtSigned(net)}</span>`;
-  const targetStr = `<span style="color:${color(target)}">${fmtSigned(target)}</span>`;
   const restLabel = resting !== 0 ? ` <span class="pos-rest" style="color:${color(resting)}">(${fmtSigned(resting)} resting)</span>` : '';
 
-  return `${netStr} / ${targetStr}${restLabel}`;
+  return `${netStr}${restLabel}`;
 }
 
 function renderDailyChart(data, risk) {
@@ -720,6 +811,7 @@ async function refresh() {
     fetchJson('/api/variance_analysis'),
   ]);
 
+  convDetailCounter = 0; // Reset conviction detail IDs each refresh
   renderDailyChart(dailyChart, risk);
 
   // Variance Analysis
@@ -811,7 +903,11 @@ async function refresh() {
       const evalResult = bestEval ? bestEval.eval_result : null;
       const evalEdgeAfterFees = bestEval ? bestEval.edge_after_fees : null;
       const evalAloPrice = bestEval ? bestEval.alo_price : null;
-      return { ...g, _hm: hm, _bid: bid, _ask: ask, _edge: edge, _edgeSide: edgeSide, _vol: vol, _hasOrder: hasOrder, _posLabels: posLabels, _dt: dt, _evalResult: evalResult, _evalEdgeAfterFees: evalEdgeAfterFees, _evalAloPrice: evalAloPrice };
+      // Conviction: pick from best eval market, or home market
+      const convMarket = bestEval || hm;
+      const convScore = convMarket ? convMarket.conviction_score : null;
+      const convDetails = convMarket ? convMarket.conviction_details : null;
+      return { ...g, _hm: hm, _bid: bid, _ask: ask, _edge: edge, _edgeSide: edgeSide, _vol: vol, _hasOrder: hasOrder, _posLabels: posLabels, _dt: dt, _evalResult: evalResult, _evalEdgeAfterFees: evalEdgeAfterFees, _evalAloPrice: evalAloPrice, _convScore: convScore, _convDetails: convDetails };
     }).filter(g => {
       if (fPhase && g.phase !== fPhase) return false;
       if (fDate && g._dt.date !== fDate) return false;
@@ -824,7 +920,7 @@ async function refresh() {
 
     const gp = paginate(enriched, 'games');
     if (enriched.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="10" class="empty">No games match filters</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="11" class="empty">No games match filters</td></tr>';
     } else {
       tbody.innerHTML = gp.rows.map(g => {
         const score = g.home_score != null ? `${g.away_score}-${g.home_score}` : '-';
@@ -837,6 +933,7 @@ async function refresh() {
           <td class="num">${fmtSpread(g)}</td>
           <td class="num">${g._bid != null || g._ask != null ? (g._bid != null ? g._bid.toFixed(0) : '-') + ' / ' + (g._ask != null ? g._ask.toFixed(0) : '-') : '-'}</td>
           <td class="num">${fmtEdgeWithDollars(g._edge, 1)}${(g.phase === 'Break' || g.phase === 'Halftime' || g.phase === 'Live') && g._evalResult ? '<br>' + fmtEvalBadge(g._evalResult, g._evalEdgeAfterFees, g._evalAloPrice) : ''}</td>
+          <td class="num">${fmtConvBadge(g._convScore, g._convDetails)}</td>
           <td class="num">${g._vol > 0 ? g._vol.toLocaleString() : '-'}</td>
           <td>${fmtPositionBar(g)}</td>
         </tr>`;
@@ -845,53 +942,81 @@ async function refresh() {
     renderPagination('games', gp);
   }
 
-  // Break Evaluations
+  // Break Evaluations — one row per eval, pick best market for display
   if (breakEvals) {
     const tbody = $('#break-evals-table tbody');
-    // Flatten: one row per market per break eval
     const fBGame = ($('#filter-break-game').value || '').toLowerCase();
-    const rows = [];
-    for (const ev of breakEvals) {
+    const filtered = breakEvals.filter(ev => {
+      if (!fBGame) return true;
       const gameName = `${ev.away_team} ${ev.home_team}`.toLowerCase();
-      if (fBGame && !gameName.includes(fBGame)) continue;
-      if (ev.markets.length === 0) {
-        rows.push({ ...ev, m: null });
-      } else {
-        for (const m of ev.markets) {
-          if (fBGame && m.ticker && !m.ticker.toLowerCase().includes(fBGame) && !gameName.includes(fBGame)) continue;
-          rows.push({ ...ev, m });
-        }
-      }
-    }
-    const bp = paginate(rows, 'breakEvals');
-    if (rows.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="13" class="empty">No break evaluations yet</td></tr>';
+      return gameName.includes(fBGame);
+    });
+    const bp = paginate(filtered, 'breakEvals');
+    if (filtered.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="12" class="empty">No break evaluations yet</td></tr>';
     } else {
-      tbody.innerHTML = bp.rows.map(r => {
-        const m = r.m;
-        const resultColor = r.result.startsWith('SIGNAL') ? '#3fb950' : '#f85149';
-        const edgeRaw = m && m.edge_raw != null ? `${(m.edge_raw * 100).toFixed(1)}%` : '-';
-        const edgeNet = m && m.edge_after_fees != null ? `<span class="${m.edge_after_fees >= 0.015 ? 'edge-pos' : m.edge_after_fees > 0 ? '' : 'edge-neg'}">${(m.edge_after_fees * 100).toFixed(1)}%</span>` : '-';
-        const periodLabel = r.period === 1 ? '1st' : r.period === 2 ? '2nd' : r.period > 2 ? 'OT' : '-';
-        const clockDisplay = r.display_clock || '';
-        const periodClock = clockDisplay ? `${periodLabel}, ${clockDisplay}` : periodLabel;
-        // For NO_SIGNAL, show the reason after the colon; also show per-market skip_reason as tooltip
-        const resultDisplay = r.result;
-        const skipTip = m && m.skip_reason ? ` title="${m.skip_reason}"` : '';
-        return `<tr>
-          <td style="font-size:11px">${shortTime(r.timestamp)}</td>
-          <td>${r.away_team} @ ${r.home_team}</td>
-          <td class="num">${r.score}</td>
-          <td style="font-size:11px">${periodClock}</td>
-          <td><span class="phase phase-Break">${r.status || 'Break'}</span></td>
-          <td style="font-size:11px">${m ? m.ticker : '-'}</td>
-          <td>${m && m.side ? `<span class="side-${m.side.toLowerCase()}">${m.side}</span>` : '-'}</td>
-          <td class="num">${m ? (m.bid != null ? m.bid.toFixed(0) : '-') + '/' + (m.ask != null ? m.ask.toFixed(0) : '-') : '-'}</td>
-          <td class="num">${m && m.fair != null ? (m.fair * 100).toFixed(1) + '%' : '-'}</td>
-          <td class="num">${m && m.alo_price != null ? m.alo_price + 'c' : '-'}</td>
-          <td class="num">${edgeRaw}</td>
+      tbody.innerHTML = bp.rows.map(ev => {
+        const isSignal = ev.result.startsWith('SIGNAL');
+        const periodLabel = ev.period === 1 ? '1st' : ev.period === 2 ? '2nd' : ev.period > 2 ? 'OT' : '-';
+        const clockDisplay = ev.display_clock || '';
+        const periodClock = clockDisplay ? `${periodLabel} ${clockDisplay}` : periodLabel;
+        const phaseLabel = (ev.phase || ev.status || 'Break').replace('Halftime', 'Half');
+
+        // Pick best market: highest edge_after_fees, or first with data
+        const best = ev.markets && ev.markets.length > 0
+          ? ev.markets.reduce((a, b) => (b.edge_after_fees || -Infinity) > (a.edge_after_fees || -Infinity) ? b : a)
+          : null;
+
+        // ESPN prob
+        const espnProb = ev.espn_home_win_prob != null ? `${(ev.espn_home_win_prob * 100).toFixed(1)}%` : '-';
+        // Sportsbook spread
+        const spreadStr = (ev.spread_bid_home != null && ev.spread_offer_home != null)
+          ? `<span style="color:#8b949e">${(ev.spread_bid_home * 100).toFixed(1)} / ${(ev.spread_offer_home * 100).toFixed(1)}</span>${ev.spread_books_count > 0 ? ` <span style="font-size:10px;color:#8b949e">(${ev.spread_books_count})</span>` : ''}`
+          : '-';
+
+        // Best market's bid/ask, fair, edge
+        const bidAsk = best && best.bid != null ? `${best.bid.toFixed(0)} / ${best.ask != null ? best.ask.toFixed(0) : '-'}` : '-';
+        const fair = best && best.fair != null ? `${(best.fair * 100).toFixed(1)}%` : '-';
+        const edgeNet = best && best.edge_after_fees != null
+          ? `<span class="${best.edge_after_fees >= (ev.min_edge || 0.015) ? 'edge-pos' : best.edge_after_fees > 0 ? '' : 'edge-neg'}">${(best.edge_after_fees * 100).toFixed(1)}%</span>${best.side ? ` <span class="side-${best.side.toLowerCase()}" style="font-size:10px">${best.side}</span>` : ''}${best.alo_price != null ? ` <span style="font-size:10px;color:#484f58">@${best.alo_price}c</span>` : ''}`
+          : '-';
+        const conv = best ? fmtConvBadge(best.conviction_score, best.conviction_details) : '-';
+
+        // Net position
+        const netGame = ev.net_game_contracts || 0;
+        const posStr = netGame > 0 ? `<span style="color:#3fb950">+${netGame}</span>` : netGame < 0 ? `<span style="color:#f85149">${netGame}</span>` : '<span style="color:#484f58">0</span>';
+
+        // Result: for signals show the signal, for no-signal show reason
+        let resultHtml;
+        if (isSignal) {
+          resultHtml = `<span class="break-signal">${ev.result}</span>`;
+        } else {
+          const reason = ev.result.replace('NO_SIGNAL: ', '');
+          resultHtml = `<span class="break-nosignal">${reason}</span>`;
+        }
+
+        // Build tooltip with per-market details for hover
+        const marketTip = ev.markets && ev.markets.length > 0
+          ? ev.markets.map(m => {
+              const e = m.edge_after_fees != null ? `${(m.edge_after_fees*100).toFixed(1)}%` : '-';
+              const skip = m.skip_reason || '';
+              return `${m.ticker}: edge=${e} ${skip}`;
+            }).join('&#10;')
+          : '';
+
+        return `<tr${marketTip ? ` title="${marketTip}"` : ''}>
+          <td style="font-size:11px">${shortTime(ev.timestamp)}</td>
+          <td>${ev.away_team} @ ${ev.home_team}</td>
+          <td class="num">${ev.score}</td>
+          <td><span class="phase phase-Break">${phaseLabel}</span> <span style="font-size:11px;color:#8b949e">${periodClock}</span></td>
+          <td class="num">${espnProb}</td>
+          <td class="num">${spreadStr}</td>
+          <td class="num">${bidAsk}</td>
+          <td class="num">${fair}</td>
           <td class="num">${edgeNet}</td>
-          <td${skipTip}><span style="color:${resultColor};font-size:11px;font-weight:600">${resultDisplay}</span></td>
+          <td class="num">${conv}</td>
+          <td class="num">${posStr}</td>
+          <td>${resultHtml}</td>
         </tr>`;
       }).join('');
     }
@@ -912,21 +1037,24 @@ async function refresh() {
     });
     const op = paginate(filtered, 'orders');
     if (filtered.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="9" class="empty">No orders match filters</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="13" class="empty">No orders match filters</td></tr>';
     } else {
       tbody.innerHTML = op.rows.map(o => {
         const statusCls = `status status-${o.status}`;
         const gameLabel = o.game_name || o.ticker;
         const cost = (o.price_cents * o.count / 100).toFixed(2);
-        const closeTag = o.is_close ? ' <span class="close-tag">CLOSE</span>' : '';
         return `<tr>
           <td style="font-size:11px">${shortDateTime(o.created_at)}</td>
-          <td><div class="ticker-cell"><span>${gameLabel}</span>${closeTag}${o.game_name ? `<span class="game-name">${o.ticker}</span>` : ''}</div></td>
+          <td><div class="ticker-cell"><span>${gameLabel}</span>${o.game_name ? `<span class="game-name">${o.ticker}</span>` : ''}</div></td>
+          <td>${fmtPreBadge(o.strategy)}</td>
+          <td>${fmtCloseBadge(o.is_close)}</td>
           <td>${fmtPosition(o)}</td>
           <td class="num">${o.count}</td>
           <td class="num">${o.price_cents}¢</td>
           <td class="num">${o.fair_value_cents != null ? o.fair_value_cents.toFixed(1) + '¢' : '-'}</td>
           <td class="num">${o.edge_bps != null ? fmtEdgeBps(o.edge_bps, o.count) : fmtEdgeWithDollars(o.edge, o.count)}</td>
+          <td class="num">${fmtOrderSpread(o)}</td>
+          <td class="num">${fmtConvBadge(o.conviction_score, o.conviction_details)}</td>
           <td class="num">$${cost}</td>
           <td><span class="${statusCls}">${o.status}</span></td>
         </tr>`;
@@ -949,7 +1077,7 @@ async function refresh() {
     });
     const fp = paginate(filtered, 'fills');
     if (filtered.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="11" class="empty">No fills match filters</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="15" class="empty">No fills match filters</td></tr>';
     } else {
       tbody.innerHTML = fp.rows.map(f => {
         const gameLabel = f.game_name || f.ticker;
@@ -972,15 +1100,18 @@ async function refresh() {
         }
         const pnlLabel = pnl != null ? `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}` : '-';
         const pnlCls = pnl != null ? (pnl > 0 ? 'edge-pos' : pnl < 0 ? 'edge-neg' : '') : '';
-        const closeTag = f.is_close ? ' <span class="close-tag">CLOSE</span>' : '';
         return `<tr>
           <td style="font-size:11px">${shortDateTime(f.filled_at)}</td>
-          <td><div class="ticker-cell"><span>${gameLabel}</span>${closeTag}${f.game_name ? `<span class="game-name">${f.ticker}</span>` : ''}</div></td>
+          <td><div class="ticker-cell"><span>${gameLabel}</span>${f.game_name ? `<span class="game-name">${f.ticker}</span>` : ''}</div></td>
+          <td>${fmtPreBadge(f.strategy)}</td>
+          <td>${fmtCloseBadge(f.is_close)}</td>
           <td>${fmtPosition(f)}</td>
           <td class="num">${f.count}</td>
           <td class="num">${f.price_cents}¢</td>
           <td class="num">${f.fair_value_cents != null ? f.fair_value_cents.toFixed(1) + '¢' : '-'}</td>
           <td class="num">${fmtEdgeBps(f.edge_bps, f.count)}</td>
+          <td class="num">${fmtOrderSpread(f)}</td>
+          <td class="num">${fmtConvBadge(f.conviction_score, f.conviction_details)}</td>
           <td class="num">$${cost}</td>
           <td class="num">$${f.fee_dollars.toFixed(2)}</td>
           <td class="num" style="${markStyle}">${markLabel}</td>

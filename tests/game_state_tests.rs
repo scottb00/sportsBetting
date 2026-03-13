@@ -3,7 +3,18 @@ use std::collections::HashMap;
 use sports_betting::engine::game_state::{GameState, GameStateManager, KalshiMarketState};
 use sports_betting::espn::types::GamePhase;
 use sports_betting::kalshi::orderbook::LocalOrderBook;
+use sports_betting::strategies::common::ConvictionConfig;
 use sports_betting::strategies::Strategy;
+
+/// Default ConvictionConfig for tests: score 0 → 1000 contracts (effectively uncapped by conviction,
+/// limited only by max_contracts_per_game).
+fn test_conviction() -> ConvictionConfig {
+    ConvictionConfig {
+        max_contracts: 10000,
+        long_tiers: vec![(0.0, 10000)],
+        short_tiers: vec![(0.0, 10000)],
+    }
+}
 
 /// Helper: create a basic GameState for testing
 fn make_game() -> GameState {
@@ -179,7 +190,7 @@ fn clv_hunter_no_signal_without_espn() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let hunter = PassiveEspn::new(0.015, 0.015, 20.0, 1, 1000, 20, None);
+    let hunter = PassiveEspn::new(0.015, 0.015, 1, 1000, 20, test_conviction());
     let risk = RiskManager::new();
 
     let (mut gs, books) = make_game_with_markets(None);
@@ -194,7 +205,7 @@ fn clv_hunter_signal_with_espn() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let hunter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let hunter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
     let risk = RiskManager::new();
 
     // ESPN says 65% home, Kalshi mid is 50c → big edge
@@ -213,7 +224,7 @@ fn break_ev_no_signal_when_not_on_break() {
     use sports_betting::strategies::Strategy;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = PassiveEspn::new(0.015, 0.015, 20.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.015, 0.015, 1, 1000, 20, test_conviction());
     let risk = RiskManager::new();
 
     let (mut gs, books) = make_game_with_markets(Some(0.70));
@@ -227,7 +238,7 @@ fn break_ev_signals_on_halftime() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
     let risk = RiskManager::new();
 
     let (mut gs, books) = make_game_with_markets(Some(0.70));
@@ -242,7 +253,7 @@ fn strategy_picks_best_market() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
     let risk = RiskManager::new();
 
     let mut gs = make_game();
@@ -269,7 +280,7 @@ fn alo_buy_yes_prices_at_ask_minus_one() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
     let risk = RiskManager::new();
 
     let mut gs = make_game();
@@ -293,7 +304,7 @@ fn alo_buy_no_prices_correctly() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
     let risk = RiskManager::new();
 
     let mut gs = make_game();
@@ -321,7 +332,7 @@ fn clv_signal_sets_expiration_to_game_start() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let hunter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let hunter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
     let risk = RiskManager::new();
 
     let (mut gs, books) = make_game_with_markets(Some(0.65));
@@ -339,7 +350,7 @@ fn clv_signal_no_expiration_without_start_time() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let hunter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let hunter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
     let risk = RiskManager::new();
 
     let (mut gs, books) = make_game_with_markets(Some(0.65));
@@ -374,6 +385,8 @@ fn signal_to_order_passes_expiration_in_seconds() {
         fair_value_cents: None,
         is_close: false,
         max_contracts: None,
+        conviction_score: None,
+        conviction_details: None,
     };
 
     let order = OrderManager::signal_to_order(&signal).unwrap();
@@ -399,6 +412,8 @@ fn signal_to_order_none_expiration() {
         fair_value_cents: None,
         is_close: false,
         max_contracts: None,
+        conviction_score: None,
+        conviction_details: None,
     };
 
     let order = OrderManager::signal_to_order(&signal).unwrap();
@@ -485,7 +500,7 @@ fn edge_calculated_from_order_price() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
     let risk = RiskManager::new();
 
     // Fair=0.60, ask=58 → order price=57c → edge=0.60-0.57=0.03 (before fees)
@@ -521,52 +536,51 @@ fn make_halftime_game(espn_hp: f64) -> (GameState, HashMap<String, LocalOrderBoo
     (gs, books)
 }
 
-/// Linear sizing: (edge - min_edge) * 100 * contracts_per_pct_edge = contract count.
-/// Fair=0.70, YES ALO=51c, edge_raw=0.19, fee≈0.01, edge_after_fees≈0.1799
-/// With N=1, min_edge=0.01: target = floor((0.1799 - 0.01) * 100 * 1) = floor(16.99) = 16 contracts.
+/// Conviction sizing with no sportsbook data: score=0 → tier maps to max,
+/// capped by max_contracts_per_game=20.
 #[test]
-fn target_sizing_linear_from_edge() {
+fn target_sizing_conviction_no_sportsbook_data() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = PassiveEspn::new(0.01, 0.01, 1.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
     let risk = RiskManager::new();
 
     let (gs, books) = make_halftime_game(0.70);
     let signal = quoter.evaluate(&gs, &risk, 0.0, &books).unwrap();
     let order = sports_betting::engine::order_manager::OrderManager::signal_to_order(&signal).unwrap();
-    assert_eq!(order.count, 16, "16 contracts at ~17% above-threshold edge with N=1");
+    assert_eq!(order.count, 20, "20 contracts (max_contracts_per_game) with generous conviction tiers");
 }
 
 /// When already below target, add to fill the gap.
-/// Fair=0.70 → target=16. Seed 5 YES → delta=11 → add 11 YES.
+/// Fair=0.70 → target=20 (conviction). Seed 5 YES → delta=15 → add 15 YES.
 #[test]
 fn target_adds_toward_target_when_below() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
     use sports_betting::kalshi::types::OrderSide;
 
-    let quoter = PassiveEspn::new(0.01, 0.01, 1.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
     let mut risk = RiskManager::new();
     risk.seed_positions("TEST-HOME", "yes", 51, 5); // hold 5 YES
 
-    let (gs, books) = make_halftime_game(0.70); // target=16
+    let (gs, books) = make_halftime_game(0.70); // target=20 (max_contracts_per_game)
     let signal = quoter.evaluate(&gs, &risk, 0.0, &books).unwrap();
     assert!(matches!(signal.side, OrderSide::Yes), "should add YES");
     let order = sports_betting::engine::order_manager::OrderManager::signal_to_order(&signal).unwrap();
-    assert_eq!(order.count, 11, "add 11 to reach target of 16 from 5");
+    assert_eq!(order.count, 15, "add 15 to reach target of 20 from 5");
 }
 
 /// Anti-scalp guard: delta < min_trade_contracts → no signal.
-/// Fair=0.70 → target=16. Seed 16 YES → delta=0 < min_trade_contracts=5 → None.
+/// Fair=0.70 → target=20. Seed 18 YES → delta=2 < min_trade_contracts=5 → None.
 #[test]
 fn target_no_signal_when_delta_below_min_trade() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = PassiveEspn::new(0.01, 0.01, 1.0, 5, 1000, 20, None); // min_trade_contracts=5
+    let quoter = PassiveEspn::new(0.01, 0.01, 5, 1000, 20, test_conviction()); // min_trade_contracts=5
     let mut risk = RiskManager::new();
-    risk.seed_positions("TEST-HOME", "yes", 51, 16); // hold 16, target=16, delta=0 < 5
+    risk.seed_positions("TEST-HOME", "yes", 51, 18); // hold 18, target=20, delta=2 < 5
 
     let (gs, books) = make_halftime_game(0.70);
     let signal = quoter.evaluate(&gs, &risk, 0.0, &books);
@@ -574,13 +588,13 @@ fn target_no_signal_when_delta_below_min_trade() {
 }
 
 /// No trimming: when above target but still have edge, do nothing.
-/// Fair=0.70 → target=16. Seed 30 YES (above target) → no signal emitted.
+/// Fair=0.70 → target=20. Seed 30 YES (above target) → no signal emitted.
 #[test]
 fn target_no_trim_when_above_target() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = PassiveEspn::new(0.01, 0.01, 1.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
     let mut risk = RiskManager::new();
     risk.seed_positions("TEST-HOME", "yes", 51, 30); // hold 30, target=16, delta=-14 (above target)
 
@@ -596,7 +610,7 @@ fn target_closes_position_when_edge_gone() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = PassiveEspn::new(0.01, 0.01, 1.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
     let mut risk = RiskManager::new();
     risk.seed_positions("TEST-HOME", "yes", 51, 10); // hold 10 YES
 
@@ -613,7 +627,7 @@ fn target_no_signal_when_flat_and_no_edge() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = PassiveEspn::new(0.01, 0.01, 1.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
     let risk = RiskManager::new();
 
     let (gs, books) = make_halftime_game(0.50); // no edge, no position
@@ -622,22 +636,22 @@ fn target_no_signal_when_flat_and_no_edge() {
 }
 
 /// When edge favors NO, target is negative (hold NO contracts).
-/// Fair=0.30 → buying NO at (100-48-1)=51c. edge_raw≈0.19, N=1 → target≈-16.
-/// From flat → add NO 16.
+/// Fair=0.30 → buying NO. With conviction and max_contracts_per_game=20, target=-20.
+/// From flat → add NO 20.
 #[test]
 fn target_sizes_correctly_for_no_side() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
     use sports_betting::kalshi::types::OrderSide;
 
-    let quoter = PassiveEspn::new(0.01, 0.01, 1.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
     let risk = RiskManager::new();
 
     let (gs, books) = make_halftime_game(0.30); // edge favors NO
     let signal = quoter.evaluate(&gs, &risk, 0.0, &books).unwrap();
     assert!(matches!(signal.side, OrderSide::No), "should buy NO");
     let order = sports_betting::engine::order_manager::OrderManager::signal_to_order(&signal).unwrap();
-    assert_eq!(order.count, 16, "16 NO contracts with N=1 and ~17% above-threshold edge");
+    assert_eq!(order.count, 20, "20 NO contracts (max_contracts_per_game) with conviction");
 }
 
 // ============================================================
@@ -668,7 +682,7 @@ fn no_close_when_edge_is_negative() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let closer = PassiveEspn::new(0.01, 0.01, 20.0, 5, 30, 20, None);
+    let closer = PassiveEspn::new(0.01, 0.01, 5, 30, 20, test_conviction());
     let mut risk = RiskManager::new();
     risk.seed_positions("TEST-HOME", "yes", 50, 10); // hold 10 YES
 
@@ -685,7 +699,7 @@ fn no_close_when_edge_is_zero() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let closer = PassiveEspn::new(0.01, 0.01, 20.0, 5, 30, 20, None);
+    let closer = PassiveEspn::new(0.01, 0.01, 5, 30, 20, test_conviction());
     let mut risk = RiskManager::new();
     risk.seed_positions("TEST-HOME", "yes", 50, 10);
 
@@ -702,7 +716,7 @@ fn close_fires_with_positive_close_edge() {
     use sports_betting::engine::risk::RiskManager;
     use sports_betting::kalshi::types::OrderSide;
 
-    let closer = PassiveEspn::new(0.01, 0.01, 20.0, 5, 30, 20, None);
+    let closer = PassiveEspn::new(0.01, 0.01, 5, 30, 20, test_conviction());
     let mut risk = RiskManager::new();
     risk.seed_positions("TEST-HOME", "yes", 50, 10); // hold 10 YES
 
@@ -722,7 +736,7 @@ fn close_edge_computed_from_alo_not_mid() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let closer = PassiveEspn::new(0.01, 0.01, 20.0, 5, 30, 20, None);
+    let closer = PassiveEspn::new(0.01, 0.01, 5, 30, 20, test_conviction());
     let mut risk = RiskManager::new();
     risk.seed_positions("TEST-HOME", "yes", 50, 10);
 
@@ -740,7 +754,7 @@ fn final_minutes_no_close_without_edge() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let closer = PassiveEspn::new(0.01, 0.01, 20.0, 5, 30, 20, None);
+    let closer = PassiveEspn::new(0.01, 0.01, 5, 30, 20, test_conviction());
     let mut risk = RiskManager::new();
     risk.seed_positions("TEST-HOME", "yes", 50, 10);
 
@@ -759,7 +773,7 @@ fn no_close_long_no_when_buying_yes_negative_edge() {
     use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let closer = PassiveEspn::new(0.01, 0.01, 20.0, 5, 30, 20, None);
+    let closer = PassiveEspn::new(0.01, 0.01, 5, 30, 20, test_conviction());
     let mut risk = RiskManager::new();
     risk.seed_positions("TEST-HOME", "no", 50, 10); // hold 10 NO
 

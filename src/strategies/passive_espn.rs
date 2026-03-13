@@ -23,29 +23,26 @@ use super::common::{ConvictionConfig, evaluate_edge};
 pub struct PassiveEspn {
     pub pregame_min_edge: f64,
     pub break_min_edge: f64,
-    pub contracts_per_pct_edge: f64,
     pub min_trade_contracts: i64,
-    pub max_contracts_per_order: i64,
+    pub max_close_contracts: i64,
     pub max_contracts_per_game: i64,
-    pub conviction: Option<ConvictionConfig>,
+    pub conviction: ConvictionConfig,
 }
 
 impl PassiveEspn {
     pub fn new(
         pregame_min_edge: f64,
         break_min_edge: f64,
-        contracts_per_pct_edge: f64,
         min_trade_contracts: i64,
-        max_contracts_per_order: i64,
+        max_close_contracts: i64,
         max_contracts_per_game: i64,
-        conviction: Option<ConvictionConfig>,
+        conviction: ConvictionConfig,
     ) -> Self {
         Self {
             pregame_min_edge,
             break_min_edge,
-            contracts_per_pct_edge,
             min_trade_contracts,
-            max_contracts_per_order,
+            max_close_contracts,
             max_contracts_per_game,
             conviction,
         }
@@ -106,8 +103,8 @@ impl Strategy for PassiveEspn {
 
         let mut signal = evaluate_edge(
             game, risk, current_game_exposure, min_edge, label, order_books,
-            self.contracts_per_pct_edge, self.min_trade_contracts, self.max_contracts_per_order,
-            self.max_contracts_per_game, self.conviction.as_ref(),
+            self.min_trade_contracts, self.max_close_contracts,
+            self.max_contracts_per_game, &self.conviction,
         )?;
 
         // Phase-specific expiration

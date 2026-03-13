@@ -120,7 +120,7 @@ Key settings: `kalshi.dry_run = true` for paper trading. Risk params are at 0.1x
 
 ### Strategy Config Fields
 Required: `break_ev_min_edge`, `clv_hunter_min_edge` (used as pregame_min_edge)
-Optional (with defaults): `live_strategies` (["pregame", "break_ev"]), `min_volume` (20000), `min_price_cents` (10.0), `max_price_cents` (90.0), `order_ttl_secs` (60), `max_contracts_per_game` (20), `contracts_per_pct_edge` (20.0), `min_trade_contracts` (5), `max_contracts_per_order` (30), `conviction_enabled` (true), `conviction_max_contracts` (100), `conviction_long_tiers` ([(0,5),(1,15),(3,40),(5,100)]), `conviction_short_tiers` ([(0,10),(1,30),(2,100)])
+Optional (with defaults): `live_strategies` (["pregame", "break_ev"]), `min_volume` (20000), `min_price_cents` (10.0), `max_price_cents` (90.0), `order_ttl_secs` (60), `max_contracts_per_game` (20), `min_trade_contracts` (5), `max_close_contracts` (30), `conviction_max_contracts` (100), `conviction_long_tiers` ([(0,5),(1,15),(3,40),(5,100)]), `conviction_short_tiers` ([(0,10),(1,30),(2,100)])
 
 **Note**: There is NO `arb_scanner_min_edge` field. The arb_scanner strategy was planned but never implemented.
 **Note**: The `summary_on_break_only` polling config field was removed (was parsed but never used).
@@ -144,7 +144,7 @@ Weighted score: Pinnacle=3, DraftKings=2, FanDuel=1.5, others=1. Short breaks (T
 **Long break tiers** (PreGame/Halftime): score 0→5 contracts, 1→15, 3→40, 5+→max (default 100).
 **Short break tiers** (TV timeout, halved weights): score 0→10, 1→30, 2+→max.
 
-Close orders (`is_close: true`) are exempt from conviction sizing — they always size at full exposure. When `conviction_enabled = false`, falls back to legacy edge-linear sizing (`(edge - min_edge) * 100 * contracts_per_pct_edge`).
+Close orders (`is_close: true`) use the same conviction framework as adds: disagree veto blocks the close, and tier-based sizing determines how many contracts to close (capped at `max_close_contracts` and actual exposure).
 
 Cross-ticker closing allowed (same-game tickers are equivalent).
 

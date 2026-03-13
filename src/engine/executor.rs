@@ -156,6 +156,13 @@ pub fn evaluate_strategies(
                         display_clock: game.display_clock.clone(),
                         markets: Vec::new(),
                         result: format!("NO_SIGNAL: {}", reason),
+                        spread_bid_home: game.sportsbook_spread.as_ref().and_then(|s| s.best_bid_home),
+                        spread_offer_home: game.sportsbook_spread.as_ref().and_then(|s| s.best_offer_home),
+                        spread_books_count: game.sportsbook_spread.as_ref().map_or(0, |s| s.fresh_count),
+                        espn_home_win_prob: game.espn_home_win_prob,
+                        net_game_contracts: snapshot.risk.net_game_home_risk(&game.kalshi_markets),
+                        phase: format!("{:?}", game.phase),
+                        min_edge: Some(registry.break_min_edge),
                     });
                     if break_log.len() > 100 { break_log.pop_back(); }
                 }
@@ -189,7 +196,7 @@ pub fn evaluate_strategies(
                 // Compute ALO price and edge for the eval log
                 let (alo_price, edge_raw, edge_after_fees, side) =
                     if let (Some(fv), Some(bid), Some(ask)) = (fair, prices.bid, prices.ask) {
-                        match compute_edge_and_alo(bid as i64, ask as i64, fv) {
+                        match compute_edge_and_alo(bid as i64, ask as i64, fv, 1) {
                             Some(r) => (
                                 Some(r.alo_price),
                                 Some(r.edge_raw),
@@ -208,11 +215,34 @@ pub fn evaluate_strategies(
                 } else if prices.bid.is_none() || prices.ask.is_none() {
                     Some("no book".to_string())
                 } else if edge_raw.is_none() {
-                    Some("no raw edge (bad book or fair=mid)".to_string())
+                    Some("no edge (fair ≈ mid)".to_string())
                 } else if edge_after_fees.is_some_and(|e| e < 0.0) {
-                    Some(format!("fees exceed edge ({:.1}% raw)", edge_raw.unwrap_or(0.0) * 100.0))
+                    Some(format!("fees > edge ({:.1}% raw)", edge_raw.unwrap_or(0.0) * 100.0))
+                } else if edge_after_fees.is_some_and(|e| e < registry.break_min_edge) {
+                    Some(format!("edge {:.1}% < min {:.1}%", edge_after_fees.unwrap_or(0.0) * 100.0, registry.break_min_edge * 100.0))
                 } else {
-                    None // has edge — may still be filtered by min_edge or position logic
+                    None // has sufficient edge — may still be filtered by conviction or position
+                };
+
+                // Compute conviction for this market if we have spread + ALO data
+                let (conv_score, conv_details, has_veto) = if let (Some(spread), Some(alo)) = (game.sportsbook_spread.as_ref(), alo_price) {
+                    if spread.fresh_count > 0 {
+                        let buying_yes = side.as_deref() == Some("YES");
+                        let conv = spread.conviction_score(alo, buying_yes, market.is_home, false, None);
+                        let veto = conv.any_disagree;
+                        (Some(conv.score), Some(format!("{}", conv)), veto)
+                    } else {
+                        (None, None, false)
+                    }
+                } else {
+                    (None, None, false)
+                };
+
+                // Refine skip_reason with conviction veto
+                let skip_reason = if skip_reason.is_none() && has_veto {
+                    Some("conviction veto (book disagrees)".to_string())
+                } else {
+                    skip_reason
                 };
 
                 market_evals.push(BreakMarketEval {
@@ -227,6 +257,10 @@ pub fn evaluate_strategies(
                     edge_after_fees,
                     side,
                     skip_reason,
+                    conviction_score: conv_score,
+                    conviction_details: conv_details,
+                    position: snapshot.risk.net_position(&market.ticker),
+                    volume: market.volume,
                 });
             }
         }
@@ -313,6 +347,13 @@ pub fn evaluate_strategies(
                     display_clock: game.display_clock.clone(),
                     markets: market_evals,
                     result: format!("SIGNAL: {} {:?} {}c", signal.kalshi_ticker, signal.side, signal.price_cents),
+                    spread_bid_home: game.sportsbook_spread.as_ref().and_then(|s| s.best_bid_home),
+                    spread_offer_home: game.sportsbook_spread.as_ref().and_then(|s| s.best_offer_home),
+                    spread_books_count: game.sportsbook_spread.as_ref().map_or(0, |s| s.fresh_count),
+                    espn_home_win_prob: game.espn_home_win_prob,
+                    net_game_contracts: snapshot.risk.net_game_home_risk(&game.kalshi_markets),
+                    phase: format!("{:?}", game.phase),
+                    min_edge: Some(registry.break_min_edge),
                 });
                 if break_log.len() > 100 { break_log.pop_back(); }
             }
@@ -341,12 +382,22 @@ pub fn evaluate_strategies(
                     "no edge (fair ≈ market price)".to_string()
                 }
             } else {
-                // Had positive edge-after-fees but still no signal — likely below min_edge or position already at target
+                // Had positive edge-after-fees but still no signal — distinguish the reason
                 let best_net = market_evals.iter()
                     .filter_map(|m| m.edge_after_fees)
                     .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                     .unwrap_or(0.0);
-                format!("edge below threshold or position at target (best {:.1}%)", best_net * 100.0)
+                let has_conviction_veto = market_evals.iter().any(|m| {
+                    m.skip_reason.as_deref() == Some("conviction veto (book disagrees)")
+                });
+                if has_conviction_veto {
+                    format!("conviction veto (best edge {:.1}%)", best_net * 100.0)
+                } else if best_net < registry.break_min_edge {
+                    format!("edge {:.1}% < min {:.1}%", best_net * 100.0, registry.break_min_edge * 100.0)
+                } else {
+                    // Edge exceeds min but strategy returned None — position at target
+                    format!("position at target (best edge {:.1}%)", best_net * 100.0)
+                }
             };
 
             tracing::info!(
@@ -363,6 +414,13 @@ pub fn evaluate_strategies(
                 display_clock: game.display_clock.clone(),
                 markets: market_evals,
                 result: format!("NO_SIGNAL: {}", no_signal_reason),
+                spread_bid_home: game.sportsbook_spread.as_ref().and_then(|s| s.best_bid_home),
+                spread_offer_home: game.sportsbook_spread.as_ref().and_then(|s| s.best_offer_home),
+                spread_books_count: game.sportsbook_spread.as_ref().map_or(0, |s| s.fresh_count),
+                espn_home_win_prob: game.espn_home_win_prob,
+                net_game_contracts: snapshot.risk.net_game_home_risk(&game.kalshi_markets),
+                phase: format!("{:?}", game.phase),
+                min_edge: Some(registry.break_min_edge),
             });
             if break_log.len() > 100 { break_log.pop_back(); }
         }
@@ -527,7 +585,7 @@ pub async fn execute_signal(
                         // Significant drift — re-evaluate edge with fresh REST book
                         if let Some(fair_cents) = signal.fair_value_cents {
                             let fair = fair_cents as f64 / 100.0;
-                            match compute_edge_and_alo(rest_bid_i, rest_ask_i, fair) {
+                            match compute_edge_and_alo(rest_bid_i, rest_ask_i, fair, 1) {
                                 Some(result) if result.edge_after_fees > 0.0 => {
                                     tracing::info!(
                                         "Book drift: {} repricing from {}c to {}c (REST), edge {:.4} -> {:.4}",
@@ -716,6 +774,8 @@ pub async fn execute_signal(
                     signal.is_close,
                     game_info.as_ref(),
                     sportsbook_odds_json.as_deref(),
+                    signal.conviction_score,
+                    signal.conviction_details.as_deref(),
                 ) {
                     tracing::warn!("Failed to log order {}: {:?}", resp.order.order_id, e);
                 }

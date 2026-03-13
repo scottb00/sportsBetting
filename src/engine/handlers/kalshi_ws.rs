@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use crate::engine::bot::{SharedState, SharedOrderBooks, SharedLogger};
 use crate::engine::logger::GameInfo;
+use crate::engine::notifier::{FillInfo, Notifier};
 use crate::engine::risk::RiskManager;
 use crate::kalshi::orderbook::DeltaResult;
 use crate::kalshi::rest::KalshiRestClient;
@@ -16,6 +17,7 @@ pub async fn handle_kalshi_event(
     order_books: &SharedOrderBooks,
     logger: &SharedLogger,
     kalshi_rest: &Arc<KalshiRestClient>,
+    notifier: Option<&Notifier>,
 ) {
     match event {
         KalshiWsEvent::OrderBookSnapshot { market_ticker, snapshot, seq } => {
@@ -119,7 +121,24 @@ pub async fn handle_kalshi_event(
                     None, // WS fills don't include timestamp; use current time
                 );
             }
-            // Fill notifications are handled by scoreboard handler (break_ev orders only)
+            // Send Telegram fill notification
+            if let Some(notifier) = notifier {
+                let game_name = game_info.as_ref().map(|gi| gi.game_name.clone());
+                let daily_pnl = {
+                    let log = logger.lock().unwrap();
+                    log.daily_realized_pnl().unwrap_or(0.0)
+                };
+                let fill_info = FillInfo {
+                    ticker: fill.market_ticker.clone(),
+                    side: fill.side.clone(),
+                    action: fill.action.clone(),
+                    price_cents,
+                    count: fill.count,
+                    fee_dollars,
+                    game_name,
+                };
+                notifier.notify_fills(&[fill_info], daily_pnl).await;
+            }
         }
         KalshiWsEvent::Trade(trade) => {
             tracing::debug!(

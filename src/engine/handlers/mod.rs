@@ -44,7 +44,7 @@ pub async fn handle_maintenance_tick(
         refresh_odds_api(odds_api, state).await;
     }
     sync_orders(state, logger, kalshi_rest).await;
-    sync_fills(state, logger, kalshi_rest).await;
+    sync_fills(state, logger, kalshi_rest, notifier).await;
     reconcile_positions(state, kalshi_rest, notifier).await;
     settle_unsettled_fills(state, logger, kalshi_rest).await;
 }

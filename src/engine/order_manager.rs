@@ -23,6 +23,10 @@ pub struct OrderSignal {
     pub is_close: bool,
     /// Hard cap on contracts for this signal (from per-game limit).
     pub max_contracts: Option<i64>,
+    /// Weighted conviction score from sportsbook consensus (if computed).
+    pub conviction_score: Option<f64>,
+    /// JSON string of per-book conviction breakdown (if computed).
+    pub conviction_details: Option<String>,
 }
 
 /// Summary of a CLV-eligible resting order, returned for closing-line comparison.
@@ -482,6 +486,8 @@ mod tests {
             fair_value_cents: Some(55),
             is_close: false,
             max_contracts: Some(0),
+            conviction_score: None,
+            conviction_details: None,
         };
         assert!(OrderManager::signal_to_order(&signal).is_none());
     }

@@ -15,8 +15,17 @@ use sports_betting::engine::risk::RiskManager;
 use sports_betting::espn::types::GamePhase;
 use sports_betting::kalshi::orderbook::LocalOrderBook;
 use sports_betting::kalshi::types::{Order, OrderAction, OrderBookSnapshot, OrderSide, PriceLevel};
+use sports_betting::strategies::common::ConvictionConfig;
 use sports_betting::strategies::passive_espn::PassiveEspn;
 use sports_betting::strategies::Strategy;
+
+fn test_conviction() -> ConvictionConfig {
+    ConvictionConfig {
+        max_contracts: 10000,
+        long_tiers: vec![(0.0, 10000)],
+        short_tiers: vec![(0.0, 10000)],
+    }
+}
 
 // ============================================================
 // Helpers
@@ -51,7 +60,7 @@ fn test_risk() -> RiskManager {
 fn make_registry(max_contracts_per_game: i64) -> StrategyRegistry {
     StrategyRegistry {
         strategies: vec![
-            Box::new(PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None)),
+            Box::new(PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction())),
         ],
         live_strategies: vec!["break_ev".into(), "pregame".into()],
         min_volume: 1000,
@@ -59,6 +68,7 @@ fn make_registry(max_contracts_per_game: i64) -> StrategyRegistry {
         max_price_cents: 95.0,
         order_ttl: Duration::from_secs(120),
         max_contracts_per_game,
+        break_min_edge: 0.01,
     }
 }
 
@@ -301,6 +311,8 @@ fn signal_to_order_respects_max_contracts() {
         fair_value_cents: None,
         is_close: false,
         max_contracts: Some(5),
+        conviction_score: None,
+        conviction_details: None,
     };
 
     let order = OrderManager::signal_to_order(&signal).unwrap();
@@ -322,6 +334,8 @@ fn signal_to_order_uses_natural_count_when_below_cap() {
         fair_value_cents: None,
         is_close: false,
         max_contracts: Some(100),
+        conviction_score: None,
+        conviction_details: None,
     };
 
     let order = OrderManager::signal_to_order(&signal).unwrap();
@@ -438,7 +452,7 @@ fn extreme_price_games_produce_no_signals() {
 #[test]
 fn no_signal_when_edge_below_threshold() {
     let risk = test_risk(); // min_edge = 0.01
-    let quoter = PassiveEspn::new(0.05, 0.05, 20.0, 1, 1000, 20, None); // strategy needs 5% edge
+    let quoter = PassiveEspn::new(0.05, 0.05, 1, 1000, 20, test_conviction()); // strategy needs 5% edge
 
     // Fair = 54%, market mid = 50c → edge ~3c after ALO pricing
     // This should be below the 5% threshold

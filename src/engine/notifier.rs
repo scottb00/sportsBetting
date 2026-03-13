@@ -1,6 +1,17 @@
 use crate::config::NotifyConfig;
 use crate::engine::executor::PlacedOrder;
 
+/// Summary of a fill for notification purposes.
+pub struct FillInfo {
+    pub ticker: String,
+    pub side: String,
+    pub action: String,
+    pub price_cents: i64,
+    pub count: i64,
+    pub fee_dollars: f64,
+    pub game_name: Option<String>,
+}
+
 /// Escape special characters for Telegram MarkdownV2.
 fn escape_markdown(s: &str) -> String {
     const SPECIAL: &[char] = &['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!'];
@@ -113,6 +124,41 @@ impl Notifier {
     /// Send an alert notification (for anomalies, not trades).
     pub async fn send_alert(&self, title: &str, body: &str) {
         self.send(title, body).await;
+    }
+
+    /// Send a batched notification for fills received.
+    pub async fn notify_fills(&self, fills: &[FillInfo], daily_pnl: f64) {
+        if fills.is_empty() {
+            return;
+        }
+
+        if fills.len() == 1 {
+            let f = &fills[0];
+            let game = f.game_name.as_deref().unwrap_or(&f.ticker);
+            let side_upper = f.side.to_uppercase();
+            let title = format!("Fill: {} {} {}ct @ {}c", game, side_upper, f.count, f.price_cents);
+            let cost = f.price_cents as f64 * f.count as f64 / 100.0;
+            let body = format!(
+                "{}\n{} {} {}ct @ {}c | ${:.2} | fee ${:.4}\nDaily P&L: ${:.2}",
+                game, f.action, side_upper, f.count, f.price_cents, cost, f.fee_dollars, daily_pnl,
+            );
+            self.send(&title, &body).await;
+            return;
+        }
+
+        let total_contracts: i64 = fills.iter().map(|f| f.count).sum();
+        let title = format!("{} Fills | {}ct total", fills.len(), total_contracts);
+        let mut lines: Vec<String> = fills.iter().map(|f| {
+            let game = f.game_name.as_deref().unwrap_or(&f.ticker);
+            let cost = f.price_cents as f64 * f.count as f64 / 100.0;
+            format!(
+                "---\n{}\n{} {} {}ct @ {}c | ${:.2} | fee ${:.4}",
+                game, f.action, f.side.to_uppercase(), f.count, f.price_cents, cost, f.fee_dollars,
+            )
+        }).collect();
+        lines.push(format!("---\nDaily P&L: ${:.2}", daily_pnl));
+
+        self.send(&title, &lines.join("\n")).await;
     }
 
     /// Send a single batched notification for multiple placed orders.

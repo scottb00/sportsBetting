@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::engine::bot::{SharedState, SharedLogger};
+use crate::engine::notifier::{FillInfo, Notifier};
 use crate::kalshi::rest::KalshiRestClient;
 
 /// Sync fills from Kalshi REST API into the local SQLite database.
@@ -10,7 +11,7 @@ use crate::kalshi::rest::KalshiRestClient;
 /// Phase 1: read metadata + mark fills processed under state lock
 /// Phase 2: log fills + order statuses under logger lock only
 /// Phase 3: apply risk/order updates under state lock only
-pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest: &Arc<KalshiRestClient>) {
+pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest: &Arc<KalshiRestClient>, notifier: Option<&Notifier>) {
     // Read high-water mark from OrderManager (stored as unix seconds)
     let min_ts = {
         let s = state.lock().await;
@@ -101,16 +102,21 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
     // logger lock released
 
     // Phase 3: Apply state updates under state lock only (no logger lock)
+    // Track which fills are genuinely new (not already seen via WS)
+    let mut new_fill_indices: Vec<usize> = Vec::new();
     {
         let mut s = state.lock().await;
         for (i, _price_cents, _fee_dollars, _game_info, _strategy) in &fill_data {
             let fill = &fills[*i];
             // apply_fill_if_new deduplicates against fills already seen via WS
             let price_cents = if fill.side == "yes" { fill.yes_price } else { fill.no_price };
-            s.apply_fill_if_new(
+            let is_new = s.apply_fill_if_new(
                 &fill.trade_id, &fill.ticker, &fill.order_id,
                 &fill.action, &fill.side, price_cents, fill.count,
             );
+            if is_new {
+                new_fill_indices.push(*i);
+            }
         }
 
         // Update high-water mark
@@ -141,5 +147,32 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
 
     if new_count > 0 {
         tracing::info!("Fill sync: logged {} new fills from Kalshi REST", new_count);
+    }
+
+    // Send Telegram notification for genuinely new fills (not already seen via WS)
+    if let Some(notifier) = notifier && !new_fill_indices.is_empty() {
+        let daily_pnl = {
+            let log = logger.lock().unwrap();
+            log.daily_realized_pnl().unwrap_or(0.0)
+        };
+        let fill_infos: Vec<FillInfo> = new_fill_indices.iter().map(|&i| {
+            let fill = &fills[i];
+            let price_cents = if fill.side == "yes" { fill.yes_price } else { fill.no_price };
+            let fee_dollars = fill.fee_cost.unwrap_or(0.0);
+            let game_name = fill_data.iter()
+                .find(|(idx, ..)| *idx == i)
+                .and_then(|(_, _, _, gi, _)| gi.as_ref())
+                .map(|gi| gi.game_name.clone());
+            FillInfo {
+                ticker: fill.ticker.clone(),
+                side: fill.side.clone(),
+                action: fill.action.clone(),
+                price_cents,
+                count: fill.count,
+                fee_dollars,
+                game_name,
+            }
+        }).collect();
+        notifier.notify_fills(&fill_infos, daily_pnl).await;
     }
 }

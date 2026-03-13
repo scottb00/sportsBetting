@@ -111,6 +111,8 @@ impl TradeLogger {
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN fd_fair REAL");
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN sportsbook_odds TEXT");
         let _ = conn.execute_batch("ALTER TABLE fills ADD COLUMN excluded INTEGER DEFAULT 0");
+        let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN conviction_score REAL");
+        let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN conviction_details TEXT");
 
         Ok(Self { conn })
     }
@@ -131,10 +133,12 @@ impl TradeLogger {
         is_close: bool,
         game_info: Option<&GameInfo>,
         sportsbook_odds: Option<&str>,
+        conviction_score: Option<f64>,
+        conviction_details: Option<&str>,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps, fair_value_cents, is_close, game_name, home_team, away_team, is_home, sportsbook_odds, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?15, ?11, ?12, ?13, ?14, ?16, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            "INSERT INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps, fair_value_cents, is_close, game_name, home_team, away_team, is_home, sportsbook_odds, conviction_score, conviction_details, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?15, ?11, ?12, ?13, ?14, ?16, ?17, ?18, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
              ON CONFLICT(order_id) DO UPDATE SET
                strategy = ?3,
                action = ?4,
@@ -149,7 +153,9 @@ impl TradeLogger {
                home_team = COALESCE(?12, home_team),
                away_team = COALESCE(?13, away_team),
                is_home = COALESCE(?14, is_home),
-               sportsbook_odds = COALESCE(?16, sportsbook_odds)",
+               sportsbook_odds = COALESCE(?16, sportsbook_odds),
+               conviction_score = COALESCE(?17, conviction_score),
+               conviction_details = COALESCE(?18, conviction_details)",
             rusqlite::params![
                 order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps,
                 fair_value_cents,
@@ -159,6 +165,8 @@ impl TradeLogger {
                 game_info.map(|g| g.is_home as i32),
                 is_close as i32,
                 sportsbook_odds,
+                conviction_score,
+                conviction_details,
             ],
         )?;
         Ok(())

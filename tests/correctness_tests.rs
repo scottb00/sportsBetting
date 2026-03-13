@@ -15,8 +15,19 @@ use sports_betting::engine::risk::RiskManager;
 use sports_betting::espn::types::GamePhase;
 use sports_betting::kalshi::orderbook::LocalOrderBook;
 use sports_betting::kalshi::types::{OrderAction, OrderSide};
+use sports_betting::strategies::common::ConvictionConfig;
 use sports_betting::strategies::passive_espn::PassiveEspn;
 use sports_betting::strategies::Strategy;
+
+/// Default ConvictionConfig for tests: score 0 → 1000 contracts (effectively uncapped by conviction,
+/// limited only by max_contracts_per_game).
+fn test_conviction() -> ConvictionConfig {
+    ConvictionConfig {
+        max_contracts: 10000,
+        long_tiers: vec![(0.0, 10000)],
+        short_tiers: vec![(0.0, 10000)],
+    }
+}
 
 // ============================================================
 // Helpers
@@ -202,7 +213,7 @@ proptest! {
 fn e2e_home_favorite_buys_correct_side() {
     let (gs, books) = make_game_with_book(0.70, GamePhase::Halftime, 48.0, 52.0);
     let risk = test_risk();
-    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
 
     let signal = quoter.evaluate(&gs, &risk, 0.0, &books).expect("Should produce a signal");
 
@@ -230,7 +241,7 @@ fn e2e_home_favorite_buys_correct_side() {
 fn e2e_away_favorite_buys_correct_side() {
     let (gs, books) = make_game_with_book(0.30, GamePhase::Halftime, 48.0, 52.0);
     let risk = test_risk();
-    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
 
     let signal = quoter.evaluate(&gs, &risk, 0.0, &books).expect("Should produce a signal");
 
@@ -272,7 +283,7 @@ fn e2e_home_away_markets_opposite_direction() {
 #[test]
 fn e2e_flipped_is_home_changes_signal() {
     let risk = test_risk();
-    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
 
     let mut gs_correct = GameState::new("evt_1".into(), "Home".into(), "Away".into());
     gs_correct.espn_home_win_prob = Some(0.70);
@@ -307,7 +318,7 @@ fn e2e_flipped_is_home_changes_signal() {
 #[test]
 fn e2e_pregame_signals_with_edge() {
     let risk = test_risk();
-    let mm = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let mm = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
 
     // PreGame with edge should produce a signal tagged "pregame"
     let (gs, books) = make_game_with_book(0.70, GamePhase::PreGame, 48.0, 52.0);
@@ -328,7 +339,7 @@ fn e2e_pregame_signals_with_edge() {
 #[test]
 fn e2e_break_signals_correctly() {
     let risk = test_risk();
-    let mm = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let mm = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
 
     // Halftime always tradeable, signal tagged "break_ev"
     let (gs, books) = make_game_with_book(0.70, GamePhase::Halftime, 48.0, 52.0);
@@ -352,7 +363,7 @@ fn e2e_break_signals_correctly() {
 #[test]
 fn e2e_no_signal_with_negative_edge() {
     let risk = test_risk();
-    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
 
     for espn_prob in [0.20, 0.35, 0.50, 0.65, 0.80] {
         for bid in [30.0, 40.0, 50.0, 60.0, 70.0] {
@@ -386,6 +397,8 @@ fn signal_yes_produces_yes_price_only() {
         fair_value_cents: None,
         is_close: false,
         max_contracts: None,
+        conviction_score: None,
+        conviction_details: None,
     };
 
     let order = OrderManager::signal_to_order(&signal).unwrap();
@@ -409,6 +422,8 @@ fn signal_no_produces_no_price_only() {
         fair_value_cents: None,
         is_close: false,
         max_contracts: None,
+        conviction_score: None,
+        conviction_details: None,
     };
 
     let order = OrderManager::signal_to_order(&signal).unwrap();
@@ -432,6 +447,8 @@ fn signal_to_order_contract_count() {
         fair_value_cents: None,
         is_close: false,
         max_contracts: None,
+        conviction_score: None,
+        conviction_details: None,
     };
 
     let order = OrderManager::signal_to_order(&signal).unwrap();
@@ -453,6 +470,8 @@ fn signal_to_order_contract_count_floors() {
         fair_value_cents: None,
         is_close: false,
         max_contracts: None,
+        conviction_score: None,
+        conviction_details: None,
     };
 
     let order = OrderManager::signal_to_order(&signal).unwrap();
@@ -474,6 +493,8 @@ fn signal_to_order_min_one_contract() {
         fair_value_cents: None,
         is_close: false,
         max_contracts: None,
+        conviction_score: None,
+        conviction_details: None,
     };
 
     let order = OrderManager::signal_to_order(&signal).unwrap();
@@ -487,7 +508,7 @@ fn signal_to_order_min_one_contract() {
 #[test]
 fn alo_yes_inside_spread() {
     let risk = test_risk();
-    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
 
     let (gs, books) = make_game_with_book(0.70, GamePhase::Halftime, 48.0, 52.0);
     let signal = quoter.evaluate(&gs, &risk, 0.0, &books).unwrap();
@@ -504,7 +525,7 @@ fn alo_yes_inside_spread() {
 #[test]
 fn alo_no_inside_spread() {
     let risk = test_risk();
-    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
 
     let (gs, books) = make_game_with_book(0.30, GamePhase::Halftime, 48.0, 52.0);
     let signal = quoter.evaluate(&gs, &risk, 0.0, &books).unwrap();
@@ -552,7 +573,7 @@ fn manager_cleanup_removes_ticker_index() {
 #[test]
 fn extreme_espn_probabilities() {
     let risk = test_risk();
-    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
 
     for espn_prob in [0.01, 0.02, 0.05, 0.95, 0.98, 0.99] {
         let (gs, books) = make_game_with_book(espn_prob, GamePhase::Halftime, 48.0, 52.0);
@@ -568,7 +589,7 @@ fn extreme_espn_probabilities() {
 #[test]
 fn wide_spread_still_valid() {
     let risk = test_risk();
-    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
 
     let (gs, books) = make_game_with_book(0.70, GamePhase::Halftime, 10.0, 90.0);
     if let Some(signal) = quoter.evaluate(&gs, &risk, 0.0, &books) {
@@ -580,7 +601,7 @@ fn wide_spread_still_valid() {
 #[test]
 fn tight_spread_still_valid() {
     let risk = test_risk();
-    let quoter = PassiveEspn::new(0.001, 0.001, 20.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.001, 0.001, 1, 1000, 20, test_conviction());
 
     let (gs, books) = make_game_with_book(0.70, GamePhase::Halftime, 49.0, 51.0);
     if let Some(signal) = quoter.evaluate(&gs, &risk, 0.0, &books) {
@@ -592,7 +613,7 @@ fn tight_spread_still_valid() {
 #[test]
 fn no_espn_no_signal() {
     let risk = test_risk();
-    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
 
     let (mut gs, books) = make_game_with_book(0.50, GamePhase::Halftime, 48.0, 52.0);
     gs.espn_home_win_prob = None;
@@ -604,7 +625,7 @@ fn no_espn_no_signal() {
 #[test]
 fn no_book_no_signal() {
     let risk = test_risk();
-    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1, 1000, 20, test_conviction());
 
     let mut gs = GameState::new("evt".into(), "Home".into(), "Away".into());
     gs.espn_home_win_prob = Some(0.70);

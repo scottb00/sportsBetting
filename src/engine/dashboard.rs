@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::engine::bot::{SharedState, SharedOrderBooks, SharedLogger, SharedBreakLog};
 use crate::engine::market_prep::book_prices;
 use crate::strategies::common::compute_edge_and_alo;
+use crate::sportsbooks::types::SportsbookSpread;
 
 /// Shared state for the dashboard server.
 #[derive(Clone)]
@@ -19,10 +20,6 @@ struct DashboardState {
     break_log: SharedBreakLog,
     db_path: String,
     dry_run: bool,
-    pregame_min_edge: f64,
-    break_min_edge: f64,
-    contracts_per_pct_edge: f64,
-    max_contracts_per_game: i64,
 }
 
 // --- JSON response types ---
@@ -54,8 +51,6 @@ struct GameView {
     /// Net game risk: positive = long home team winning, negative = long away team winning.
     /// Aggregates across all markets (YES-DUKE and NO-UNC count as the same exposure).
     net_game_contracts: i64,
-    /// Target position (home-aligned): best target across all markets. Positive = want long home.
-    target_game_contracts: i64,
     /// Total resting contracts across all markets in this game.
     total_resting_contracts: i64,
     markets: Vec<MarketView>,
@@ -78,6 +73,10 @@ struct MarketView {
     exposure: f64,
     /// Net position: positive = holding YES contracts, negative = holding NO contracts
     position: i64,
+    /// Live conviction score from sportsbook consensus (if spread data available).
+    conviction_score: Option<f64>,
+    /// Per-book conviction breakdown (JSON string).
+    conviction_details: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -113,6 +112,16 @@ struct OrderRow {
     is_close: Option<bool>,
     /// Perceived edge fraction for display when edge_bps is unavailable (legacy fallback only).
     edge: Option<f64>,
+    /// Conviction score at order placement time (from DB).
+    conviction_score: Option<f64>,
+    /// Per-book conviction breakdown at order placement time (JSON string from DB).
+    conviction_details: Option<String>,
+    /// Live sportsbook spread: best bid on home.
+    spread_bid_home: Option<f64>,
+    /// Live sportsbook spread: best offer on home.
+    spread_offer_home: Option<f64>,
+    /// Number of bookmakers contributing to the spread.
+    spread_books_count: usize,
 }
 
 #[derive(Serialize)]
@@ -139,6 +148,16 @@ struct FillRow {
     fill_pnl: Option<f64>,
     /// Mark price in cents (0–100). Settled fills: 0 or 100. Open fills: live fair value.
     mark_cents: Option<f64>,
+    /// Conviction score at order placement time (from joined orders table).
+    conviction_score: Option<f64>,
+    /// Per-book conviction breakdown at order placement time (JSON string from joined orders table).
+    conviction_details: Option<String>,
+    /// Live sportsbook spread: best bid on home.
+    spread_bid_home: Option<f64>,
+    /// Live sportsbook spread: best offer on home.
+    spread_offer_home: Option<f64>,
+    /// Number of bookmakers contributing to the spread.
+    spread_books_count: usize,
 }
 
 #[derive(Serialize)]
@@ -194,6 +213,8 @@ struct MarketSnapshot {
     has_resting: bool,
     resting: i64,
     position: i64,
+    conviction_score: Option<f64>,
+    conviction_details: Option<String>,
 }
 
 struct GameSnapshot {
@@ -216,6 +237,42 @@ struct GameSnapshot {
     markets: Vec<MarketSnapshot>,
 }
 
+/// Compute live conviction score for a market given its spread, fair value, and book prices.
+/// Returns (score, details_json) or (None, None) if insufficient data.
+fn compute_market_conviction(
+    spread: Option<&SportsbookSpread>,
+    fair_value: Option<f64>,
+    bid: Option<f64>,
+    ask: Option<f64>,
+    is_home: bool,
+) -> (Option<f64>, Option<String>) {
+    let spread = match spread {
+        Some(s) if s.fresh_count > 0 => s,
+        _ => return (None, None),
+    };
+    let fv = match fair_value {
+        Some(v) => v,
+        None => return (None, None),
+    };
+    let (b, a) = match (bid, ask) {
+        (Some(b), Some(a)) => (b as i64, a as i64),
+        _ => return (None, None),
+    };
+    let edge_result = match compute_edge_and_alo(b, a, fv, 1) {
+        Some(r) => r,
+        None => return (None, None),
+    };
+    let conv = spread.conviction_score(
+        edge_result.alo_price,
+        edge_result.buying_yes,
+        is_home,
+        false, // dashboard doesn't distinguish break type
+        None,  // no break filter for dashboard display
+    );
+    let details = format!("{}", conv);
+    (Some(conv.score), Some(details))
+}
+
 async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
     // Phase 1: Snapshot all data under locks (O(1) lookups only, no string formatting).
     let snapshots: Vec<GameSnapshot> = {
@@ -228,6 +285,14 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
             .map(|g| {
                 let markets = g.kalshi_markets.iter().map(|m| {
                     let prices = book_prices(&books, &m.ticker);
+                    // Compute live conviction if we have spread data and can determine ALO/direction
+                    let (conv_score, conv_details) = compute_market_conviction(
+                        g.sportsbook_spread.as_ref(),
+                        g.fair_value_for_market(m),
+                        prices.bid,
+                        prices.ask,
+                        m.is_home,
+                    );
                     MarketSnapshot {
                         ticker: m.ticker.clone(),
                         is_home: m.is_home,
@@ -239,6 +304,8 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
                         has_resting: s.order_manager.has_resting_order(&m.ticker),
                         resting: s.order_manager.signed_resting_for_ticker(&m.ticker),
                         position: s.risk.net_position(&m.ticker),
+                        conviction_score: conv_score,
+                        conviction_details: conv_details,
                     }
                 }).collect();
                 GameSnapshot {
@@ -266,41 +333,11 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
     };
 
     // Phase 2: Build view structs and sort — no locks held.
-    let pregame_min_edge = state.pregame_min_edge;
-    let break_min_edge = state.break_min_edge;
-    let contracts_per_pct_edge = state.contracts_per_pct_edge;
-    let max_contracts_per_game = state.max_contracts_per_game;
-
     let mut games: Vec<GameView> = snapshots.into_iter().map(|g| {
-        // Pick min_edge based on game phase
-        let min_edge = match g.phase.as_str() {
-            "PreGame" => pregame_min_edge,
-            _ => break_min_edge,
-        };
-
-        // Compute game-level target: best target across markets, home-aligned.
-        // Same formula as strategies/common.rs evaluate_market line 95-104.
-        let mut best_target_home: i64 = 0;
         let mut total_resting: i64 = 0;
 
         let markets: Vec<MarketView> = g.markets.into_iter().map(|m| {
             total_resting += if m.is_home { m.resting } else { -m.resting };
-
-            // Compute per-market target in YES units, then convert to home-aligned
-            let target_yes = if let (Some(fv), Some(bid), Some(ask)) = (m.fair_value, m.bid, m.ask) {
-                if let Some(r) = compute_edge_and_alo(bid as i64, ask as i64, fv) {
-                    if r.edge_after_fees >= min_edge {
-                        let n = ((r.edge_after_fees - min_edge) * 100.0 * contracts_per_pct_edge).floor().max(1.0) as i64;
-                        let n = n.min(max_contracts_per_game);
-                        if r.buying_yes { n } else { -n }
-                    } else { 0 }
-                } else { 0 }
-            } else { 0 };
-            // Convert to home-aligned: YES on home market = long home, YES on away = long away
-            let target_home = if m.is_home { target_yes } else { -target_yes };
-            if target_home.abs() > best_target_home.abs() {
-                best_target_home = target_home;
-            }
 
             let (edge, edge_side) = match (m.fair_value, m.mid) {
                 (Some(fv), Some(mid)) => {
@@ -328,6 +365,8 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
                 has_resting_order: m.has_resting,
                 exposure: (m.position.unsigned_abs() as i64 + m.resting) as f64,
                 position: m.position,
+                conviction_score: m.conviction_score,
+                conviction_details: m.conviction_details,
             }
         }).collect();
         let espn_stale = matches!(g.phase.as_str(), "Break" | "Halftime" | "Live") && g.espn_age_secs > 90;
@@ -349,7 +388,6 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
             espn_stale,
             start_time_ts: g.start_time_ts,
             net_game_contracts: g.net_game_contracts,
-            target_game_contracts: best_target_home,
             total_resting_contracts: total_resting,
             markets,
         }
@@ -397,6 +435,9 @@ struct TickerEnrich {
     away_team: String,
     is_home: bool,
     fair_value: Option<f64>,
+    spread_bid_home: Option<f64>,
+    spread_offer_home: Option<f64>,
+    spread_books_count: usize,
 }
 
 /// Build a ticker → enrichment map with a single pass over game state, then release the lock.
@@ -412,6 +453,9 @@ async fn snapshot_ticker_enrich(state: &SharedState) -> std::collections::HashMa
                 away_team: game.away_team.clone(),
                 is_home: market.is_home,
                 fair_value: game.fair_value_for_market(market),
+                spread_bid_home: game.sportsbook_spread.as_ref().and_then(|s| s.best_bid_home),
+                spread_offer_home: game.sportsbook_spread.as_ref().and_then(|s| s.best_offer_home),
+                spread_books_count: game.sportsbook_spread.as_ref().map_or(0, |s| s.fresh_count),
             });
         }
     }
@@ -434,6 +478,9 @@ async fn api_orders(State(state): State<DashboardState>) -> impl IntoResponse {
             row.home_team = Some(e.home_team.clone());
             row.away_team = Some(e.away_team.clone());
             row.is_home = Some(e.is_home);
+            row.spread_bid_home = e.spread_bid_home;
+            row.spread_offer_home = e.spread_offer_home;
+            row.spread_books_count = e.spread_books_count;
         }
         // Use stored edge_bps from DB as the canonical edge; only fall back to live
         // fair value for old orders that predate edge_bps logging.
@@ -473,6 +520,9 @@ async fn api_fills(State(state): State<DashboardState>) -> impl IntoResponse {
             row.home_team = Some(e.home_team.clone());
             row.away_team = Some(e.away_team.clone());
             row.is_home = Some(e.is_home);
+            row.spread_bid_home = e.spread_bid_home;
+            row.spread_offer_home = e.spread_offer_home;
+            row.spread_books_count = e.spread_books_count;
             if row.edge_bps.is_none()
                 && let Some(fv) = e.fair_value
             {
@@ -583,7 +633,7 @@ fn compute_order_edge(fair_value: f64, price_cents: i64, side: &str, action: &st
 fn query_orders(db_path: &str) -> anyhow::Result<Vec<OrderRow>> {
     let conn = open_read_only(db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT order_id, ticker, COALESCE(strategy,''), action, side, price_cents, count, status, created_at, game_name, home_team, away_team, is_home, edge_bps, fair_value_cents, is_close
+        "SELECT order_id, ticker, COALESCE(strategy,''), action, side, price_cents, count, status, created_at, game_name, home_team, away_team, is_home, edge_bps, fair_value_cents, is_close, conviction_score, conviction_details
          FROM orders ORDER BY datetime(created_at) DESC LIMIT 50"
     )?;
     let rows = stmt.query_map([], |row| {
@@ -607,6 +657,11 @@ fn query_orders(db_path: &str) -> anyhow::Result<Vec<OrderRow>> {
             fair_value_cents: row.get(14)?,
             is_close: is_close_int.map(|v| v != 0),
             edge: None,
+            conviction_score: row.get(16)?,
+            conviction_details: row.get(17)?,
+            spread_bid_home: None,
+            spread_offer_home: None,
+            spread_books_count: 0,
         })
     })?.filter_map(|r| r.ok()).collect();
     Ok(rows)
@@ -615,7 +670,7 @@ fn query_orders(db_path: &str) -> anyhow::Result<Vec<OrderRow>> {
 fn query_fills(db_path: &str) -> anyhow::Result<Vec<FillRow>> {
     let conn = open_read_only(db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT f.trade_id, f.order_id, f.ticker, f.side, f.action, f.price_cents, f.count, COALESCE(f.fee_cents,0), f.filled_at, COALESCE(o.strategy,''), o.edge_bps, o.game_name, o.home_team, o.away_team, o.is_home, o.fair_value_cents, o.is_close, f.fill_pnl
+        "SELECT f.trade_id, f.order_id, f.ticker, f.side, f.action, f.price_cents, f.count, COALESCE(f.fee_cents,0), f.filled_at, COALESCE(o.strategy,''), o.edge_bps, o.game_name, o.home_team, o.away_team, o.is_home, o.fair_value_cents, o.is_close, f.fill_pnl, o.conviction_score, o.conviction_details
          FROM fills f LEFT JOIN orders o ON f.order_id = o.order_id
          WHERE COALESCE(f.excluded, 0) = 0
          ORDER BY f.filled_at DESC LIMIT 200"
@@ -643,6 +698,11 @@ fn query_fills(db_path: &str) -> anyhow::Result<Vec<FillRow>> {
             is_close: is_close_int.map(|v| v != 0),
             fill_pnl: row.get(17)?,
             mark_cents: None, // populated in api_fills after enrichment
+            conviction_score: row.get(18)?,
+            conviction_details: row.get(19)?,
+            spread_bid_home: None,
+            spread_offer_home: None,
+            spread_books_count: 0,
         })
     })?.filter_map(|r| r.ok()).collect();
     Ok(rows)
@@ -972,17 +1032,13 @@ async fn api_exclude_fills(State(state): State<DashboardState>, Query(q): Query<
 
 // --- Server ---
 
-pub async fn serve(bot_state: SharedState, order_books: SharedOrderBooks, _logger: SharedLogger, break_log: SharedBreakLog, db_path: &str, port: u16, dry_run: bool, pregame_min_edge: f64, break_min_edge: f64, contracts_per_pct_edge: f64, max_contracts_per_game: i64) -> anyhow::Result<()> {
+pub async fn serve(bot_state: SharedState, order_books: SharedOrderBooks, _logger: SharedLogger, break_log: SharedBreakLog, db_path: &str, port: u16, dry_run: bool) -> anyhow::Result<()> {
     let state = DashboardState {
         bot: bot_state,
         order_books,
         break_log,
         db_path: db_path.to_string(),
         dry_run,
-        pregame_min_edge,
-        break_min_edge,
-        contracts_per_pct_edge,
-        max_contracts_per_game,
     };
 
     let app = Router::new()
