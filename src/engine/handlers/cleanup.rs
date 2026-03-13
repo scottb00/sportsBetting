@@ -19,13 +19,14 @@ pub async fn cleanup_finished_games(
         .flat_map(|g| g.kalshi_tickers().into_iter().map(ToString::to_string))
         .collect();
 
-    // Remove tracked orders for finished tickers
+    // Remove tracked orders and positions for finished tickers
     for ticker in &finished_tickers {
         let order_ids = s.order_manager.order_ids_for_market(ticker);
         for oid in order_ids {
             s.order_manager.remove_order(&oid);
         }
     }
+    s.risk.remove_positions_for_tickers(&finished_tickers);
 
     let count_before = s.game_state.games.len();
     s.game_state.cleanup_finished();

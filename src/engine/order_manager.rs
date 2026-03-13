@@ -56,9 +56,6 @@ pub struct OrderManager {
     /// Strategy that placed each order (order_id -> strategy name).
     /// Populated when the executor places orders; used by sync to backfill the DB.
     order_strategies: HashMap<String, String>,
-    /// Tracks total contracts sent per ticker (resting + filled).
-    /// This persists across order fills to prevent re-ordering the same game.
-    committed_contracts: HashMap<String, i64>,
     /// When we last synced with Kalshi.
     pub last_sync: Option<Instant>,
     /// High-water mark for fill sync: latest fill created_time as unix seconds.
@@ -83,17 +80,11 @@ impl OrderManager {
             in_flight: HashSet::new(),
             clv_orders: HashMap::new(),
             order_strategies: HashMap::new(),
-            committed_contracts: HashMap::new(),
             last_sync: None,
             last_fill_sync_ts: None,
             processed_fills_current: HashSet::new(),
             processed_fills_prev: HashSet::new(),
         }
-    }
-
-    /// Seed committed_contracts for a single ticker (call on startup from pre-fetched data).
-    pub fn record_startup_position(&mut self, ticker: &str, total_traded: i64) {
-        self.committed_contracts.insert(ticker.to_string(), total_traded);
     }
 
     /// Apply pre-fetched orders from Kalshi into the local cache.
@@ -153,14 +144,8 @@ impl OrderManager {
 
     /// Record a newly placed order into the cache (avoids waiting for next sync).
     /// Also tracks committed contracts so filled orders still count toward limits.
-    pub fn record_placed_order(&mut self, order: Order, contracts_sent: i64, strategy: &str) {
+    pub fn record_placed_order(&mut self, order: Order, _contracts_sent: i64, strategy: &str) {
         self.order_strategies.insert(order.order_id.clone(), strategy.to_string());
-        *self.committed_contracts.entry(order.ticker.clone()).or_default() += contracts_sent;
-        tracing::info!(
-            "Committed {} contracts on {} (total: {})",
-            contracts_sent, order.ticker,
-            self.committed_contracts.get(&order.ticker).unwrap_or(&0),
-        );
         self.in_flight.remove(&order.ticker);
         self.orders_by_ticker
             .entry(order.ticker.clone())
@@ -212,20 +197,6 @@ impl OrderManager {
             post_only: Some(signal.post_only),
             expiration_ts: signal.expiration_ts,
         })
-    }
-
-    /// Add resting order remaining counts to committed_contracts.
-    /// Call after apply_synced_orders to account for outstanding orders.
-    pub fn seed_committed_from_resting(&mut self) {
-        for order in self.resting_orders.values() {
-            *self.committed_contracts.entry(order.ticker.clone()).or_insert(0) += order.remaining_count;
-        }
-    }
-
-    /// Get total contracts committed for a market (resting + filled).
-    /// This prevents re-ordering after fills exhaust the per-game limit.
-    pub fn committed_contracts(&self, ticker: &str) -> i64 {
-        self.committed_contracts.get(ticker).copied().unwrap_or(0)
     }
 
     /// Return (order_id, ticker) pairs for resting break_ev orders on the given tickers.
@@ -371,13 +342,6 @@ impl OrderManager {
         self.clv_orders.remove(order_id);
     }
 
-    /// Remove committed_contracts entries for finished tickers (prevents unbounded growth).
-    pub fn clear_committed_contracts(&mut self, tickers: &[String]) {
-        for ticker in tickers {
-            self.committed_contracts.remove(ticker.as_str());
-        }
-    }
-
     /// Count resting contracts across multiple tickers.
     pub fn resting_contracts_for_tickers(&self, tickers: &[&str]) -> i64 {
         tickers.iter()
@@ -437,14 +401,6 @@ mod tests {
 
         assert!(om.has_resting_order("TICKER-A"));
         assert_eq!(om.in_flight_count(), 0);
-    }
-
-    #[test]
-    fn committed_contracts_tracked() {
-        let mut om = OrderManager::new();
-        om.record_placed_order(make_order("o1", "TICKER-A"), 10, "test");
-        assert_eq!(om.committed_contracts("TICKER-A"), 10);
-        assert_eq!(om.committed_contracts("TICKER-B"), 0);
     }
 
     #[test]

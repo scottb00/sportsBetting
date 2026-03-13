@@ -94,7 +94,7 @@ This is the #1 source of bugs. Each venue defines "YES" differently:
 - Kalshi does NOT send WS notifications for expired orders — `prune_expired()` handles cleanup locally
 - **break_ev order safety**: Four-layer protection against stale orders and stale book data:
   1. **REST book cross-check**: `execute_signal()` in `executor.rs` fetches a fresh REST orderbook before placing any break_ev order. If the REST-derived ALO price differs from the WS-derived price by ≥3c, re-evaluates edge using fresh REST book. Skips the order if edge disappears; reprices if edge still exists. Always updates `SharedOrderBooks` with the fresh REST snapshot so subsequent ticks use accurate data. Logs drift: `"Book drift: {ticker} WS_alo={x}c REST_alo={y}c drift={z}c"`.
-  2. **Active cancellation**: `cancel_break_ev_orders()` in `scoreboard.rs` fires when ESPN detects break→live transition (via `breaks_ended()`), immediately cancels all resting break_ev orders
+  2. **Active cancellation**: `cancel_break_orders()` in `scoreboard.rs` fires when ESPN detects break→live transition (via `breaks_ended()`), immediately cancels ALL resting orders on the game's tickers (not just break_ev tagged — handles bot restart where strategy tags are lost)
   3. **Fixed break expiration**: `break_expires_at` is computed once on break entry (start + duration - safety buffer) and stored on `GameState`. All orders during the same break share the same absolute expiration. TV timeouts: 90s effective, halftime: 840s effective. Falls back to config `order_ttl_secs` if `break_expires_at` is None (e.g. bot restart mid-break).
   4. **Late-break order cutoff**: `break_has_time_for_order(30)` in executor blocks new break_ev ADD orders when <30s remain before expiration. Prevents stale late-break orders after fills. CLOSE orders (position unwinding) are always allowed.
 - **REST orderbook seeding at startup**: After WS connects in `main.rs`, fetches orderbooks via REST for all initial tickers and applies snapshots to `SharedOrderBooks`. Ensures books have fresh data immediately rather than waiting for WS snapshots (which may be delayed).
@@ -126,7 +126,7 @@ Optional (with defaults): `live_strategies` (["clv_hunter"]), `min_volume` (2000
 ### Sizing Model (Target Position)
 Strategies use a **target-position model** (not Kelly). For each market:
 - `target = floor((edge_pct - min_edge) * contracts_per_pct_edge)` in the edge direction (0 if edge < min_edge)
-- `net = risk.net_position(ticker)` (current signed position: +YES, -NO)
+- `net = risk.effective_net_for_market(markets, ticker)` (game-level net aligned to this market's YES — accounts for cross-ticker exposure)
 - If `target > 0` and `delta = target - net >= min_trade_contracts`: add contracts toward target, capped at `max_contracts_per_order`
 - If `target == 0` and `net != 0`: close position with edge-scaled sizing (see below)
 - No partial trims — only close when edge disappears entirely to avoid negative-EV trades
@@ -190,7 +190,7 @@ ssh root@165.227.117.108 'chown bot:bot /home/bot/app/config.toml && chmod 600 /
 - Close orders (`is_close: true`) bypass the `live_strategies` config check — they're always live since they only reduce existing exposure
 - `PositionCloser` strategy evaluates during `GamePhase::Live` with min_edge=1.0 (impossible), so only Case B close signals fire — never opens new positions
 - Strategies return `Vec<OrderSignal>`, deduped to best-per-ticker in `scoreboard.rs` handler
-- `has_strategy_order()` on OrderManager prevents duplicate orders across ticks
+- `has_resting_order()` on OrderManager prevents duplicate orders per-ticker across ticks (same-ticker only — orders on different tickers in the same game are allowed)
 - `evaluate_market()` in `strategies/common.rs` is the shared edge calculation used by both strategies
 - `compute_edge_and_alo()` in `strategies/common.rs` is the shared edge/ALO helper used by strategies, executor, and dashboard
 - The executor checks `can_evaluate()` before calling `evaluate()` — strategies do NOT self-guard
@@ -208,7 +208,7 @@ tokio::select! {
 ```
 
 The maintenance tick (default 30s, configurable via `intervals.maintenance_interval_secs`) runs sequentially:
-1. `cleanup_finished_games()` — internal state cleanup only (Kalshi auto-cancels settled orders)
+1. `cleanup_finished_games()` — internal state cleanup: removes orders, risk positions, and order books for finished tickers; backfills settlement PnL (Kalshi auto-cancels settled orders)
 2. `discover_new_markets()` — find new Kalshi markets, map them, subscribe WS
 3. `sync_orders()` + `sync_fills()` — reconcile with Kalshi REST
 4. `reconcile_positions()` — compare local risk positions with Kalshi API, auto-correct drift

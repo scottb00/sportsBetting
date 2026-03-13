@@ -268,15 +268,10 @@ pub fn evaluate_strategies(
                     &game.kalshi_markets, &signal.kalshi_ticker, &signal.side,
                 );
 
-                // Resting-order check:
-                // - Regular orders: blocked if ANY market in the game has a resting order.
-                // - Reduce orders: only blocked if the SAME ticker already has a resting order
-                //   (a resting order on the other team's market doesn't conflict).
-                let blocked_by_resting = if is_reduce {
-                    snapshot.resting_tickers.contains(&signal.kalshi_ticker)
-                } else {
-                    game.kalshi_markets.iter().any(|m| snapshot.resting_tickers.contains(&m.ticker))
-                };
+                // Resting-order check: block if the SAME ticker already has a resting order.
+                // The per-game contract cap (position + resting across all tickers) prevents
+                // over-exposure, so we don't need to block across different tickers.
+                let blocked_by_resting = snapshot.resting_tickers.contains(&signal.kalshi_ticker);
                 if blocked_by_resting {
                     if is_break {
                         tracing::info!(

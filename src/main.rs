@@ -102,11 +102,6 @@ async fn main() -> Result<()> {
         };
         let mut s = state.lock().await;
         for pos in &positions {
-            // Seed committed_contracts with current position size (not lifetime total_traded)
-            let current_pos = pos.position.unsigned_abs() as i64;
-            if current_pos > 0 {
-                s.order_manager.record_startup_position(&pos.ticker, current_pos);
-            }
             if pos.total_traded > 0 {
                 tracing::info!(
                     "Position: {} | traded={} position={} exposure={} pnl={}",
@@ -135,11 +130,6 @@ async fn main() -> Result<()> {
         s.order_manager.set_last_fill_sync_ts(chrono::Utc::now().timestamp());
     }
     handlers::sync_orders(&state, &logger, &kalshi_rest).await;
-    // Add resting order counts to committed_contracts (position was seeded above)
-    {
-        let mut s = state.lock().await;
-        s.order_manager.seed_committed_from_resting();
-    }
 
     // --- Re-settle all historical fills with corrected PnL formula ---
     {

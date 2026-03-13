@@ -87,9 +87,10 @@ pub async fn handle_scoreboard_tick(
         fetch_and_apply_summary(espn_poller, state, event_id, "Break ").await;
     }
 
-    // Cancel all resting break_ev orders when play resumes from a break.
-    // Primary safety net: ensures no stale passive orders sit on the book after live play starts.
-    cancel_break_ev_orders(state, &breaks_ended, kalshi_rest, dry_run).await;
+    // Cancel ALL resting orders on games transitioning from break -> live.
+    // Cancels all orders (not just break_ev tagged) so orders surviving a bot restart
+    // (where order_strategies is lost) are also cleaned up.
+    cancel_break_orders(state, &breaks_ended, kalshi_rest, dry_run).await;
 
     // Cancel CLV orders that are no longer at the top of book (market moved away).
     // Runs before snapshot so the re-evaluation below can re-place at the new price.
@@ -134,9 +135,10 @@ pub async fn handle_scoreboard_tick(
 
 /// Cancel all resting break_ev orders for games where a break just ended.
 ///
-/// Called whenever ESPN reports a phase transition from Break/Halftime → Live.
-/// Ensures no stale passive orders remain on the book during live play.
-async fn cancel_break_ev_orders(
+/// Called whenever ESPN reports a phase transition from Break/Halftime -> Live.
+/// Cancels ALL resting orders on these games (not just break_ev tagged) to handle
+/// bot restarts where order_strategies metadata is lost.
+async fn cancel_break_orders(
     state: &SharedState,
     ended_event_ids: &[String],
     kalshi_rest: &Arc<KalshiRestClient>,
@@ -146,14 +148,20 @@ async fn cancel_break_ev_orders(
         return;
     }
 
-    // Collect (order_id, ticker) pairs for all break_ev orders on ended games
+    // Collect (order_id, ticker) pairs for ALL resting orders on ended games
     let to_cancel: Vec<(String, String)> = {
         let s = state.lock().await;
         ended_event_ids.iter()
             .filter_map(|event_id| s.game_state.get(event_id))
             .flat_map(|gs| {
-                let tickers: Vec<&str> = gs.kalshi_tickers();
-                s.order_manager.break_ev_order_ids_for_tickers(&tickers)
+                gs.kalshi_tickers().into_iter()
+                    .flat_map(|ticker| {
+                        let ticker_owned = ticker.to_string();
+                        s.order_manager.order_ids_for_market(ticker)
+                            .into_iter()
+                            .map(move |oid| (oid, ticker_owned.clone()))
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect()
     };
@@ -164,7 +172,7 @@ async fn cancel_break_ev_orders(
 
     for (order_id, ticker) in &to_cancel {
         tracing::info!(
-            "Break ended: cancelling break_ev order {} on {}",
+            "Break ended: cancelling order {} on {}",
             order_id, ticker,
         );
 

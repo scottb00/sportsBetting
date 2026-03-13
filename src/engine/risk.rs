@@ -154,6 +154,15 @@ impl RiskManager {
         (net > 0 && !order_is_long_home) || (net < 0 && order_is_long_home)
     }
 
+    /// Remove all position entries for the given tickers (call on game cleanup).
+    pub fn remove_positions_for_tickers(&mut self, tickers: &[String]) {
+        for ticker in tickers {
+            for side in &["yes", "no"] {
+                self.positions.remove(&format!("{}:{}", ticker, side));
+            }
+        }
+    }
+
     /// Reset daily P&L (call at start of trading day).
     pub fn reset_daily(&mut self) {
         self.daily_pnl = 0.0;

@@ -174,7 +174,7 @@ struct MarketSnapshot {
     mid: Option<f64>,
     volume: Option<i64>,
     has_resting: bool,
-    committed: i64,
+    resting: i64,
     position: i64,
 }
 
@@ -216,7 +216,7 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
                         mid: prices.mid,
                         volume: m.volume,
                         has_resting: s.order_manager.has_resting_order(&m.ticker),
-                        committed: s.order_manager.committed_contracts(&m.ticker),
+                        resting: s.order_manager.resting_contracts_for_tickers(&[m.ticker.as_str()]),
                         position: s.risk.net_position(&m.ticker),
                     }
                 }).collect();
@@ -267,7 +267,7 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
                 edge_side,
                 volume: m.volume,
                 has_resting_order: m.has_resting,
-                exposure: m.committed as f64,
+                exposure: (m.position.unsigned_abs() as i64 + m.resting) as f64,
                 position: m.position,
             }
         }).collect();
