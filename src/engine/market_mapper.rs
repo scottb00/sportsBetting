@@ -304,8 +304,8 @@ impl MarketMapper {
 
     /// Normalize team names for matching: strip accents, expand abbreviations,
     /// remove punctuation, collapse whitespace.
-    fn normalize_team_name(name: &str) -> String {
-        let s = Self::strip_diacritics(name);
+    pub fn normalize_team_name(name: &str) -> String {
+        let s = Self::strip_diacritics(name).to_lowercase();
         let s = s
             .replace("st.", "state")
             .replace("miss.", "mississippi")
@@ -313,6 +313,12 @@ impl MarketMapper {
             .replace("s.c.", "south carolina")
             .replace(" state state", " state")
             .replace("umass", "massachusetts")
+            .replace("uconn", "connecticut")
+            // FanDuel uses "CSU", ESPN uses "Cal State"
+            .replace("csu ", "cal state ")
+            // FanDuel abbreviates "GW" for George Washington
+            .replace(" gw ", " george washington ")
+            .replace("gw ", "george washington ")
             // Expand Kalshi parenthetical qualifiers to ESPN-style names
             // so "Miami (FL)" matches "Miami Hurricanes" and
             // "Miami (OH)" stays distinct as "Miami Ohio"
@@ -350,7 +356,7 @@ impl MarketMapper {
     }
 
     /// Check if two team name strings refer to the same team.
-    fn team_name_matches(full: &str, short: &str) -> bool {
+    pub fn team_name_matches(full: &str, short: &str) -> bool {
         if full == short { return true; }
 
         let full_norm = Self::normalize_team_name(full);

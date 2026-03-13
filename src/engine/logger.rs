@@ -108,6 +108,8 @@ impl TradeLogger {
         let _ = conn.execute_batch("ALTER TABLE fills ADD COLUMN fill_pnl REAL");
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN is_close INTEGER");
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN dk_fair REAL");
+        let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN fd_fair REAL");
+        let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN sportsbook_odds TEXT");
         let _ = conn.execute_batch("ALTER TABLE fills ADD COLUMN excluded INTEGER DEFAULT 0");
 
         Ok(Self { conn })
@@ -128,10 +130,10 @@ impl TradeLogger {
         fair_value_cents: Option<i64>,
         is_close: bool,
         game_info: Option<&GameInfo>,
-        dk_fair: Option<f64>,
+        sportsbook_odds: Option<&str>,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps, fair_value_cents, is_close, game_name, home_team, away_team, is_home, dk_fair, created_at)
+            "INSERT INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps, fair_value_cents, is_close, game_name, home_team, away_team, is_home, sportsbook_odds, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?15, ?11, ?12, ?13, ?14, ?16, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
              ON CONFLICT(order_id) DO UPDATE SET
                strategy = ?3,
@@ -147,7 +149,7 @@ impl TradeLogger {
                home_team = COALESCE(?12, home_team),
                away_team = COALESCE(?13, away_team),
                is_home = COALESCE(?14, is_home),
-               dk_fair = COALESCE(?16, dk_fair)",
+               sportsbook_odds = COALESCE(?16, sportsbook_odds)",
             rusqlite::params![
                 order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps,
                 fair_value_cents,
@@ -156,7 +158,7 @@ impl TradeLogger {
                 game_info.map(|g| g.away_team.as_str()),
                 game_info.map(|g| g.is_home as i32),
                 is_close as i32,
-                dk_fair,
+                sportsbook_odds,
             ],
         )?;
         Ok(())

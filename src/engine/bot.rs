@@ -151,6 +151,7 @@ pub fn create_strategies(config: &Config) -> StrategyRegistry {
             config.strategy.contracts_per_pct_edge,
             config.strategy.min_trade_contracts,
             config.strategy.max_contracts_per_order,
+            config.strategy.max_contracts_per_game,
         )),
     ];
 
@@ -219,18 +220,14 @@ pub async fn fetch_and_apply_summary(
     match espn_poller.fetch_summary(event_id).await {
         Ok(summary) => {
             let win_prob = EspnPoller::latest_win_prob(&summary);
-            let dk_prob = EspnPoller::dk_implied_home_prob(&summary);
             let mut s = state.lock().await;
             if let Some(gs) = s.game_state.get_mut(event_id) {
                 let old_prob = gs.espn_home_win_prob;
                 gs.update_from_espn_summary(win_prob);
-                if dk_prob.is_some() {
-                    gs.dk_home_win_prob = dk_prob;
-                }
                 tracing::info!(
-                    "{}{}: {} v {} | espn_hp={:?} (was {:?}) | dk_hp={:?}",
+                    "{}{}: {} v {} | espn_hp={:?} (was {:?})",
                     log_prefix, event_id, gs.away_team, gs.home_team,
-                    gs.espn_home_win_prob, old_prob, gs.dk_home_win_prob,
+                    gs.espn_home_win_prob, old_prob,
                 );
             }
         }

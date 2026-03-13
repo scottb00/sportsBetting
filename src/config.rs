@@ -13,6 +13,8 @@ pub struct Config {
     pub intervals: IntervalConfig,
     #[serde(default)]
     pub notify: Option<NotifyConfig>,
+    #[serde(default)]
+    pub odds_api: Option<OddsApiConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,6 +112,11 @@ pub struct NotifyConfig {
     pub telegram_bot_token: String,
     /// Telegram chat ID to send notifications to
     pub telegram_chat_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OddsApiConfig {
+    pub api_key: String,
 }
 
 impl Config {

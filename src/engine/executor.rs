@@ -635,12 +635,15 @@ pub async fn execute_signal(
             let action_str = format!("{:?}", order_req.action);
             let side_str = format!("{:?}", order_req.side);
 
-            // Collect game_info and display fields under state lock, then drop before logging
-            let (game_info, game_label, score, clock, yes_team, current_pos, target_pos, dk_fair) = {
+            // Collect game_info, sportsbook odds, and display fields under state lock, then drop before logging
+            let (game_info, sportsbook_odds_json, game_label, score, clock, yes_team, current_pos, target_pos) = {
                 let s = state.lock().await;
+                // Snapshot fresh sportsbook odds at order time
+                let sb_json = s.game_state.get_by_kalshi_ticker(&signal.kalshi_ticker)
+                    .and_then(|game| game.sportsbook_spread.as_ref().map(|spread| {
+                        spread.fresh_books_json(game.break_started_at)
+                    }));
                 let gi = crate::engine::logger::GameInfo::from_game_state(&s.game_state, &signal.kalshi_ticker);
-                let dk_fair = s.game_state.get_by_kalshi_ticker(&signal.kalshi_ticker)
-                    .and_then(|g| g.dk_home_win_prob);
                 let current = s.risk.net_position(&signal.kalshi_ticker);
                 let signed_delta = if matches!(signal.side, crate::kalshi::types::OrderSide::Yes) {
                     order_req.count
@@ -696,7 +699,7 @@ pub async fn execute_signal(
                 } else {
                     (signal.kalshi_ticker.clone(), String::new(), String::new(), String::new())
                 };
-                (gi, label, sc, cl, yes_t, current, target, dk_fair)
+                (gi, sb_json, label, sc, cl, yes_t, current, target)
             };
 
             // Log under logger lock only (no state lock held)
@@ -715,7 +718,7 @@ pub async fn execute_signal(
                     signal.fair_value_cents,
                     signal.is_close,
                     game_info.as_ref(),
-                    dk_fair,
+                    sportsbook_odds_json.as_deref(),
                 ) {
                     tracing::warn!("Failed to log order {}: {:?}", resp.order.order_id, e);
                 }

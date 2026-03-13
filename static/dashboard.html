@@ -56,13 +56,7 @@
   .filters select:focus, .filters input:focus { outline: none; border-color: #58a6ff; }
   .filter-group { display: flex; flex-direction: column; gap: 2px; }
   .empty { color: #484f58; padding: 16px; text-align: center; }
-
-  /* Strategy badges */
-  .strat { padding: 2px 6px; border-radius: 4px; font-size: 11px; }
-  .strat-break_ev { background: #1f6feb33; color: #58a6ff; }
-  .strat-clv_hunter { background: #a371f733; color: #a371f7; }
-  .strat-arb { background: #3fb95033; color: #3fb950; }
-  .strat-synced { background: #484f5833; color: #484f58; }
+  .close-tag { color: #f0883e; font-size: 10px; font-weight: 600; }
 
   /* Status badges */
   .status { padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; }
@@ -86,6 +80,21 @@
   .pagination button:disabled { opacity: 0.3; cursor: default; }
   .pagination select { background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 3px 6px; font-size: 12px; font-family: inherit; }
   .pagination .page-info { margin: 0 4px; }
+
+  /* Position fraction style */
+  .pos-frac { font-weight: 600; color: #58a6ff; }
+  .pos-team-label { color: #c9d1d9; font-weight: 600; }
+  .pos-rest { color: #f0883e; font-size: 11px; font-weight: 400; }
+  .pos-status { color: #8b949e; font-size: 11px; font-weight: 400; }
+
+  /* Legend */
+  .legend-toggle { font-size: 11px; color: #58a6ff; cursor: pointer; margin-bottom: 6px; display: inline-block; user-select: none; }
+  .legend-toggle:hover { text-decoration: underline; }
+  .legend-box { display: none; background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 10px 14px; margin-bottom: 10px; font-size: 12px; line-height: 1.7; color: #8b949e; }
+  .legend-box.open { display: block; }
+  .legend-box dt { color: #c9d1d9; font-weight: 600; display: inline; }
+  .legend-box dd { display: inline; margin: 0; }
+  .legend-box dd::after { content: ''; display: block; }
 </style>
 </head>
 <body>
@@ -158,6 +167,18 @@
       </select>
     </div>
   </div>
+  <span class="legend-toggle" onclick="this.nextElementSibling.classList.toggle('open')">&#9432; Column legend</span>
+  <div class="legend-box">
+    <dl>
+      <dt>ESPN %</dt><dd> &mdash; ESPN's implied home-team win probability</dd>
+      <dt>Book Spread</dt><dd> &mdash; Composite sportsbook bid/offer on home-team win prob (best across Pinnacle, DK, FD, etc.)</dd>
+      <dt>Kalshi Bid/Ask</dt><dd> &mdash; Kalshi orderbook YES bid/ask, aligned to the home team</dd>
+      <dt>Edge</dt><dd> &mdash; Fair value minus Kalshi mid; shows which side (team name) has +EV</dd>
+      <dt>Volume</dt><dd> &mdash; Total Kalshi contract volume across all tickers for this game</dd>
+      <dt>Net / Target</dt><dd> &mdash; Signed home-team exposure: positive = long home wins, negative = long away wins</dd>
+    </dl>
+    <div style="margin-top:4px;font-size:11px;color:#484f58">All probabilities and positions are oriented toward the <strong style="color:#c9d1d9">home team</strong> (listed second in "Away @ Home").</div>
+  </div>
   <table id="games-table">
     <thead>
       <tr>
@@ -166,12 +187,11 @@
         <th>Score</th>
         <th>Status</th>
         <th class="num">ESPN %</th>
-        <th class="num">DK %</th>
+        <th class="num">Book Spread</th>
         <th class="num">Kalshi Bid/Ask</th>
         <th class="num">Edge</th>
         <th class="num">Volume</th>
-        <th>Position</th>
-        <th>Orders</th>
+        <th class="num">Net / Target</th>
       </tr>
     </thead>
     <tbody></tbody>
@@ -373,12 +393,21 @@ function fmtAge(iso) {
   return `${h}h ${m}m ago`;
 }
 function fmtPct(v) { return v != null ? (v * 100).toFixed(1) + '%' : '-'; }
-function fmtEdge(v, side) {
-  if (v == null) return '-';
-  const pct = (v * 100).toFixed(1);
-  const cls = v > 0 ? 'edge-pos' : v < 0 ? 'edge-neg' : '';
-  const sideLabel = side ? ` <span style="font-size:10px;opacity:0.7">${side}</span>` : '';
-  return `<span class="${cls}">${v > 0 ? '+' : ''}${pct}%${sideLabel}</span>`;
+function fmtSpread(g) {
+  if (g.spread_bid_home == null || g.spread_offer_home == null) {
+    return '-';
+  }
+  const bid = (g.spread_bid_home * 100).toFixed(1);
+  const offer = (g.spread_offer_home * 100).toFixed(1);
+  const espn = g.espn_home_win_prob;
+  // Color: green if ESPN is outside spread, orange if inside
+  let color = '#8b949e';
+  if (espn != null) {
+    const inside = espn >= g.spread_bid_home && espn <= g.spread_offer_home;
+    color = inside ? '#f0883e' : '#3fb950';
+  }
+  const booksLabel = g.spread_books_count > 0 ? ` <span style="font-size:10px;color:#8b949e">(${g.spread_books_count})</span>` : '';
+  return `<span style="color:${color}">${bid} / ${offer}</span>${booksLabel}`;
 }
 // Edge with dollar amount: edge (prob space) * count = dollar edge
 function fmtEdgeWithDollars(v, count) {
@@ -441,6 +470,25 @@ function gameDateTime(epochSecs) {
   const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   const dateKey = d.toLocaleDateString([], { year: 'numeric', month: '2-digit', day: '2-digit' });
   return { display: `${date} ${time}`, date: dateKey, sortKey: epochSecs };
+}
+
+function fmtPositionBar(game) {
+  // All fields are game-level and home-aligned from the backend.
+  // Positive = long home team wins, negative = long away team wins.
+  const net = game.net_game_contracts;
+  const target = game.target_game_contracts;
+  const resting = game.total_resting_contracts;
+
+  if (net === 0 && target === 0 && resting === 0) return '<span style="color:#484f58">&mdash;</span>';
+
+  const fmtSigned = (v) => v > 0 ? `+${v}` : `${v}`;
+  const color = (v) => v > 0 ? '#3fb950' : v < 0 ? '#f85149' : '#8b949e';
+
+  const netStr = `<span style="font-weight:600;color:${color(net)}">${fmtSigned(net)}</span>`;
+  const targetStr = `<span style="color:${color(target)}">${fmtSigned(target)}</span>`;
+  const restLabel = resting > 0 ? ` <span class="pos-rest">(${resting} resting)</span>` : '';
+
+  return `${netStr} / ${targetStr}${restLabel}`;
 }
 
 function renderDailyChart(data, risk) {
@@ -776,7 +824,7 @@ async function refresh() {
 
     const gp = paginate(enriched, 'games');
     if (enriched.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="11" class="empty">No games match filters</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="10" class="empty">No games match filters</td></tr>';
     } else {
       tbody.innerHTML = gp.rows.map(g => {
         const score = g.home_score != null ? `${g.away_score}-${g.home_score}` : '-';
@@ -786,12 +834,11 @@ async function refresh() {
           <td class="num">${score}</td>
           <td><span class="phase phase-${g.phase}">${g.phase}</span>${(g.phase === 'Live' || g.phase === 'Break' || g.phase === 'Halftime') ? `<div style="font-size:11px;color:#8b949e;margin-top:2px">${gameClockLabel(g)}</div>` : ''}</td>
           <td class="num">${fmtPct(g.espn_home_win_prob)}</td>
-          <td class="num">${g.dk_home_win_prob != null ? `<span${Math.abs((g.espn_home_win_prob||0) - g.dk_home_win_prob) > 0.05 ? ' style="color:#f0883e;font-weight:600"' : ''}>${fmtPct(g.dk_home_win_prob)}</span>` : '-'}</td>
+          <td class="num">${fmtSpread(g)}</td>
           <td class="num">${g._bid != null || g._ask != null ? (g._bid != null ? g._bid.toFixed(0) : '-') + ' / ' + (g._ask != null ? g._ask.toFixed(0) : '-') : '-'}</td>
           <td class="num">${fmtEdgeWithDollars(g._edge, 1)}${(g.phase === 'Break' || g.phase === 'Halftime' || g.phase === 'Live') && g._evalResult ? '<br>' + fmtEvalBadge(g._evalResult, g._evalEdgeAfterFees, g._evalAloPrice) : ''}</td>
           <td class="num">${g._vol > 0 ? g._vol.toLocaleString() : '-'}</td>
-          <td>${g._posLabels.length > 0 ? g._posLabels.map(p => `<span class="pos-badge ${p.cls}">${p.qty} ${p.side} ${p.contractTeam}</span>`).join(' ') : '-'}</td>
-          <td>${g._hasOrder ? '<span class="order-dot"></span>' : ''}</td>
+          <td>${fmtPositionBar(g)}</td>
         </tr>`;
       }).join('');
     }
@@ -871,7 +918,7 @@ async function refresh() {
         const statusCls = `status status-${o.status}`;
         const gameLabel = o.game_name || o.ticker;
         const cost = (o.price_cents * o.count / 100).toFixed(2);
-        const closeTag = o.is_close ? ' <span style="color:#f0883e;font-size:10px;font-weight:600">CLOSE</span>' : '';
+        const closeTag = o.is_close ? ' <span class="close-tag">CLOSE</span>' : '';
         return `<tr>
           <td style="font-size:11px">${shortDateTime(o.created_at)}</td>
           <td><div class="ticker-cell"><span>${gameLabel}</span>${closeTag}${o.game_name ? `<span class="game-name">${o.ticker}</span>` : ''}</div></td>
@@ -925,7 +972,7 @@ async function refresh() {
         }
         const pnlLabel = pnl != null ? `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}` : '-';
         const pnlCls = pnl != null ? (pnl > 0 ? 'edge-pos' : pnl < 0 ? 'edge-neg' : '') : '';
-        const closeTag = f.is_close ? ' <span style="color:#f0883e;font-size:10px;font-weight:600">CLOSE</span>' : '';
+        const closeTag = f.is_close ? ' <span class="close-tag">CLOSE</span>' : '';
         return `<tr>
           <td style="font-size:11px">${shortDateTime(f.filled_at)}</td>
           <td><div class="ticker-cell"><span>${gameLabel}</span>${closeTag}${f.game_name ? `<span class="game-name">${f.ticker}</span>` : ''}</div></td>

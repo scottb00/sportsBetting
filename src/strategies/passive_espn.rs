@@ -21,6 +21,7 @@ pub struct PassiveEspn {
     pub contracts_per_pct_edge: f64,
     pub min_trade_contracts: i64,
     pub max_contracts_per_order: i64,
+    pub max_contracts_per_game: i64,
 }
 
 impl PassiveEspn {
@@ -30,6 +31,7 @@ impl PassiveEspn {
         contracts_per_pct_edge: f64,
         min_trade_contracts: i64,
         max_contracts_per_order: i64,
+        max_contracts_per_game: i64,
     ) -> Self {
         Self {
             pregame_min_edge,
@@ -37,6 +39,7 @@ impl PassiveEspn {
             contracts_per_pct_edge,
             min_trade_contracts,
             max_contracts_per_order,
+            max_contracts_per_game,
         }
     }
 
@@ -84,6 +87,7 @@ impl Strategy for PassiveEspn {
         let mut signal = evaluate_edge(
             game, risk, current_game_exposure, min_edge, label, order_books,
             self.contracts_per_pct_edge, self.min_trade_contracts, self.max_contracts_per_order,
+            self.max_contracts_per_game,
         )?;
 
         // Phase-specific expiration

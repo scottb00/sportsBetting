@@ -22,6 +22,7 @@ use sports_betting::kalshi::auth::KalshiAuth;
 use sports_betting::kalshi::rest::KalshiRestClient;
 use sports_betting::kalshi::websocket::{KalshiWsClient, KalshiWsHandle};
 use sports_betting::polymarket::client::PolymarketClient;
+use sports_betting::sportsbooks::odds_api::OddsApiClient;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -46,6 +47,10 @@ async fn main() -> Result<()> {
     let kalshi_rest = Arc::new(KalshiRestClient::new(auth.clone(), config.kalshi.demo));
     let espn_poller = EspnPoller::new();
     let poly_client = PolymarketClient::new();
+    let odds_api_client = config.odds_api.as_ref().map(|cfg| {
+        tracing::info!("The Odds API enabled — multi-book spread data active");
+        OddsApiClient::new(cfg.api_key.clone())
+    });
 
     let notifier = config.notify.as_ref().map(|nc| {
         tracing::info!("Notifications enabled via Telegram bot");
@@ -80,8 +85,12 @@ async fn main() -> Result<()> {
         let dashboard_break_log = break_log.clone();
         let db_path = config.logging.db_path.clone();
         let dashboard_dry_run = config.kalshi.dry_run;
+        let pregame_min_edge = config.strategy.clv_hunter_min_edge; // clv_hunter_min_edge is used as pregame
+        let break_min_edge = config.strategy.break_ev_min_edge;
+        let contracts_per_pct_edge = config.strategy.contracts_per_pct_edge;
+        let max_contracts_per_game = config.strategy.max_contracts_per_game;
         tokio::spawn(async move {
-            if let Err(e) = dashboard::serve(dashboard_state, dashboard_books, dashboard_logger, dashboard_break_log, &db_path, 3030, dashboard_dry_run).await {
+            if let Err(e) = dashboard::serve(dashboard_state, dashboard_books, dashboard_logger, dashboard_break_log, &db_path, 3030, dashboard_dry_run, pregame_min_edge, break_min_edge, contracts_per_pct_edge, max_contracts_per_game).await {
                 tracing::error!("Dashboard server failed: {:?}", e);
             }
         });
@@ -228,6 +237,7 @@ async fn main() -> Result<()> {
                 handlers::handle_maintenance_tick(
                     &state, &order_books, &logger, &kalshi_rest, &espn_poller,
                     &mapper, kalshi_ws_handle.as_ref(), notifier.as_ref(),
+                    odds_api_client.as_ref(),
                 ).await;
             }
             Some(event) = async {

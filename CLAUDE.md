@@ -1,6 +1,6 @@
 # Sports Betting Bot
 
-Rust-based automated CBB (college basketball) betting bot on Kalshi. Uses ESPN + DraftKings as reference prices, Polymarket as secondary reference.
+Rust-based automated CBB (college basketball) betting bot on Kalshi. Uses ESPN as fair value, The Odds API (Pinnacle + DraftKings + FanDuel + others) for sportsbook spread display, Polymarket as secondary reference.
 
 ## Agent Instructions
 
@@ -56,6 +56,10 @@ src/
 │   ├── mod.rs           — Strategy trait
 │   ├── common.rs        — evaluate_market(), compute_edge_and_alo(), ALO price calc
 │   └── passive_espn.rs  — Unified strategy: CLV hunting (pre-game), break quoting, live closing
+├── sportsbooks/
+│   ├── types.rs         — MoneylineOdds, BookOdds (per-book raw implied probs), SportsbookSpread (composite bid/ask)
+│   ├── odds_api.rs      — The Odds API client (Pinnacle, DK, FD, BetMGM, etc.)
+│   └── matcher.rs       — Fuzzy match sportsbook games to ESPN GameState entries
 ├── kalshi/              — Auth (RSA-PSS), REST, WebSocket, orderbook, types
 ├── espn/                — Scoreboard poller, game info types
 └── polymarket/          — REST + WS client, event types
@@ -110,7 +114,7 @@ This is the #1 source of bugs. Each venue defines "YES" differently:
 
 ## Config
 
-`config.toml` contains secrets (Kalshi key ID, Anthropic API key) — it is gitignored. Sections: `[kalshi]`, `[anthropic]`, `[risk]`, `[strategy]`, `[polling]`, `[logging]`, `[intervals]`, `[notify]`.
+`config.toml` contains secrets (Kalshi key ID, Anthropic API key, Odds API key) — it is gitignored. Sections: `[kalshi]`, `[anthropic]`, `[risk]`, `[strategy]`, `[polling]`, `[logging]`, `[intervals]`, `[notify]`, `[odds_api]`.
 
 Key settings: `kalshi.dry_run = true` for paper trading. Risk params are at 0.1x for testing.
 
@@ -120,6 +124,9 @@ Optional (with defaults): `live_strategies` (["pregame", "break_ev"]), `min_volu
 
 **Note**: There is NO `arb_scanner_min_edge` field. The arb_scanner strategy was planned but never implemented.
 **Note**: The `summary_on_break_only` polling config field was removed (was parsed but never used).
+
+### Odds API Config
+Optional `[odds_api]` section: `api_key` (string). When present, fetches NCAAB moneylines from The Odds API every maintenance tick (Pinnacle, DraftKings, FanDuel, BetMGM, etc.). Stores raw implied probs as a composite bid/ask spread on `GameState.sportsbook_spread`. Currently display-only (dashboard shows spread); not yet used for trade filtering. Falls back to FanDuel scraper when absent. Costs 1 API credit per call ($30/mo = 20K credits).
 
 ### Sizing Model & Trading Rules
 See [TRADING_RULES.md](TRADING_RULES.md) for the complete trading rules and strategy logic.

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::espn::types::GamePhase;
+use crate::sportsbooks::types::SportsbookSpread;
 
 /// Book state for a single Kalshi market ticker.
 /// Prices (bid/ask/mid) live in LocalOrderBook, not here — use BotState::book_prices().
@@ -39,8 +40,11 @@ pub struct GameState {
 
     // Reference prices
     pub espn_home_win_prob: Option<f64>,
-    /// DraftKings-implied home win probability (from ESPN pickcenter, devigged).
-    pub dk_home_win_prob: Option<f64>,
+    /// Sportsbook-implied home win probabilities (devigged).
+    /// Keys: "dk" (DraftKings via Odds API), "pinnacle", "fanduel", etc.
+    pub sportsbook_probs: HashMap<String, f64>,
+    /// Composite sportsbook spread (raw bid/ask from multiple books via The Odds API).
+    pub sportsbook_spread: Option<SportsbookSpread>,
 
     /// Game start time as unix timestamp (seconds), from ESPN.
     pub start_time_ts: Option<i64>,
@@ -60,6 +64,9 @@ pub struct GameState {
     /// Computed once on break entry (start + duration - safety buffer).
     /// All orders during the same break share this expiration.
     pub break_expires_at: Option<i64>,
+    /// Unix timestamp (seconds) when the current break started.
+    /// Used to filter sportsbook odds — only books updated after break start are relevant.
+    pub break_started_at: Option<i64>,
 }
 
 impl GameState {
@@ -75,7 +82,8 @@ impl GameState {
             away_score: None,
             phase: GamePhase::Unknown,
             espn_home_win_prob: None,
-            dk_home_win_prob: None,
+            sportsbook_probs: HashMap::new(),
+            sportsbook_spread: None,
             start_time_ts: None,
             status_detail: String::new(),
             display_clock: None,
@@ -84,7 +92,33 @@ impl GameState {
             last_play_type: None,
             last_updated: std::time::Instant::now(),
             break_expires_at: None,
+            break_started_at: None,
         }
+    }
+
+    /// Get the sportsbook spread aligned to a specific market's YES side.
+    /// During breaks, only uses books updated after the break started.
+    /// Returns (bid, offer) where bid < offer. Returns (None, None) if no spread data.
+    pub fn spread_for_market(&self, market: &KalshiMarketState) -> (Option<f64>, Option<f64>) {
+        let spread = match &self.sportsbook_spread {
+            Some(s) => s,
+            None => return (None, None),
+        };
+
+        // During breaks, filter to only post-break book updates
+        if let Some(break_ts) = self.break_started_at {
+            let (bid_home, offer_home, count) = spread.post_break_spread(break_ts);
+            if count > 0 {
+                return if market.is_home {
+                    (bid_home, offer_home)
+                } else {
+                    (offer_home.map(|o| 1.0 - o), bid_home.map(|b| 1.0 - b))
+                };
+            }
+            // No post-break books yet — fall through to regular spread
+        }
+
+        spread.aligned_spread(market.is_home)
     }
 
     /// Parse display_clock ("8:42") into minutes remaining as f64.
@@ -173,14 +207,17 @@ impl GameState {
         self.phase = game.game_phase.clone();
         // Compute absolute break expiration once on break entry
         if self.phase.is_break() && !was_break {
+            let now = chrono::Utc::now().timestamp();
+            self.break_started_at = Some(now);
             let (duration, safety_buffer): (i64, i64) = match self.phase {
                 GamePhase::Halftime => (900, 60),
                 GamePhase::Break => (135, 45),
                 _ => (60, 30),
             };
-            self.break_expires_at = Some(chrono::Utc::now().timestamp() + duration - safety_buffer);
+            self.break_expires_at = Some(now + duration - safety_buffer);
         } else if !self.phase.is_break() {
             self.break_expires_at = None;
+            self.break_started_at = None;
         }
         self.home_score = game.home_score;
         self.away_score = game.away_score;

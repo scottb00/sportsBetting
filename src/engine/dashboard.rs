@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::bot::{SharedState, SharedOrderBooks, SharedLogger, SharedBreakLog};
 use crate::engine::market_prep::book_prices;
+use crate::strategies::common::compute_edge_and_alo;
 
 /// Shared state for the dashboard server.
 #[derive(Clone)]
@@ -18,6 +19,10 @@ struct DashboardState {
     break_log: SharedBreakLog,
     db_path: String,
     dry_run: bool,
+    pregame_min_edge: f64,
+    break_min_edge: f64,
+    contracts_per_pct_edge: f64,
+    max_contracts_per_game: i64,
 }
 
 // --- JSON response types ---
@@ -34,12 +39,21 @@ struct GameView {
     display_clock: Option<String>,
     period: Option<i32>,
     espn_home_win_prob: Option<f64>,
-    dk_home_win_prob: Option<f64>,
+    /// Composite sportsbook spread: best bid on home (highest across books).
+    spread_bid_home: Option<f64>,
+    /// Composite sportsbook spread: best offer on home (lowest across books).
+    spread_offer_home: Option<f64>,
+    /// Number of bookmakers contributing to the spread.
+    spread_books_count: usize,
     /// Game start time as unix seconds (from ESPN).
     start_time_ts: Option<i64>,
     /// Net game risk: positive = long home team winning, negative = long away team winning.
     /// Aggregates across all markets (YES-DUKE and NO-UNC count as the same exposure).
     net_game_contracts: i64,
+    /// Target position (home-aligned): best target across all markets. Positive = want long home.
+    target_game_contracts: i64,
+    /// Total resting contracts across all markets in this game.
+    total_resting_contracts: i64,
     markets: Vec<MarketView>,
 }
 
@@ -189,7 +203,9 @@ struct GameSnapshot {
     display_clock: Option<String>,
     period: Option<i32>,
     espn_home_win_prob: Option<f64>,
-    dk_home_win_prob: Option<f64>,
+    spread_bid_home: Option<f64>,
+    spread_offer_home: Option<f64>,
+    spread_books_count: usize,
     start_time_ts: Option<i64>,
     net_game_contracts: i64,
     markets: Vec<MarketSnapshot>,
@@ -231,7 +247,9 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
                     display_clock: g.display_clock.clone(),
                     period: g.period,
                     espn_home_win_prob: g.espn_home_win_prob,
-                    dk_home_win_prob: g.dk_home_win_prob,
+                    spread_bid_home: g.sportsbook_spread.as_ref().and_then(|s| s.best_bid_home),
+                    spread_offer_home: g.sportsbook_spread.as_ref().and_then(|s| s.best_offer_home),
+                    spread_books_count: g.sportsbook_spread.as_ref().map_or(0, |s| s.fresh_count),
                     start_time_ts: g.start_time_ts,
                     net_game_contracts: s.risk.net_game_home_risk(&g.kalshi_markets),
                     markets,
@@ -242,8 +260,42 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
     };
 
     // Phase 2: Build view structs and sort — no locks held.
+    let pregame_min_edge = state.pregame_min_edge;
+    let break_min_edge = state.break_min_edge;
+    let contracts_per_pct_edge = state.contracts_per_pct_edge;
+    let max_contracts_per_game = state.max_contracts_per_game;
+
     let mut games: Vec<GameView> = snapshots.into_iter().map(|g| {
-        let markets = g.markets.into_iter().map(|m| {
+        // Pick min_edge based on game phase
+        let min_edge = match g.phase.as_str() {
+            "PreGame" => pregame_min_edge,
+            _ => break_min_edge,
+        };
+
+        // Compute game-level target: best target across markets, home-aligned.
+        // Same formula as strategies/common.rs evaluate_market line 95-104.
+        let mut best_target_home: i64 = 0;
+        let mut total_resting: i64 = 0;
+
+        let markets: Vec<MarketView> = g.markets.into_iter().map(|m| {
+            total_resting += m.resting;
+
+            // Compute per-market target in YES units, then convert to home-aligned
+            let target_yes = if let (Some(fv), Some(bid), Some(ask)) = (m.fair_value, m.bid, m.ask) {
+                if let Some(r) = compute_edge_and_alo(bid as i64, ask as i64, fv) {
+                    if r.edge_after_fees >= min_edge {
+                        let n = ((r.edge_after_fees - min_edge) * 100.0 * contracts_per_pct_edge).floor().max(1.0) as i64;
+                        let n = n.min(max_contracts_per_game);
+                        if r.buying_yes { n } else { -n }
+                    } else { 0 }
+                } else { 0 }
+            } else { 0 };
+            // Convert to home-aligned: YES on home market = long home, YES on away = long away
+            let target_home = if m.is_home { target_yes } else { -target_yes };
+            if target_home.abs() > best_target_home.abs() {
+                best_target_home = target_home;
+            }
+
             let (edge, edge_side) = match (m.fair_value, m.mid) {
                 (Some(fv), Some(mid)) => {
                     let mid_prob = mid / 100.0;
@@ -256,6 +308,7 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
                 }
                 _ => (None, None),
             };
+
             MarketView {
                 ticker: m.ticker,
                 is_home: m.is_home,
@@ -282,9 +335,13 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
             display_clock: g.display_clock,
             period: g.period,
             espn_home_win_prob: g.espn_home_win_prob,
-            dk_home_win_prob: g.dk_home_win_prob,
+            spread_bid_home: g.spread_bid_home,
+            spread_offer_home: g.spread_offer_home,
+            spread_books_count: g.spread_books_count,
             start_time_ts: g.start_time_ts,
             net_game_contracts: g.net_game_contracts,
+            target_game_contracts: best_target_home,
+            total_resting_contracts: total_resting,
             markets,
         }
     }).collect();
@@ -696,32 +753,112 @@ fn norm_cdf(x: f64) -> f64 {
     0.5 * (1.0 + sign * y)
 }
 
-fn compute_day_row(date: &str, fills: &[(i64, i64, Option<f64>, Option<f64>, f64)]) -> VarianceDayRow {
-    // Each fill: (count, price_cents, edge_bps, fill_pnl, fee_cents)
+/// Per-fill data for variance analysis. Includes game context for correlation grouping.
+#[derive(Clone)]
+struct VarFill {
+    count: i64,
+    price_cents: i64,
+    edge_bps: Option<f64>,
+    fill_pnl: Option<f64>,
+    fee: f64,
+    game_name: Option<String>,
+    side: String,
+    action: String,
+    is_home: Option<bool>,
+}
+
+impl VarFill {
+    /// Signed home-aligned contracts: positive = long home wins, negative = long away wins.
+    /// Formula: count * buy_sign * yes_sign * home_sign, where:
+    ///   buy_sign = +1 for Buy, -1 for Sell (closes flip the sign)
+    ///   yes_sign = +1 for YES side, -1 for NO side
+    ///   home_sign = +1 if ticker is home-aligned, -1 if away-aligned
+    fn signed_home_contracts(&self) -> f64 {
+        let buy_sign = if self.action.eq_ignore_ascii_case("buy") { 1.0 } else { -1.0 };
+        let yes_sign = if self.side.eq_ignore_ascii_case("yes") { 1.0 } else { -1.0 };
+        let home_sign = if self.is_home.unwrap_or(true) { 1.0 } else { -1.0 };
+        self.count as f64 * buy_sign * yes_sign * home_sign
+    }
+
+    /// Home-win probability implied by the fill price, converting from the fill's side/ticker.
+    fn home_prob(&self) -> f64 {
+        let is_yes = self.side.eq_ignore_ascii_case("yes");
+        let is_home = self.is_home.unwrap_or(true);
+        let p = self.price_cents as f64 / 100.0;
+        // YES on home or NO on away → price directly implies home-win prob
+        if is_yes == is_home { p } else { 1.0 - p }
+    }
+}
+
+fn compute_day_row(date: &str, fills: &[VarFill]) -> VarianceDayRow {
     let total_fills = fills.len() as i64;
-    let total_contracts: i64 = fills.iter().map(|f| f.0).sum();
-    let total_fees: f64 = fills.iter().map(|f| f.4).sum();
+    let total_contracts: i64 = fills.iter().map(|f| f.count).sum();
+    let total_fees: f64 = fills.iter().map(|f| f.fee).sum();
     let expected_pnl: f64 = fills.iter()
-        .filter_map(|f| f.2.map(|e| e / 10000.0 * f.0 as f64))
+        .filter_map(|f| f.edge_bps.map(|e| e / 10000.0 * f.count as f64))
         .sum();
     let realized_pnl: f64 = fills.iter()
-        .filter_map(|f| f.3)
+        .filter_map(|f| f.fill_pnl)
         .sum();
 
-    // Bernoulli variance if edge is real: q = price/100 + edge/10000
+    // Group fills by game for correlated variance calculation.
+    // Fills on the same game are perfectly correlated (same binary outcome),
+    // so we net them and compute one variance term per game.
+    let mut game_groups: std::collections::HashMap<String, Vec<&VarFill>> = std::collections::HashMap::new();
+    let mut ungrouped: Vec<&VarFill> = Vec::new();
+    for fill in fills {
+        if let Some(ref gn) = fill.game_name {
+            game_groups.entry(gn.clone()).or_default().push(fill);
+        } else {
+            ungrouped.push(fill);
+        }
+    }
+
     let mut var_edge = 0.0_f64;
     let mut var_zero = 0.0_f64;
-    for &(count, price_cents, edge_bps, _, _) in fills {
-        let p0 = (price_cents as f64 / 100.0).clamp(0.01, 0.99);
-        let q = if let Some(e) = edge_bps {
+
+    for (_game, group) in &game_groups {
+        // Net home-aligned contracts across all fills in this game
+        let net_home: f64 = group.iter().map(|f| f.signed_home_contracts()).sum();
+
+        // Contract-weighted average home-win probability
+        let total_abs: f64 = group.iter().map(|f| f.count as f64).sum();
+        if total_abs == 0.0 { continue; }
+
+        let avg_home_p0: f64 = group.iter()
+            .map(|f| f.home_prob() * f.count as f64)
+            .sum::<f64>() / total_abs;
+        let p0 = avg_home_p0.clamp(0.01, 0.99);
+
+        // Edge-real: adjust by contract-weighted average edge (in home direction)
+        let avg_home_edge: f64 = group.iter()
+            .map(|f| {
+                let edge_frac = f.edge_bps.unwrap_or(0.0) / 10000.0;
+                // Edge is always positive from trader perspective; convert to home direction
+                let dir = if f.signed_home_contracts() >= 0.0 { 1.0 } else { -1.0 };
+                edge_frac * dir * f.count as f64
+            })
+            .sum::<f64>() / total_abs;
+        let q = (p0 + avg_home_edge).clamp(0.01, 0.99);
+
+        // Var(game PnL) = net² * q*(1-q), because all contracts share the same outcome
+        var_edge += net_home * net_home * q * (1.0 - q);
+        var_zero += net_home * net_home * p0 * (1.0 - p0);
+    }
+
+    // Ungrouped fills (no game_name): treat as independent (fallback)
+    for fill in &ungrouped {
+        let p0 = (fill.price_cents as f64 / 100.0).clamp(0.01, 0.99);
+        let q = if let Some(e) = fill.edge_bps {
             (p0 + e / 10000.0).clamp(0.01, 0.99)
         } else {
             p0
         };
-        let n = count as f64;
+        let n = fill.count as f64;
         var_edge += n * n * q * (1.0 - q);
         var_zero += n * n * p0 * (1.0 - p0);
     }
+
     let sigma_edge = var_edge.sqrt();
     let sigma_zero = var_zero.sqrt();
 
@@ -747,15 +884,16 @@ fn compute_day_row(date: &str, fills: &[(i64, i64, Option<f64>, Option<f64>, f64
 fn query_variance_analysis(db_path: &str) -> anyhow::Result<VarianceAnalysis> {
     let conn = open_read_only(db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT date(f.filled_at) as day, f.count, f.price_cents, o.edge_bps, f.fill_pnl, COALESCE(f.fee_cents, 0)
+        "SELECT date(f.filled_at, '-8 hours') as day, f.count, f.price_cents, o.edge_bps, f.fill_pnl, COALESCE(f.fee_cents, 0),
+                o.game_name, LOWER(f.side), LOWER(f.action), o.is_home
          FROM fills f
          LEFT JOIN orders o ON f.order_id = o.order_id
          WHERE f.fill_pnl IS NOT NULL AND COALESCE(f.excluded, 0) = 0
          ORDER BY f.filled_at ASC"
     )?;
 
-    let mut by_day: std::collections::BTreeMap<String, Vec<(i64, i64, Option<f64>, Option<f64>, f64)>> = std::collections::BTreeMap::new();
-    let mut all_fills = Vec::new();
+    let mut by_day: std::collections::BTreeMap<String, Vec<VarFill>> = std::collections::BTreeMap::new();
+    let mut all_fills: Vec<VarFill> = Vec::new();
 
     let rows = stmt.query_map([], |row| {
         let day: String = row.get(0)?;
@@ -764,14 +902,17 @@ fn query_variance_analysis(db_path: &str) -> anyhow::Result<VarianceAnalysis> {
         let edge_bps: Option<f64> = row.get(3)?;
         let fill_pnl: Option<f64> = row.get(4)?;
         let fee: f64 = row.get(5)?;
-        Ok((day, count, price_cents, edge_bps, fill_pnl, fee))
+        let game_name: Option<String> = row.get(6)?;
+        let side: String = row.get::<_, Option<String>>(7)?.unwrap_or_default();
+        let action: String = row.get::<_, Option<String>>(8)?.unwrap_or_else(|| "buy".to_string());
+        let is_home: Option<bool> = row.get(9)?;
+        Ok((day, VarFill { count, price_cents, edge_bps, fill_pnl, fee, game_name, side, action, is_home }))
     })?;
 
     for row in rows {
-        let (day, count, price_cents, edge_bps, fill_pnl, fee) = row?;
-        let entry = (count, price_cents, edge_bps, fill_pnl, fee);
-        by_day.entry(day).or_default().push(entry);
-        all_fills.push(entry);
+        let (day, fill) = row?;
+        all_fills.push(fill.clone());
+        by_day.entry(day).or_default().push(fill);
     }
 
     let days: Vec<VarianceDayRow> = by_day.iter()
@@ -822,13 +963,17 @@ async fn api_exclude_fills(State(state): State<DashboardState>, Query(q): Query<
 
 // --- Server ---
 
-pub async fn serve(bot_state: SharedState, order_books: SharedOrderBooks, _logger: SharedLogger, break_log: SharedBreakLog, db_path: &str, port: u16, dry_run: bool) -> anyhow::Result<()> {
+pub async fn serve(bot_state: SharedState, order_books: SharedOrderBooks, _logger: SharedLogger, break_log: SharedBreakLog, db_path: &str, port: u16, dry_run: bool, pregame_min_edge: f64, break_min_edge: f64, contracts_per_pct_edge: f64, max_contracts_per_game: i64) -> anyhow::Result<()> {
     let state = DashboardState {
         bot: bot_state,
         order_books,
         break_log,
         db_path: db_path.to_string(),
         dry_run,
+        pregame_min_edge,
+        break_min_edge,
+        contracts_per_pct_edge,
+        max_contracts_per_game,
     };
 
     let app = Router::new()

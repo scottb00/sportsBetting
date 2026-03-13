@@ -83,6 +83,7 @@ fn evaluate_market(
     contracts_per_pct_edge: f64,
     min_trade_contracts: i64,
     max_contracts_per_order: i64,
+    max_contracts_per_game: i64,
 ) -> Option<OrderSignal> {
     let fair_value = game.fair_value_for_market(market)?;
 
@@ -92,9 +93,11 @@ fn evaluate_market(
     let yes_ask = prices.ask? as i64;
 
     // Step 1: compute target in signed YES-units (+ = hold YES, - = hold NO)
+    // Capped at max_contracts_per_game to prevent unrealistic targets on thin/wide books.
     let target_signed: i64 = if let Some(r) = compute_edge_and_alo(yes_bid, yes_ask, fair_value) {
         if r.edge_after_fees >= min_edge {
             let n = ((r.edge_after_fees - min_edge) * 100.0 * contracts_per_pct_edge).floor().max(1.0) as i64;
+            let n = n.min(max_contracts_per_game);
             if r.buying_yes { n } else { -n }
         } else {
             0
@@ -239,6 +242,7 @@ pub fn evaluate_edge(
     contracts_per_pct_edge: f64,
     min_trade_contracts: i64,
     max_contracts_per_order: i64,
+    max_contracts_per_game: i64,
 ) -> Option<OrderSignal> {
     let mut best: Option<OrderSignal> = None;
 
@@ -247,6 +251,7 @@ pub fn evaluate_edge(
             game, market, order_books, risk,
             min_edge, strategy_name,
             contracts_per_pct_edge, min_trade_contracts, max_contracts_per_order,
+            max_contracts_per_game,
         ) && best.as_ref().is_none_or(|b| signal.edge_after_fees > b.edge_after_fees)
         {
             best = Some(signal);
