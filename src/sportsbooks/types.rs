@@ -95,6 +95,95 @@ impl BookOdds {
 /// Maximum age (seconds) before a bookmaker's odds are considered stale and excluded from spread.
 const MAX_BOOK_AGE_SECS: i64 = 120;
 
+/// Whether a sportsbook agrees, disagrees, or has no opinion on our trade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BookConviction {
+    /// Book's bid > our price — they'd pay more than us. Confirms the trade.
+    Agree,
+    /// Book's offer < our price — they sell cheaper. Trade looks bad to them.
+    Disagree,
+    /// Our price is inside the book's spread. Book is indifferent.
+    NoOpinion,
+}
+
+/// Aggregated conviction result across all fresh sportsbooks.
+#[derive(Debug, Clone)]
+pub struct ConvictionResult {
+    /// Weighted sum of agreeing books (0.0 if any disagree).
+    pub score: f64,
+    /// Whether any fresh book disagreed (hard veto).
+    pub any_disagree: bool,
+    /// Per-book breakdown: (bookmaker name, conviction, weight used).
+    pub details: Vec<(String, BookConviction, f64)>,
+    /// Number of fresh books evaluated.
+    pub fresh_count: usize,
+}
+
+impl std::fmt::Display for ConvictionResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let details: Vec<String> = self.details.iter().map(|(name, conv, w)| {
+            let label = match conv {
+                BookConviction::Agree => "agree",
+                BookConviction::Disagree => "DISAGREE",
+                BookConviction::NoOpinion => "neutral",
+            };
+            format!("{}:{}(w={:.1})", name, label, w)
+        }).collect();
+        write!(f, "score={:.1} veto={} fresh={} [{}]",
+            self.score, self.any_disagree, self.fresh_count, details.join(", "))
+    }
+}
+
+impl BookOdds {
+    /// Classify this book's conviction on a trade.
+    ///
+    /// `alo_price_prob`: our ALO price as a probability (e.g. 0.55 for 55c).
+    /// `buying_yes`: true if buying YES on Kalshi, false if buying NO.
+    /// `kalshi_is_home`: true if the Kalshi YES side = home team.
+    ///
+    /// The comparison is done in the "trade side" — the side we're actually buying.
+    /// If buying YES and YES=home: compare against home bid/offer.
+    /// If buying YES and YES=away: compare against away bid/offer (flipped from home).
+    /// If buying NO: compare against the opposite side's bid/offer.
+    pub fn conviction(&self, alo_price_prob: f64, buying_yes: bool, kalshi_is_home: bool) -> BookConviction {
+        // Determine the "trade side" bid/offer in terms of the side we're buying.
+        // YES side aligned bid/offer:
+        let (yes_bid, yes_offer) = if kalshi_is_home {
+            (self.home_bid(), self.home_offer())
+        } else {
+            // YES = away: bid_away = 1 - offer_home, offer_away = 1 - bid_home
+            (1.0 - self.home_offer(), 1.0 - self.home_bid())
+        };
+
+        // Trade side bid/offer depends on whether we're buying YES or NO
+        let (trade_bid, trade_offer) = if buying_yes {
+            (yes_bid, yes_offer)
+        } else {
+            // Buying NO: NO bid = 1 - yes_offer, NO offer = 1 - yes_bid
+            (1.0 - yes_offer, 1.0 - yes_bid)
+        };
+
+        if trade_bid > alo_price_prob {
+            BookConviction::Agree
+        } else if trade_offer < alo_price_prob {
+            BookConviction::Disagree
+        } else {
+            BookConviction::NoOpinion
+        }
+    }
+}
+
+/// Book weight for conviction scoring. Pinnacle is sharpest, then DK, FD, others.
+fn book_weight(bookmaker: &str, short_break: bool) -> f64 {
+    let base = match bookmaker {
+        "pinnacle" => 3.0,
+        "draftkings" => 2.0,
+        "fanduel" => 1.5,
+        _ => 1.0,
+    };
+    if short_break { base * 0.5 } else { base }
+}
+
 /// Composite sportsbook spread for a game, all HOME-aligned.
 #[derive(Debug, Clone)]
 pub struct SportsbookSpread {
@@ -198,6 +287,70 @@ impl SportsbookSpread {
     /// Check if the spread data is older than the given duration.
     pub fn is_stale(&self, max_age: std::time::Duration) -> bool {
         self.updated_at.elapsed() > max_age
+    }
+
+    /// Compute conviction score for a proposed trade.
+    ///
+    /// Classifies each fresh book as Agree/Disagree/NoOpinion by comparing our ALO price
+    /// against the book's bid/offer for the trade side. Any disagreement → hard veto.
+    ///
+    /// `alo_price_cents`: the ALO price we'd post (integer cents, 1-99).
+    /// `buying_yes`: true if buying YES on Kalshi.
+    /// `kalshi_is_home`: true if the Kalshi ticker YES side = home team.
+    /// `short_break`: true for TV timeouts (reduced book weights).
+    /// `break_started_at`: if Some, only include books updated after this unix timestamp.
+    pub fn conviction_score(
+        &self,
+        alo_price_cents: i64,
+        buying_yes: bool,
+        kalshi_is_home: bool,
+        short_break: bool,
+        break_started_at: Option<i64>,
+    ) -> ConvictionResult {
+        let now_ts = chrono::Utc::now().timestamp();
+        let alo_prob = alo_price_cents as f64 / 100.0;
+
+        let fresh_books: Vec<&BookOdds> = self.books.iter()
+            .filter(|b| {
+                // General staleness check
+                let age_ok = match b.last_update_ts {
+                    Some(ts) => (now_ts - ts) <= MAX_BOOK_AGE_SECS,
+                    None => true,
+                };
+                // Post-break freshness filter
+                let break_ok = match break_started_at {
+                    Some(min_ts) => b.last_update_ts.is_some_and(|ts| ts >= min_ts),
+                    None => true,
+                };
+                age_ok && break_ok
+            })
+            .collect();
+
+        let fresh_count = fresh_books.len();
+        let mut score = 0.0;
+        let mut any_disagree = false;
+        let mut details = Vec::new();
+
+        for book in &fresh_books {
+            let conv = book.conviction(alo_prob, buying_yes, kalshi_is_home);
+            let weight = book_weight(&book.bookmaker, short_break);
+
+            if conv == BookConviction::Disagree {
+                any_disagree = true;
+            }
+            if conv == BookConviction::Agree {
+                score += weight;
+            }
+
+            details.push((book.bookmaker.clone(), conv, weight));
+        }
+
+        // Any disagree → zero the score
+        if any_disagree {
+            score = 0.0;
+        }
+
+        ConvictionResult { score, any_disagree, details, fresh_count }
     }
 
     /// Serialize all non-stale books as a JSON string for order logging.
@@ -331,5 +484,109 @@ mod tests {
         let (bid, offer) = spread.aligned_spread(true);
         assert!(bid.is_none());
         assert!(offer.is_none());
+    }
+
+    // --- Conviction tests ---
+
+    #[test]
+    fn test_conviction_agree_buying_yes_home() {
+        // Pinnacle: home -200, away +170 → bid_home=63.0%, offer_home=66.7%
+        let book = BookOdds::from_moneylines("pinnacle".into(), -200.0, 170.0);
+        // Buying YES (home) at 55c — below Pinnacle's bid of 63c → Agree
+        let conv = book.conviction(0.55, true, true);
+        assert_eq!(conv, BookConviction::Agree);
+    }
+
+    #[test]
+    fn test_conviction_disagree_buying_yes_home() {
+        // DK: home -105, away -115 → bid_home=46.5%, offer_home=51.2%
+        let book = BookOdds::from_moneylines("draftkings".into(), -105.0, -115.0);
+        // Buying YES (home) at 55c — above DK's offer of 51.2c → Disagree
+        let conv = book.conviction(0.55, true, true);
+        assert_eq!(conv, BookConviction::Disagree);
+    }
+
+    #[test]
+    fn test_conviction_no_opinion_buying_yes_home() {
+        // FD: home -130, away +110 → bid_home=52.4%, offer_home=56.5%
+        let book = BookOdds::from_moneylines("fanduel".into(), -130.0, 110.0);
+        // Buying YES (home) at 55c — between bid(52.4) and offer(56.5) → NoOpinion
+        let conv = book.conviction(0.55, true, true);
+        assert_eq!(conv, BookConviction::NoOpinion);
+    }
+
+    #[test]
+    fn test_conviction_buying_yes_away() {
+        // Pinnacle: home -200, away +170 → home_bid=63%, home_offer=66.7%
+        // YES = away, so away_bid = 1-66.7% = 33.3%, away_offer = 1-63% = 37%
+        let book = BookOdds::from_moneylines("pinnacle".into(), -200.0, 170.0);
+        // Buying YES (away) at 38c — above Pinnacle's away offer of 37% → Disagree
+        let conv = book.conviction(0.38, true, false);
+        assert_eq!(conv, BookConviction::Disagree);
+        // Buying YES (away) at 30c — below Pinnacle's away bid of 33.3% → Agree
+        let conv2 = book.conviction(0.30, true, false);
+        assert_eq!(conv2, BookConviction::Agree);
+    }
+
+    #[test]
+    fn test_conviction_buying_no() {
+        // Pinnacle: home -200, away +170 → yes_bid=63%, yes_offer=66.7%
+        // Buying NO: no_bid = 1-66.7%=33.3%, no_offer = 1-63%=37%
+        let book = BookOdds::from_moneylines("pinnacle".into(), -200.0, 170.0);
+        // kalshi_is_home=true, buying_no at 30c — below no_bid(33.3%) → Agree
+        let conv = book.conviction(0.30, false, true);
+        assert_eq!(conv, BookConviction::Agree);
+        // buying_no at 38c — above no_offer(37%) → Disagree
+        let conv2 = book.conviction(0.38, false, true);
+        assert_eq!(conv2, BookConviction::Disagree);
+    }
+
+    #[test]
+    fn test_conviction_score_agree_no_veto() {
+        let books = vec![
+            BookOdds::from_moneylines("pinnacle".into(), -200.0, 170.0),   // bid=63%, agree at 55c
+            BookOdds::from_moneylines("draftkings".into(), -180.0, 155.0), // bid=60.8%, agree at 55c
+        ];
+        let spread = SportsbookSpread::from_books(books);
+        let result = spread.conviction_score(55, true, true, false, None);
+        assert!(!result.any_disagree);
+        // Pinnacle(3) + DK(2) = 5.0
+        assert!((result.score - 5.0).abs() < 0.01, "Expected 5.0, got {}", result.score);
+        assert_eq!(result.fresh_count, 2);
+    }
+
+    #[test]
+    fn test_conviction_score_veto() {
+        let books = vec![
+            BookOdds::from_moneylines("pinnacle".into(), -200.0, 170.0),   // agrees at 55c
+            BookOdds::from_moneylines("draftkings".into(), -105.0, -115.0), // disagrees at 55c
+        ];
+        let spread = SportsbookSpread::from_books(books);
+        let result = spread.conviction_score(55, true, true, false, None);
+        assert!(result.any_disagree);
+        assert_eq!(result.score, 0.0);
+    }
+
+    #[test]
+    fn test_conviction_score_short_break_halved_weights() {
+        let books = vec![
+            BookOdds::from_moneylines("pinnacle".into(), -200.0, 170.0), // agrees at 55c
+        ];
+        let spread = SportsbookSpread::from_books(books);
+        // Long break: Pinnacle weight = 3.0
+        let long = spread.conviction_score(55, true, true, false, None);
+        assert!((long.score - 3.0).abs() < 0.01);
+        // Short break: Pinnacle weight = 1.5
+        let short = spread.conviction_score(55, true, true, true, None);
+        assert!((short.score - 1.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_conviction_score_empty_spread() {
+        let spread = SportsbookSpread::from_books(vec![]);
+        let result = spread.conviction_score(55, true, true, false, None);
+        assert!(!result.any_disagree);
+        assert_eq!(result.score, 0.0);
+        assert_eq!(result.fresh_count, 0);
     }
 }

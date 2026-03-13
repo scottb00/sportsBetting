@@ -354,6 +354,21 @@ impl OrderManager {
             })
             .sum()
     }
+
+    /// Signed (YES-aligned) net resting contracts for a ticker.
+    /// BUY YES → +, BUY NO → -, SELL YES → -, SELL NO → +.
+    pub fn signed_resting_for_ticker(&self, ticker: &str) -> i64 {
+        self.orders_by_ticker.get(ticker)
+            .into_iter()
+            .flat_map(|ids| ids.iter())
+            .filter_map(|id| self.resting_orders.get(id))
+            .map(|o| {
+                let buy_sign: i64 = match o.action { OrderAction::Buy => 1, OrderAction::Sell => -1 };
+                let yes_sign: i64 = match o.side { OrderSide::Yes => 1, OrderSide::No => -1 };
+                o.remaining_count * buy_sign * yes_sign
+            })
+            .sum()
+    }
 }
 
 #[cfg(test)]

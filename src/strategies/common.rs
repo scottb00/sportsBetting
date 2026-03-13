@@ -4,6 +4,7 @@ use crate::engine::game_state::{GameState, KalshiMarketState};
 use crate::engine::market_prep::extract_book_prices;
 use crate::engine::order_manager::OrderSignal;
 use crate::engine::risk::RiskManager;
+use crate::espn::types::GamePhase;
 use crate::kalshi::orderbook::LocalOrderBook;
 use crate::kalshi::types::{OrderAction, OrderSide};
 
@@ -66,6 +67,28 @@ pub fn compute_edge_and_alo(yes_bid: i64, yes_ask: i64, fair_value: f64) -> Opti
     })
 }
 
+/// Conviction-based sizing parameters, extracted from config.
+#[derive(Debug, Clone)]
+pub struct ConvictionConfig {
+    pub enabled: bool,
+    pub max_contracts: i64,
+    /// (min_score_threshold, contracts) — evaluated highest-threshold-first.
+    pub long_tiers: Vec<(f64, i64)>,
+    pub short_tiers: Vec<(f64, i64)>,
+}
+
+/// Map a conviction score to a contract count using a tier table.
+/// Tiers are (min_score, contracts) pairs. We find the highest threshold that the score meets.
+fn conviction_to_contracts(score: f64, tiers: &[(f64, i64)], max_contracts: i64) -> i64 {
+    let mut best = 0i64;
+    for &(threshold, contracts) in tiers {
+        if score >= threshold {
+            best = best.max(contracts);
+        }
+    }
+    best.min(max_contracts)
+}
+
 /// Evaluate edge for a specific Kalshi market within a game.
 ///
 /// Target-position model:
@@ -84,6 +107,7 @@ fn evaluate_market(
     min_trade_contracts: i64,
     max_contracts_per_order: i64,
     max_contracts_per_game: i64,
+    conviction_config: Option<&ConvictionConfig>,
 ) -> Option<OrderSignal> {
     let fair_value = game.fair_value_for_market(market)?;
 
@@ -96,7 +120,42 @@ fn evaluate_market(
     // Capped at max_contracts_per_game to prevent unrealistic targets on thin/wide books.
     let target_signed: i64 = if let Some(r) = compute_edge_and_alo(yes_bid, yes_ask, fair_value) {
         if r.edge_after_fees >= min_edge {
-            let n = ((r.edge_after_fees - min_edge) * 100.0 * contracts_per_pct_edge).floor().max(1.0) as i64;
+            // Conviction-based sizing: replace edge-linear formula with sportsbook consensus tiers
+            let n = if let Some(cc) = conviction_config
+                && cc.enabled
+                && let Some(spread) = &game.sportsbook_spread
+            {
+                let short_break = matches!(game.phase, GamePhase::Break);
+                let conv = spread.conviction_score(
+                    r.alo_price,
+                    r.buying_yes,
+                    market.is_home,
+                    short_break,
+                    game.break_started_at,
+                );
+
+                // Any disagreement → hard veto, no trade
+                if conv.any_disagree {
+                    tracing::info!(
+                        "Conviction VETO {}: {} — {}",
+                        strategy_name, market.ticker, conv
+                    );
+                    return None;
+                }
+
+                let tiers = if short_break { &cc.short_tiers } else { &cc.long_tiers };
+                let contracts = conviction_to_contracts(conv.score, tiers, cc.max_contracts);
+
+                tracing::info!(
+                    "Conviction {}: {} → {} contracts — {}",
+                    strategy_name, market.ticker, contracts, conv
+                );
+
+                contracts
+            } else {
+                // Fallback: legacy edge-linear sizing
+                ((r.edge_after_fees - min_edge) * 100.0 * contracts_per_pct_edge).floor().max(1.0) as i64
+            };
             let n = n.min(max_contracts_per_game);
             if r.buying_yes { n } else { -n }
         } else {
@@ -243,6 +302,7 @@ pub fn evaluate_edge(
     min_trade_contracts: i64,
     max_contracts_per_order: i64,
     max_contracts_per_game: i64,
+    conviction_config: Option<&ConvictionConfig>,
 ) -> Option<OrderSignal> {
     let mut best: Option<OrderSignal> = None;
 
@@ -251,7 +311,7 @@ pub fn evaluate_edge(
             game, market, order_books, risk,
             min_edge, strategy_name,
             contracts_per_pct_edge, min_trade_contracts, max_contracts_per_order,
-            max_contracts_per_game,
+            max_contracts_per_game, conviction_config,
         ) && best.as_ref().is_none_or(|b| signal.edge_after_fees > b.edge_after_fees)
         {
             best = Some(signal);

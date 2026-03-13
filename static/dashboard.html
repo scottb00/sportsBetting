@@ -486,7 +486,7 @@ function fmtPositionBar(game) {
 
   const netStr = `<span style="font-weight:600;color:${color(net)}">${fmtSigned(net)}</span>`;
   const targetStr = `<span style="color:${color(target)}">${fmtSigned(target)}</span>`;
-  const restLabel = resting > 0 ? ` <span class="pos-rest">(${resting} resting)</span>` : '';
+  const restLabel = resting !== 0 ? ` <span class="pos-rest" style="color:${color(resting)}">(${fmtSigned(resting)} resting)</span>` : '';
 
   return `${netStr} / ${targetStr}${restLabel}`;
 }

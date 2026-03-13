@@ -36,8 +36,8 @@ pub fn build_eval_snapshot(
             if state.order_manager.has_resting_order(ticker) {
                 resting_tickers.insert(ticker.clone());
             }
-            let resting = state.order_manager.resting_contracts_for_tickers(&[ticker.as_str()]);
-            if resting > 0 {
+            let resting = state.order_manager.signed_resting_for_ticker(ticker);
+            if resting != 0 {
                 resting_contracts.insert(ticker.clone(), resting);
             }
         }
@@ -102,13 +102,16 @@ fn game_contracts_remaining(
     let net_game_risk = snapshot.risk.net_game_home_risk(&game.kalshi_markets);
     let reduce_cap = net_game_risk.unsigned_abs() as i64;
 
-    let game_committed: i64 = game.kalshi_markets.iter()
+    // Net home-aligned: position + resting, then take abs for total game commitment.
+    let net_home_committed: i64 = game.kalshi_markets.iter()
         .map(|m| {
-            let position = snapshot.risk.net_position(&m.ticker).unsigned_abs() as i64;
+            let position = snapshot.risk.net_position(&m.ticker);
             let resting = snapshot.resting_contracts.get(&m.ticker).copied().unwrap_or(0);
-            position + resting
+            let yes_aligned = position + resting;
+            if m.is_home { yes_aligned } else { -yes_aligned }
         })
         .sum();
+    let game_committed = net_home_committed.unsigned_abs() as i64;
     let regular_remaining = (registry.max_contracts_per_game - game_committed).max(0);
 
     // Skip only when there's nothing to trade (no cap space AND nothing to reduce).
@@ -160,16 +163,8 @@ pub fn evaluate_strategies(
             }
         };
 
-        // Compute exposure for Kelly sizing from position + resting orders
-        let current_exposure: f64 = game.kalshi_markets.iter()
-            .map(|m| {
-                let position = snapshot.risk.net_position(&m.ticker).unsigned_abs() as i64;
-                let resting = snapshot.resting_contracts.get(&m.ticker).copied().unwrap_or(0);
-                let contracts = position + resting;
-                let avg_price = book_prices(order_books, &m.ticker).mid.map(|mid| mid / 100.0).unwrap_or(0.50);
-                contracts as f64 * avg_price
-            })
-            .sum();
+        // Legacy: current_exposure passed to strategy trait but unused (target-position model replaced Kelly).
+        let current_exposure: f64 = 0.0;
 
         // Detailed break logging + build market eval data for dashboard
         let is_break = game.phase.is_break();
@@ -442,13 +437,15 @@ pub async fn execute_signal(
         // Re-compute contract cap.
         let net_game_risk = s.risk.net_game_home_risk(&game_markets);
         let reduce_cap = net_game_risk.unsigned_abs() as i64;
-        let game_committed: i64 = game_markets.iter()
+        let net_home_committed: i64 = game_markets.iter()
             .map(|m| {
-                let position = s.risk.net_position(&m.ticker).unsigned_abs() as i64;
-                let resting = s.order_manager.resting_contracts_for_tickers(&[m.ticker.as_str()]);
-                position + resting
+                let position = s.risk.net_position(&m.ticker);
+                let resting = s.order_manager.signed_resting_for_ticker(&m.ticker);
+                let yes_aligned = position + resting;
+                if m.is_home { yes_aligned } else { -yes_aligned }
             })
             .sum();
+        let game_committed = net_home_committed.unsigned_abs() as i64;
         let regular_remaining = (max_contracts_per_game - game_committed).max(0);
 
         let contracts_remaining = if is_reduce { reduce_cap } else { regular_remaining };

@@ -59,6 +59,16 @@ fn default_max_contracts_per_game() -> i64 { 20 }
 fn default_contracts_per_pct_edge() -> f64 { 20.0 }
 fn default_min_trade_contracts() -> i64 { 5 }
 fn default_max_contracts_per_order() -> i64 { 30 }
+fn default_conviction_enabled() -> bool { true }
+fn default_conviction_max_contracts() -> i64 { 100 }
+// Long break tiers: (min_score, contracts)
+fn default_conviction_long_tiers() -> Vec<(f64, i64)> {
+    vec![(0.0, 5), (1.0, 15), (3.0, 40), (5.0, 100)]
+}
+// Short break tiers (reduced weights already applied to scores)
+fn default_conviction_short_tiers() -> Vec<(f64, i64)> {
+    vec![(0.0, 10), (1.0, 30), (2.0, 100)]
+}
 
 #[derive(Debug, Deserialize)]
 pub struct StrategyConfig {
@@ -93,6 +103,22 @@ pub struct StrategyConfig {
     /// on thin books. The bot waits for each clip to fill/expire before placing another. Default: 30.
     #[serde(default = "default_max_contracts_per_order")]
     pub max_contracts_per_order: i64,
+    /// Enable conviction-based sizing from sportsbook consensus. When true, order size
+    /// is determined by how many sportsbooks agree with the trade. When false, uses
+    /// legacy edge-linear sizing. Default: true.
+    #[serde(default = "default_conviction_enabled")]
+    pub conviction_enabled: bool,
+    /// Maximum contracts for highest conviction tier. Default: 100.
+    #[serde(default = "default_conviction_max_contracts")]
+    pub conviction_max_contracts: i64,
+    /// Long break conviction tiers: (min_score_threshold, contracts).
+    /// Evaluated in reverse order (highest threshold first). Default: [(0,5),(1,15),(3,40),(5,100)].
+    #[serde(default = "default_conviction_long_tiers")]
+    pub conviction_long_tiers: Vec<(f64, i64)>,
+    /// Short break conviction tiers (TV timeouts, with halved book weights).
+    /// Default: [(0,10),(1,30),(2,100)].
+    #[serde(default = "default_conviction_short_tiers")]
+    pub conviction_short_tiers: Vec<(f64, i64)>,
 }
 
 #[derive(Debug, Deserialize)]

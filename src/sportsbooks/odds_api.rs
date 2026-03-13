@@ -35,7 +35,7 @@ impl OddsApiClient {
             .get(ODDS_API_BASE)
             .query(&[
                 ("apiKey", self.api_key.as_str()),
-                ("regions", "eu"),
+                ("regions", "eu,us"),
                 ("markets", "h2h"),
                 ("oddsFormat", "american"),
             ])

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::engine::game_state::GameState;
 use crate::engine::order_manager::OrderSignal;
@@ -6,8 +7,12 @@ use crate::engine::risk::RiskManager;
 use crate::espn::types::{GamePhase};
 use crate::kalshi::orderbook::LocalOrderBook;
 
+/// Maximum age of ESPN data before we skip signal generation during in-game breaks.
+/// PreGame is exempt — ESPN doesn't update frequently before tip-off.
+const MAX_ESPN_AGE_SECS: u64 = 90;
+
 use super::Strategy;
-use super::common::evaluate_edge;
+use super::common::{ConvictionConfig, evaluate_edge};
 
 /// Passive ESPN-referenced strategy.
 ///
@@ -22,6 +27,7 @@ pub struct PassiveEspn {
     pub min_trade_contracts: i64,
     pub max_contracts_per_order: i64,
     pub max_contracts_per_game: i64,
+    pub conviction: Option<ConvictionConfig>,
 }
 
 impl PassiveEspn {
@@ -32,6 +38,7 @@ impl PassiveEspn {
         min_trade_contracts: i64,
         max_contracts_per_order: i64,
         max_contracts_per_game: i64,
+        conviction: Option<ConvictionConfig>,
     ) -> Self {
         Self {
             pregame_min_edge,
@@ -40,6 +47,7 @@ impl PassiveEspn {
             min_trade_contracts,
             max_contracts_per_order,
             max_contracts_per_game,
+            conviction,
         }
     }
 
@@ -81,13 +89,25 @@ impl Strategy for PassiveEspn {
         current_game_exposure: f64,
         order_books: &HashMap<String, LocalOrderBook>,
     ) -> Option<OrderSignal> {
+        // ESPN staleness guard: skip in-game signals if ESPN data is too old.
+        // PreGame is exempt — ESPN doesn't update frequently before tip-off.
+        if matches!(game.phase, GamePhase::Break | GamePhase::Halftime)
+            && game.last_updated.elapsed() > Duration::from_secs(MAX_ESPN_AGE_SECS)
+        {
+            tracing::warn!(
+                "ESPN data stale for {} ({:.0}s old), skipping signal",
+                game.espn_event_id, game.last_updated.elapsed().as_secs_f64()
+            );
+            return None;
+        }
+
         let min_edge = self.min_edge_for_phase(&game.phase);
         let label = Self::phase_label(&game.phase);
 
         let mut signal = evaluate_edge(
             game, risk, current_game_exposure, min_edge, label, order_books,
             self.contracts_per_pct_edge, self.min_trade_contracts, self.max_contracts_per_order,
-            self.max_contracts_per_game,
+            self.max_contracts_per_game, self.conviction.as_ref(),
         )?;
 
         // Phase-specific expiration

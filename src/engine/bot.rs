@@ -144,6 +144,18 @@ pub fn create_bot_state(config: &Config) -> Result<(BotState, TradeLogger, Marke
 pub fn create_strategies(config: &Config) -> StrategyRegistry {
     use crate::strategies::passive_espn::PassiveEspn;
 
+    let conviction = if config.strategy.conviction_enabled {
+        use crate::strategies::common::ConvictionConfig;
+        Some(ConvictionConfig {
+            enabled: true,
+            max_contracts: config.strategy.conviction_max_contracts,
+            long_tiers: config.strategy.conviction_long_tiers.clone(),
+            short_tiers: config.strategy.conviction_short_tiers.clone(),
+        })
+    } else {
+        None
+    };
+
     let strategies: Vec<Box<dyn Strategy>> = vec![
         Box::new(PassiveEspn::new(
             config.strategy.clv_hunter_min_edge,
@@ -152,6 +164,7 @@ pub fn create_strategies(config: &Config) -> StrategyRegistry {
             config.strategy.min_trade_contracts,
             config.strategy.max_contracts_per_order,
             config.strategy.max_contracts_per_game,
+            conviction,
         )),
     ];
 

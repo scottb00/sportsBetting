@@ -51,7 +51,7 @@ fn test_risk() -> RiskManager {
 fn make_registry(max_contracts_per_game: i64) -> StrategyRegistry {
     StrategyRegistry {
         strategies: vec![
-            Box::new(PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20)),
+            Box::new(PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000, 20, None)),
         ],
         live_strategies: vec!["break_ev".into(), "pregame".into()],
         min_volume: 1000,
@@ -438,7 +438,7 @@ fn extreme_price_games_produce_no_signals() {
 #[test]
 fn no_signal_when_edge_below_threshold() {
     let risk = test_risk(); // min_edge = 0.01
-    let quoter = PassiveEspn::new(0.05, 0.05, 20.0, 1, 1000, 20); // strategy needs 5% edge
+    let quoter = PassiveEspn::new(0.05, 0.05, 20.0, 1, 1000, 20, None); // strategy needs 5% edge
 
     // Fair = 54%, market mid = 50c → edge ~3c after ALO pricing
     // This should be below the 5% threshold

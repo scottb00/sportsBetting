@@ -45,6 +45,10 @@ struct GameView {
     spread_offer_home: Option<f64>,
     /// Number of bookmakers contributing to the spread.
     spread_books_count: usize,
+    /// How many seconds since ESPN last updated this game's data.
+    espn_age_secs: u64,
+    /// True if ESPN data is considered stale (>90s for in-game, never for pregame).
+    espn_stale: bool,
     /// Game start time as unix seconds (from ESPN).
     start_time_ts: Option<i64>,
     /// Net game risk: positive = long home team winning, negative = long away team winning.
@@ -206,6 +210,7 @@ struct GameSnapshot {
     spread_bid_home: Option<f64>,
     spread_offer_home: Option<f64>,
     spread_books_count: usize,
+    espn_age_secs: u64,
     start_time_ts: Option<i64>,
     net_game_contracts: i64,
     markets: Vec<MarketSnapshot>,
@@ -232,7 +237,7 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
                         mid: prices.mid,
                         volume: m.volume,
                         has_resting: s.order_manager.has_resting_order(&m.ticker),
-                        resting: s.order_manager.resting_contracts_for_tickers(&[m.ticker.as_str()]),
+                        resting: s.order_manager.signed_resting_for_ticker(&m.ticker),
                         position: s.risk.net_position(&m.ticker),
                     }
                 }).collect();
@@ -250,6 +255,7 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
                     spread_bid_home: g.sportsbook_spread.as_ref().and_then(|s| s.best_bid_home),
                     spread_offer_home: g.sportsbook_spread.as_ref().and_then(|s| s.best_offer_home),
                     spread_books_count: g.sportsbook_spread.as_ref().map_or(0, |s| s.fresh_count),
+                    espn_age_secs: g.last_updated.elapsed().as_secs(),
                     start_time_ts: g.start_time_ts,
                     net_game_contracts: s.risk.net_game_home_risk(&g.kalshi_markets),
                     markets,
@@ -278,7 +284,7 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
         let mut total_resting: i64 = 0;
 
         let markets: Vec<MarketView> = g.markets.into_iter().map(|m| {
-            total_resting += m.resting;
+            total_resting += if m.is_home { m.resting } else { -m.resting };
 
             // Compute per-market target in YES units, then convert to home-aligned
             let target_yes = if let (Some(fv), Some(bid), Some(ask)) = (m.fair_value, m.bid, m.ask) {
@@ -324,6 +330,7 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
                 position: m.position,
             }
         }).collect();
+        let espn_stale = matches!(g.phase.as_str(), "Break" | "Halftime" | "Live") && g.espn_age_secs > 90;
         GameView {
             espn_event_id: g.espn_event_id,
             home_team: g.home_team,
@@ -338,6 +345,8 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
             spread_bid_home: g.spread_bid_home,
             spread_offer_home: g.spread_offer_home,
             spread_books_count: g.spread_books_count,
+            espn_age_secs: g.espn_age_secs,
+            espn_stale,
             start_time_ts: g.start_time_ts,
             net_game_contracts: g.net_game_contracts,
             target_game_contracts: best_target_home,

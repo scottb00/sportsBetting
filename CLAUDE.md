@@ -54,10 +54,10 @@ src/
 │       └── position_sync.rs — Reconcile positions with Kalshi REST
 ├── strategies/
 │   ├── mod.rs           — Strategy trait
-│   ├── common.rs        — evaluate_market(), compute_edge_and_alo(), ALO price calc
+│   ├── common.rs        — evaluate_market(), compute_edge_and_alo(), ConvictionConfig, conviction_to_contracts()
 │   └── passive_espn.rs  — Unified strategy: CLV hunting (pre-game), break quoting, live closing
 ├── sportsbooks/
-│   ├── types.rs         — MoneylineOdds, BookOdds (per-book raw implied probs), SportsbookSpread (composite bid/ask)
+│   ├── types.rs         — MoneylineOdds, BookOdds, SportsbookSpread, BookConviction, ConvictionResult
 │   ├── odds_api.rs      — The Odds API client (Pinnacle, DK, FD, BetMGM, etc.)
 │   └── matcher.rs       — Fuzzy match sportsbook games to ESPN GameState entries
 ├── kalshi/              — Auth (RSA-PSS), REST, WebSocket, orderbook, types
@@ -120,18 +120,33 @@ Key settings: `kalshi.dry_run = true` for paper trading. Risk params are at 0.1x
 
 ### Strategy Config Fields
 Required: `break_ev_min_edge`, `clv_hunter_min_edge` (used as pregame_min_edge)
-Optional (with defaults): `live_strategies` (["pregame", "break_ev"]), `min_volume` (20000), `min_price_cents` (10.0), `max_price_cents` (90.0), `order_ttl_secs` (60), `max_contracts_per_game` (20), `contracts_per_pct_edge` (20.0), `min_trade_contracts` (5), `max_contracts_per_order` (30)
+Optional (with defaults): `live_strategies` (["pregame", "break_ev"]), `min_volume` (20000), `min_price_cents` (10.0), `max_price_cents` (90.0), `order_ttl_secs` (60), `max_contracts_per_game` (20), `contracts_per_pct_edge` (20.0), `min_trade_contracts` (5), `max_contracts_per_order` (30), `conviction_enabled` (true), `conviction_max_contracts` (100), `conviction_long_tiers` ([(0,5),(1,15),(3,40),(5,100)]), `conviction_short_tiers` ([(0,10),(1,30),(2,100)])
 
 **Note**: There is NO `arb_scanner_min_edge` field. The arb_scanner strategy was planned but never implemented.
 **Note**: The `summary_on_break_only` polling config field was removed (was parsed but never used).
 
 ### Odds API Config
-Optional `[odds_api]` section: `api_key` (string). When present, fetches NCAAB moneylines from The Odds API every maintenance tick (Pinnacle, DraftKings, FanDuel, BetMGM, etc.). Stores raw implied probs as a composite bid/ask spread on `GameState.sportsbook_spread`. Currently display-only (dashboard shows spread); not yet used for trade filtering. Falls back to FanDuel scraper when absent. Costs 1 API credit per call ($30/mo = 20K credits).
+Optional `[odds_api]` section: `api_key` (string). When present, fetches NCAAB moneylines from The Odds API every maintenance tick using `regions=eu,us` (Pinnacle, DraftKings, FanDuel, BetMGM, etc.). Stores raw implied probs as a composite bid/ask spread on `GameState.sportsbook_spread`. Used for conviction-based sizing (agree/disagree/no-opinion classification per book). Falls back to FanDuel scraper when absent. Costs 2 API credits per call (eu+us regions).
 
 ### Sizing Model & Trading Rules
 See [TRADING_RULES.md](TRADING_RULES.md) for the complete trading rules and strategy logic.
 
-Summary: target-position model. ADD orders sized by edge above threshold. CLOSE orders fire when edge disappears but close-direction edge is positive — closes as much as possible (`min(exposure, max_contracts_per_order)`). No live trading. No forced unwinds. No negative-edge closes. Cross-ticker closing allowed (same-game tickers are equivalent).
+Summary: **conviction-based sizing** (replaces edge-linear model). Edge still gates entry (must exceed `min_edge`), but order SIZE is determined by sportsbook consensus, not edge magnitude.
+
+#### Conviction Framework
+For each trade, classify every fresh sportsbook as Agree/Disagree/NoOpinion by comparing our Kalshi ALO price against the book's bid/offer:
+- **Agree**: `book_bid_aligned > alo_price` — book would pay more than us
+- **Disagree**: `book_offer_aligned < alo_price` — book sells cheaper (hard veto → size = 0)
+- **No opinion**: price inside the book's spread
+
+Weighted score: Pinnacle=3, DraftKings=2, FanDuel=1.5, others=1. Short breaks (TV timeouts) use halved weights.
+
+**Long break tiers** (PreGame/Halftime): score 0→5 contracts, 1→15, 3→40, 5+→max (default 100).
+**Short break tiers** (TV timeout, halved weights): score 0→10, 1→30, 2+→max.
+
+Close orders (`is_close: true`) are exempt from conviction sizing — they always size at full exposure. When `conviction_enabled = false`, falls back to legacy edge-linear sizing (`(edge - min_edge) * 100 * contracts_per_pct_edge`).
+
+Cross-ticker closing allowed (same-game tickers are equivalent).
 
 ## Deployment
 
