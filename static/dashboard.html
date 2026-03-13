@@ -101,6 +101,27 @@
   </div>
   <canvas id="daily-chart" width="1368" height="220" style="width:100%;height:220px;background:#161b22;border:1px solid #30363d;border-radius:6px;display:block;margin-bottom:16px"></canvas>
 
+  <h2>Variance Analysis</h2>
+  <table id="variance-table" style="font-size:12px;">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th class="num">Fills</th>
+        <th class="num">Contracts</th>
+        <th class="num">E[PnL] (edge real)</th>
+        <th class="num">Realized PnL</th>
+        <th class="num">Fees</th>
+        <th class="num">&sigma; (edge real)</th>
+        <th class="num">Z (edge real)</th>
+        <th class="num">P(this bad+)</th>
+        <th class="num">&sigma; (zero edge)</th>
+        <th class="num">Z (zero edge)</th>
+        <th class="num">P(this bad+)</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
   <h2>Tracked Games</h2>
   <div class="filters" id="game-filters">
     <div class="filter-group">
@@ -144,7 +165,8 @@
         <th>Game</th>
         <th>Score</th>
         <th>Status</th>
-        <th class="num">Home Win%</th>
+        <th class="num">ESPN %</th>
+        <th class="num">DK %</th>
         <th class="num">Kalshi Bid/Ask</th>
         <th class="num">Edge</th>
         <th class="num">Volume</th>
@@ -169,6 +191,7 @@
         <th>Time</th>
         <th>Game</th>
         <th>Score</th>
+        <th>Period</th>
         <th>Status</th>
         <th>Ticker</th>
         <th>Side</th>
@@ -658,16 +681,49 @@ async function refresh() {
   const chartUrl = chartLookback === null
     ? '/api/daily_chart'
     : `/api/daily_chart?lookback_hours=${chartLookback}`;
-  const [risk, games, orders, fills, breakEvals, dailyChart] = await Promise.all([
+  const [risk, games, orders, fills, breakEvals, dailyChart, varianceData] = await Promise.all([
     fetchJson('/api/risk'),
     fetchJson('/api/games'),
     fetchJson('/api/orders'),
     fetchJson('/api/fills'),
     fetchJson('/api/break_evals'),
     fetchJson(chartUrl),
+    fetchJson('/api/variance_analysis'),
   ]);
 
   renderDailyChart(dailyChart, risk);
+
+  // Variance Analysis
+  if (varianceData) {
+    const tbody = $('#variance-table tbody');
+    const allRows = [...varianceData.days, varianceData.totals];
+    tbody.innerHTML = allRows.map((d, i) => {
+      const isTotal = i === allRows.length - 1;
+      const rowStyle = isTotal ? 'font-weight:700;border-top:2px solid #30363d' : '';
+      const pnlCls = pnlClass(d.realized_pnl);
+      const eCls = pnlClass(d.expected_pnl);
+      const zE = d.z_edge_real != null ? d.z_edge_real.toFixed(2) : '-';
+      const zZ = d.z_zero_edge != null ? d.z_zero_edge.toFixed(2) : '-';
+      const pE = d.p_edge_real != null ? (d.p_edge_real * 100).toFixed(1) + '%' : '-';
+      const pZ = d.p_zero_edge != null ? (d.p_zero_edge * 100).toFixed(1) + '%' : '-';
+      const pEcls = d.p_edge_real != null && d.p_edge_real < 0.05 ? 'edge-neg' : '';
+      const pZcls = d.p_zero_edge != null && d.p_zero_edge < 0.05 ? 'edge-neg' : '';
+      return `<tr style="${rowStyle}">
+        <td>${d.date}</td>
+        <td class="num">${d.fills}</td>
+        <td class="num">${d.contracts.toLocaleString()}</td>
+        <td class="num"><span class="${eCls}">${fmt$(d.expected_pnl)}</span></td>
+        <td class="num"><span class="${pnlCls}">${fmt$(d.realized_pnl)}</span></td>
+        <td class="num">$${d.total_fees.toFixed(2)}</td>
+        <td class="num">$${d.sigma_edge_real.toFixed(2)}</td>
+        <td class="num">${zE}</td>
+        <td class="num"><span class="${pEcls}">${pE}</span></td>
+        <td class="num">$${d.sigma_zero_edge.toFixed(2)}</td>
+        <td class="num">${zZ}</td>
+        <td class="num"><span class="${pZcls}">${pZ}</span></td>
+      </tr>`;
+    }).join('');
+  }
 
   // Games
   if (games) {
@@ -739,7 +795,7 @@ async function refresh() {
 
     const gp = paginate(enriched, 'games');
     if (enriched.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="10" class="empty">No games match filters</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="11" class="empty">No games match filters</td></tr>';
     } else {
       tbody.innerHTML = gp.rows.map(g => {
         const score = g.home_score != null ? `${g.away_score}-${g.home_score}` : '-';
@@ -749,6 +805,7 @@ async function refresh() {
           <td class="num">${score}</td>
           <td><span class="phase phase-${g.phase}">${g.phase}</span>${(g.phase === 'Live' || g.phase === 'Break' || g.phase === 'Halftime') ? `<div style="font-size:11px;color:#8b949e;margin-top:2px">${gameClockLabel(g)}</div>` : ''}</td>
           <td class="num">${fmtPct(g.espn_home_win_prob)}</td>
+          <td class="num">${g.dk_home_win_prob != null ? `<span${Math.abs((g.espn_home_win_prob||0) - g.dk_home_win_prob) > 0.05 ? ' style="color:#f0883e;font-weight:600"' : ''}>${fmtPct(g.dk_home_win_prob)}</span>` : '-'}</td>
           <td class="num">${g._bid != null || g._ask != null ? (g._bid != null ? g._bid.toFixed(0) : '-') + ' / ' + (g._ask != null ? g._ask.toFixed(0) : '-') : '-'}</td>
           <td class="num">${fmtEdgeWithDollars(g._edge, 1)}${(g.phase === 'Break' || g.phase === 'Halftime' || g.phase === 'Live') && g._evalResult ? '<br>' + fmtEvalBadge(g._evalResult, g._evalEdgeAfterFees, g._evalAloPrice) : ''}</td>
           <td class="num">${g._vol > 0 ? g._vol.toLocaleString() : '-'}</td>
@@ -780,17 +837,24 @@ async function refresh() {
     }
     const bp = paginate(rows, 'breakEvals');
     if (rows.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="12" class="empty">No break evaluations yet</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="13" class="empty">No break evaluations yet</td></tr>';
     } else {
       tbody.innerHTML = bp.rows.map(r => {
         const m = r.m;
         const resultColor = r.result.startsWith('SIGNAL') ? '#3fb950' : '#f85149';
         const edgeRaw = m && m.edge_raw != null ? `${(m.edge_raw * 100).toFixed(1)}%` : '-';
         const edgeNet = m && m.edge_after_fees != null ? `<span class="${m.edge_after_fees >= 0.015 ? 'edge-pos' : m.edge_after_fees > 0 ? '' : 'edge-neg'}">${(m.edge_after_fees * 100).toFixed(1)}%</span>` : '-';
+        const periodLabel = r.period === 1 ? '1st' : r.period === 2 ? '2nd' : r.period > 2 ? 'OT' : '-';
+        const clockDisplay = r.display_clock || '';
+        const periodClock = clockDisplay ? `${periodLabel}, ${clockDisplay}` : periodLabel;
+        // For NO_SIGNAL, show the reason after the colon; also show per-market skip_reason as tooltip
+        const resultDisplay = r.result;
+        const skipTip = m && m.skip_reason ? ` title="${m.skip_reason}"` : '';
         return `<tr>
           <td style="font-size:11px">${shortTime(r.timestamp)}</td>
           <td>${r.away_team} @ ${r.home_team}</td>
           <td class="num">${r.score}</td>
+          <td style="font-size:11px">${periodClock}</td>
           <td><span class="phase phase-Break">${r.status || 'Break'}</span></td>
           <td style="font-size:11px">${m ? m.ticker : '-'}</td>
           <td>${m && m.side ? `<span class="side-${m.side.toLowerCase()}">${m.side}</span>` : '-'}</td>
@@ -799,7 +863,7 @@ async function refresh() {
           <td class="num">${m && m.alo_price != null ? m.alo_price + 'c' : '-'}</td>
           <td class="num">${edgeRaw}</td>
           <td class="num">${edgeNet}</td>
-          <td><span style="color:${resultColor};font-size:11px;font-weight:600">${r.result}</span></td>
+          <td${skipTip}><span style="color:${resultColor};font-size:11px;font-weight:600">${resultDisplay}</span></td>
         </tr>`;
       }).join('');
     }

@@ -131,21 +131,21 @@ impl EspnPoller {
                 .unwrap_or(false);
 
             if is_dk || pickcenter.len() == 1 {
-                // Try homeTeamOdds/awayTeamOdds first (clean numeric values)
-                if let (Some(home_odds), Some(away_odds)) =
-                    (&entry.home_team_odds, &entry.away_team_odds)
-                    && let (Some(h), Some(a)) = (home_odds.money_line, away_odds.money_line)
-                {
-                    return Some((h, a));
-                }
-
-                // Fall back to moneyline JSON (home/away with live/close/open string odds)
+                // Prefer moneyline JSON (has live/close/open tiers — live updates in-game)
                 if let Some(ml) = &entry.moneyline {
                     let home_ml = Self::extract_odds_from_ml_json(ml, "home");
                     let away_ml = Self::extract_odds_from_ml_json(ml, "away");
                     if let (Some(h), Some(a)) = (home_ml, away_ml) {
                         return Some((h, a));
                     }
+                }
+
+                // Fall back to homeTeamOdds/awayTeamOdds (pregame close only)
+                if let (Some(home_odds), Some(away_odds)) =
+                    (&entry.home_team_odds, &entry.away_team_odds)
+                    && let (Some(h), Some(a)) = (home_odds.money_line, away_odds.money_line)
+                {
+                    return Some((h, a));
                 }
             }
         }
@@ -168,6 +168,33 @@ impl EspnPoller {
             }
         }
         None
+    }
+
+    /// Convert American moneyline odds to implied probability (0.0–1.0).
+    /// Favorite (negative, e.g. -200): prob = -ml / (-ml + 100)
+    /// Underdog (positive, e.g. +250): prob = 100 / (ml + 100)
+    pub fn moneyline_to_implied_prob(ml: f64) -> f64 {
+        if ml < 0.0 {
+            -ml / (-ml + 100.0)
+        } else if ml > 0.0 {
+            100.0 / (ml + 100.0)
+        } else {
+            0.5
+        }
+    }
+
+    /// Extract DraftKings-implied home win probability from a summary response.
+    /// Devigged: removes the vig by normalizing both sides to sum to 1.0.
+    pub fn dk_implied_home_prob(summary: &SummaryResponse) -> Option<f64> {
+        let (home_ml, away_ml) = Self::extract_dk_moneyline(summary)?;
+        let home_raw = Self::moneyline_to_implied_prob(home_ml);
+        let away_raw = Self::moneyline_to_implied_prob(away_ml);
+        let total = home_raw + away_raw;
+        if total > 0.0 {
+            Some(home_raw / total)
+        } else {
+            None
+        }
     }
 
     fn parse_event(event: &EspnEvent) -> Option<GameInfo> {
@@ -457,9 +484,10 @@ mod tests {
         assert!(ml.is_some(), "Should extract DK moneyline");
 
         let (home_ml, away_ml) = ml.unwrap();
-        // From fixture: homeTeamOdds.moneyLine=950, awayTeamOdds.moneyLine=-1650
-        assert_eq!(home_ml, 950.0);
-        assert_eq!(away_ml, -1650.0);
+        // From fixture: moneyline.home.live.odds=+290, moneyline.away.live.odds=-410
+        // (prefers live over close/open)
+        assert_eq!(home_ml, 290.0);
+        assert_eq!(away_ml, -410.0);
     }
 
     #[test]

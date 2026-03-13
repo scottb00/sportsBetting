@@ -25,9 +25,13 @@ pub struct BreakEvalLog {
     pub home_team: String,
     pub score: String,
     pub status: String,
+    /// Game period (1 = 1st half, 2 = 2nd half, >2 = OT)
+    pub period: Option<i32>,
+    /// Display clock from ESPN, e.g. "8:42"
+    pub display_clock: Option<String>,
     /// Per-market eval details
     pub markets: Vec<BreakMarketEval>,
-    /// Overall result for this game: "PLACED", "DRY_RUN", "NO_SIGNAL", or skip reason
+    /// Overall result for this game: "SIGNAL: ...", "NO_SIGNAL: reason", or skip reason
     pub result: String,
 }
 
@@ -43,6 +47,8 @@ pub struct BreakMarketEval {
     pub edge_raw: Option<f64>,
     pub edge_after_fees: Option<f64>,
     pub side: Option<String>,
+    /// Why this market didn't produce a signal (None if it did produce one)
+    pub skip_reason: Option<String>,
 }
 
 /// Core mutable state: game data, risk, and order tracking.
@@ -138,17 +144,25 @@ pub fn create_bot_state(config: &Config) -> Result<(BotState, TradeLogger, Marke
 pub fn create_strategies(config: &Config) -> StrategyRegistry {
     use crate::strategies::break_ev::BreakEvQuoter;
     use crate::strategies::clv_hunter::ClvHunter;
+    use crate::strategies::position_closer::PositionCloser;
 
     let strategies: Vec<Box<dyn Strategy>> = vec![
         Box::new(BreakEvQuoter::new(
             config.strategy.break_ev_min_edge,
             config.strategy.contracts_per_pct_edge,
             config.strategy.min_trade_contracts,
+            config.strategy.max_contracts_per_order,
         )),
         Box::new(ClvHunter::new(
             config.strategy.clv_hunter_min_edge,
             config.strategy.contracts_per_pct_edge,
             config.strategy.min_trade_contracts,
+            config.strategy.max_contracts_per_order,
+        )),
+        Box::new(PositionCloser::new(
+            config.strategy.contracts_per_pct_edge,
+            config.strategy.min_trade_contracts,
+            config.strategy.max_contracts_per_order,
         )),
     ];
 
@@ -217,14 +231,18 @@ pub async fn fetch_and_apply_summary(
     match espn_poller.fetch_summary(event_id).await {
         Ok(summary) => {
             let win_prob = EspnPoller::latest_win_prob(&summary);
+            let dk_prob = EspnPoller::dk_implied_home_prob(&summary);
             let mut s = state.lock().await;
             if let Some(gs) = s.game_state.get_mut(event_id) {
                 let old_prob = gs.espn_home_win_prob;
                 gs.update_from_espn_summary(win_prob);
+                if dk_prob.is_some() {
+                    gs.dk_home_win_prob = dk_prob;
+                }
                 tracing::info!(
-                    "{}{}: {} v {} | espn_hp={:?} (was {:?})",
+                    "{}{}: {} v {} | espn_hp={:?} (was {:?}) | dk_hp={:?}",
                     log_prefix, event_id, gs.away_team, gs.home_team,
-                    gs.espn_home_win_prob, old_prob,
+                    gs.espn_home_win_prob, old_prob, gs.dk_home_win_prob,
                 );
             }
         }

@@ -56,7 +56,8 @@ src/
 │   ├── mod.rs           — Strategy trait + StrategyRegistry
 │   ├── common.rs        — evaluate_market(), compute_edge_and_alo(), ALO price calc
 │   ├── break_ev.rs      — Break-based +EV quoter (halftime/TV timeout)
-│   └── clv_hunter.rs    — Pre-game CLV hunting
+│   ├── clv_hunter.rs    — Pre-game CLV hunting
+│   └── position_closer.rs — Passive close of orphaned positions during live play
 ├── kalshi/              — Auth (RSA-PSS), REST, WebSocket, orderbook, types
 ├── espn/                — Scoreboard poller, game info types
 └── polymarket/          — REST + WS client, event types
@@ -91,10 +92,12 @@ This is the #1 source of bugs. Each venue defines "YES" differently:
 - Post-only must post at `bid + 1` or `(100 - ask) + 1`, NOT at the existing bid/ask
 - `expiration_ts` takes unix SECONDS (not milliseconds)
 - Kalshi does NOT send WS notifications for expired orders — `prune_expired()` handles cleanup locally
-- **break_ev order safety**: Three-layer protection against stale orders during live play:
-  1. **Active cancellation**: `cancel_break_ev_orders()` in `scoreboard.rs` fires when ESPN detects break→live transition (via `breaks_ended()`), immediately cancels all resting break_ev orders
-  2. **Fixed break expiration**: `break_expires_at` is computed once on break entry (start + duration - safety buffer) and stored on `GameState`. All orders during the same break share the same absolute expiration. TV timeouts: 90s effective, halftime: 840s effective. Falls back to config `order_ttl_secs` if `break_expires_at` is None (e.g. bot restart mid-break).
-  3. **Late-break order cutoff**: `break_has_time_for_order(45)` in executor blocks new break_ev ADD orders when <45s remain before expiration. Prevents stale late-break orders after fills. CLOSE orders (position unwinding) are always allowed.
+- **break_ev order safety**: Four-layer protection against stale orders and stale book data:
+  1. **REST book cross-check**: `execute_signal()` in `executor.rs` fetches a fresh REST orderbook before placing any break_ev order. If the REST-derived ALO price differs from the WS-derived price by ≥3c, re-evaluates edge using fresh REST book. Skips the order if edge disappears; reprices if edge still exists. Always updates `SharedOrderBooks` with the fresh REST snapshot so subsequent ticks use accurate data. Logs drift: `"Book drift: {ticker} WS_alo={x}c REST_alo={y}c drift={z}c"`.
+  2. **Active cancellation**: `cancel_break_ev_orders()` in `scoreboard.rs` fires when ESPN detects break→live transition (via `breaks_ended()`), immediately cancels all resting break_ev orders
+  3. **Fixed break expiration**: `break_expires_at` is computed once on break entry (start + duration - safety buffer) and stored on `GameState`. All orders during the same break share the same absolute expiration. TV timeouts: 90s effective, halftime: 840s effective. Falls back to config `order_ttl_secs` if `break_expires_at` is None (e.g. bot restart mid-break).
+  4. **Late-break order cutoff**: `break_has_time_for_order(30)` in executor blocks new break_ev ADD orders when <30s remain before expiration. Prevents stale late-break orders after fills. CLOSE orders (position unwinding) are always allowed.
+- **REST orderbook seeding at startup**: After WS connects in `main.rs`, fetches orderbooks via REST for all initial tickers and applies snapshots to `SharedOrderBooks`. Ensures books have fresh data immediately rather than waiting for WS snapshots (which may be delayed).
 
 ### API Gotchas
 - **Kalshi API v2 dollar-string migration (2026-03)**: Kalshi migrated all prices from integer cents to decimal dollar strings, and counts from integers to FP strings. Field names changed: `price` → `price_dollars`, `delta` → `delta_fp`, `count` → `count_fp`, `remaining_count` → `remaining_count_fp`, `yes_price`/`no_price` → `yes_price_dollars`/`no_price_dollars`. Custom deserializers in `types.rs` handle both old (int) and new (string) formats, converting to i64 cents internally. CreateOrderRequest still uses old field names (Kalshi accepts both).
@@ -105,6 +108,7 @@ This is the #1 source of bugs. Each venue defines "YES" differently:
 - **ESPN dates**: Sends truncated ISO like `"2026-03-08T19:00Z"` (no seconds). Must normalize before parsing.
 - **Polymarket `outcomes`**: JSON string field, not native array. Needs explicit parsing.
 - **LLM market matching**: Claude Haiku often modifies ticker suffixes. Always validate returned tickers against the known valid set.
+- **Kalshi API field casing**: Kalshi REST and WS return lowercase `side` ("yes"/"no") and `action` ("buy"). The executor logs orders with capitalized values ("Yes"/"No"/"Buy") via `format!("{:?}", enum)`. SQL queries must use `LOWER()` or case-insensitive comparison when matching these fields across fills/orders.
 
 ## Config
 
@@ -114,7 +118,7 @@ Key settings: `kalshi.dry_run = true` for paper trading. Risk params are at 0.1x
 
 ### Strategy Config Fields
 Required: `break_ev_min_edge`, `clv_hunter_min_edge`
-Optional (with defaults): `live_strategies` (["clv_hunter"]), `min_volume` (20000), `min_price_cents` (10.0), `max_price_cents` (90.0), `order_ttl_secs` (60), `max_contracts_per_game` (20), `contracts_per_pct_edge` (20.0), `min_trade_contracts` (5)
+Optional (with defaults): `live_strategies` (["clv_hunter"]), `min_volume` (20000), `min_price_cents` (10.0), `max_price_cents` (90.0), `order_ttl_secs` (60), `max_contracts_per_game` (20), `contracts_per_pct_edge` (20.0), `min_trade_contracts` (5), `max_contracts_per_order` (30)
 
 **Note**: There is NO `arb_scanner_min_edge` field. The arb_scanner strategy was planned but never implemented.
 **Note**: The `summary_on_break_only` polling config field was removed (was parsed but never used).
@@ -123,9 +127,14 @@ Optional (with defaults): `live_strategies` (["clv_hunter"]), `min_volume` (2000
 Strategies use a **target-position model** (not Kelly). For each market:
 - `target = floor((edge_pct - min_edge) * contracts_per_pct_edge)` in the edge direction (0 if edge < min_edge)
 - `net = risk.net_position(ticker)` (current signed position: +YES, -NO)
-- If `target > 0` and `delta = target - net >= min_trade_contracts`: add contracts toward target
-- If `target == 0` and `net != 0`: close entire position (no edge threshold — just post passively)
-- No partial trims — only fully close when edge disappears entirely to avoid negative-EV trades
+- If `target > 0` and `delta = target - net >= min_trade_contracts`: add contracts toward target, capped at `max_contracts_per_order`
+- If `target == 0` and `net != 0`: close position with edge-scaled sizing (see below)
+- No partial trims — only close when edge disappears entirely to avoid negative-EV trades
+- **Per-order size cap**: All orders (add and close) are capped at `max_contracts_per_order` (default 30). Combined with `has_resting_order()` dedup, this creates TWAP-like drip behavior — one clip at a time, re-evaluated each tick.
+- **Edge-scaled close sizing**: Close orders scale with edge in the close direction:
+  - Close edge > 0: `contracts = min(floor(close_edge * 100 * contracts_per_pct_edge), max_contracts_per_order, position)` — close more aggressively when the market gives a good exit
+  - Close edge <= 0: `contracts = min(min_trade_contracts, position)` — drip at minimum when no favorable exit price
+  - Final 5 minutes (`is_final_minutes(5.0)`): uncapped — close full position to avoid settlement risk
 
 ## Deployment
 
@@ -178,6 +187,8 @@ ssh root@165.227.117.108 'chown bot:bot /home/bot/app/config.toml && chmod 600 /
 ## Common Patterns
 
 - Strategies implement the `Strategy` trait; registered in `StrategyRegistry` at startup
+- Close orders (`is_close: true`) bypass the `live_strategies` config check — they're always live since they only reduce existing exposure
+- `PositionCloser` strategy evaluates during `GamePhase::Live` with min_edge=1.0 (impossible), so only Case B close signals fire — never opens new positions
 - Strategies return `Vec<OrderSignal>`, deduped to best-per-ticker in `scoreboard.rs` handler
 - `has_strategy_order()` on OrderManager prevents duplicate orders across ticks
 - `evaluate_market()` in `strategies/common.rs` is the shared edge calculation used by both strategies

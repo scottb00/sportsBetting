@@ -71,8 +71,8 @@ pub fn compute_edge_and_alo(yes_bid: i64, yes_ask: i64, fair_value: f64) -> Opti
 /// Target-position model:
 /// 1. Compute target = floor(edge_pct * contracts_per_pct_edge) in the edge direction (0 if no edge).
 /// 2. Compare to current net_position(ticker).
-/// 3. If target > 0 and delta >= min_trade_contracts: emit add signal.
-/// 4. If target == 0 and net != 0: emit close signal (full position, no edge threshold).
+/// 3. If target > 0 and delta >= min_trade_contracts: emit add signal (capped at max_contracts_per_order).
+/// 4. If target == 0 and net != 0: emit close signal scaled by close-direction edge.
 fn evaluate_market(
     game: &GameState,
     market: &KalshiMarketState,
@@ -82,6 +82,7 @@ fn evaluate_market(
     strategy_name: &str,
     contracts_per_pct_edge: f64,
     min_trade_contracts: i64,
+    max_contracts_per_order: i64,
 ) -> Option<OrderSignal> {
     let fair_value = game.fair_value_for_market(market)?;
 
@@ -144,7 +145,7 @@ fn evaluate_market(
             (OrderSide::No, OrderAction::Buy, alo, edge)
         };
 
-        let contracts = delta.abs();
+        let contracts = delta.abs().min(max_contracts_per_order);
         let size_dollars = contracts as f64 * alo as f64 / 100.0;
 
         let mid = (yes_bid + yes_ask) as f64 / 2.0 / 100.0;
@@ -171,8 +172,13 @@ fn evaluate_market(
             max_contracts: None,
         })
     } else if net_ticker != 0 {
-        // Case B: no edge, but we have a ticker-specific position — close it.
+        // Case B: no edge in position direction, but we have a ticker-specific position — close it.
         // Uses ticker-specific net (not game-aligned) since we can only close what we hold on this ticker.
+        //
+        // Close sizing is scaled by edge in the CLOSE direction:
+        // - More edge to close (market moved against position) → close more aggressively
+        // - No edge to close → drip at min_trade_contracts
+        // - Final 5 minutes → uncap to avoid riding to settlement
         let (side, action, alo) = if net_ticker > 0 {
             // Long YES → close by buying NO
             let alo = (100 - yes_bid - 1).max(1);
@@ -183,12 +189,36 @@ fn evaluate_market(
             (OrderSide::Yes, OrderAction::Buy, alo)
         };
 
-        let contracts = net_ticker.unsigned_abs() as i64;
+        let position_abs = net_ticker.unsigned_abs() as i64;
+
+        // Compute edge in the close direction
+        let close_edge = compute_edge_and_alo(yes_bid, yes_ask, fair_value)
+            .filter(|r| {
+                // Edge must be in the close direction (buying opposite of position)
+                (net_ticker > 0 && !r.buying_yes) || (net_ticker < 0 && r.buying_yes)
+            })
+            .map(|r| r.edge_after_fees.max(0.0))
+            .unwrap_or(0.0);
+
+        // Scale close size by edge, uncap in final minutes
+        let contracts = if game.is_final_minutes(5.0) {
+            // Final minutes: close full position to avoid settlement risk
+            position_abs
+        } else if close_edge > 0.0 {
+            // Edge exists in close direction: scale by contracts_per_pct_edge, cap per order
+            let scaled = (close_edge * 100.0 * contracts_per_pct_edge).floor().max(min_trade_contracts as f64) as i64;
+            scaled.min(max_contracts_per_order).min(position_abs)
+        } else {
+            // No edge to close: drip at minimum
+            (min_trade_contracts).min(position_abs)
+        };
+
         let size_dollars = contracts as f64 * alo as f64 / 100.0;
 
         tracing::info!(
-            "{} CLOSE signal: {} {:?} at {}c, {} contracts (net_ticker={}, target=0, no edge), fair {:.4}",
-            strategy_name, market.ticker, side, alo, contracts, net_ticker, fair_value
+            "{} CLOSE signal: {} {:?} at {}c, {} contracts (net_ticker={}, position={}, close_edge={:.4}, final_mins={}), fair {:.4}",
+            strategy_name, market.ticker, side, alo, contracts, net_ticker, position_abs,
+            close_edge, game.is_final_minutes(5.0), fair_value
         );
 
         Some(OrderSignal {
@@ -200,7 +230,7 @@ fn evaluate_market(
             size_dollars,
             post_only: true,
             expiration_ts: None,
-            edge_after_fees: 0.0, // close orders have no required edge
+            edge_after_fees: close_edge,
             fair_value_cents: Some((fair_value * 100.0).round() as i64),
             is_close: true,
             max_contracts: None,
@@ -221,6 +251,7 @@ pub fn evaluate_edge(
     order_books: &HashMap<String, LocalOrderBook>,
     contracts_per_pct_edge: f64,
     min_trade_contracts: i64,
+    max_contracts_per_order: i64,
 ) -> Option<OrderSignal> {
     let mut best: Option<OrderSignal> = None;
 
@@ -228,7 +259,7 @@ pub fn evaluate_edge(
         if let Some(signal) = evaluate_market(
             game, market, order_books, risk,
             min_edge, strategy_name,
-            contracts_per_pct_edge, min_trade_contracts,
+            contracts_per_pct_edge, min_trade_contracts, max_contracts_per_order,
         ) && best.as_ref().is_none_or(|b| signal.edge_after_fees > b.edge_after_fees)
         {
             best = Some(signal);

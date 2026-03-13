@@ -115,7 +115,7 @@ pub async fn handle_scoreboard_tick(
     let mut placed = Vec::new();
     for signal in signals {
         if let Some(order) = execute_signal(
-            signal, state, logger, kalshi_rest, dry_run,
+            signal, state, order_books, logger, kalshi_rest, dry_run,
             &registry.live_strategies,
             registry.max_contracts_per_game,
         ).await {

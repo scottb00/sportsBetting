@@ -56,6 +56,7 @@ fn default_order_ttl_secs() -> u64 { 120 }
 fn default_max_contracts_per_game() -> i64 { 20 }
 fn default_contracts_per_pct_edge() -> f64 { 20.0 }
 fn default_min_trade_contracts() -> i64 { 5 }
+fn default_max_contracts_per_order() -> i64 { 30 }
 
 #[derive(Debug, Deserialize)]
 pub struct StrategyConfig {
@@ -86,6 +87,10 @@ pub struct StrategyConfig {
     /// Prevents tiny top-up orders when position is already close to target. Default: 5.
     #[serde(default = "default_min_trade_contracts")]
     pub min_trade_contracts: i64,
+    /// Maximum contracts per single order (add or close). Limits information leakage
+    /// on thin books. The bot waits for each clip to fill/expire before placing another. Default: 30.
+    #[serde(default = "default_max_contracts_per_order")]
+    pub max_contracts_per_order: i64,
 }
 
 #[derive(Debug, Deserialize)]

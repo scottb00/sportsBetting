@@ -1,9 +1,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use crate::engine::bot::{BreakEvalLog, BreakMarketEval, SharedState, SharedLogger, StrategyRegistry};
+use crate::engine::bot::{BreakEvalLog, BreakMarketEval, SharedOrderBooks, SharedState, SharedLogger, StrategyRegistry};
 use crate::engine::game_state::GameState;
-use crate::engine::market_prep::book_prices;
+use crate::engine::market_prep::{book_prices, extract_book_prices};
 use crate::engine::order_manager::{OrderManager, OrderSignal};
 use crate::engine::risk::RiskManager;
 use crate::kalshi::orderbook::LocalOrderBook;
@@ -135,7 +135,29 @@ pub fn evaluate_strategies(
     for game in snapshot.games.values() {
         let avail = match game_contracts_remaining(game, snapshot, order_books, registry) {
             Some(a) => a,
-            None => continue,
+            None => {
+                // Log skipped break games so dashboard shows why they were filtered
+                if game.phase.is_break() && game.has_kalshi() {
+                    let reason = if game.kalshi_total_volume() < registry.min_volume {
+                        format!("low volume ({})", game.kalshi_total_volume())
+                    } else {
+                        "at contract cap or no tradeable mid".to_string()
+                    };
+                    break_log.push_front(BreakEvalLog {
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        away_team: game.away_team.clone(),
+                        home_team: game.home_team.clone(),
+                        score: format!("{}-{}", game.away_score.unwrap_or(0), game.home_score.unwrap_or(0)),
+                        status: game.status_detail.clone(),
+                        period: game.period,
+                        display_clock: game.display_clock.clone(),
+                        markets: Vec::new(),
+                        result: format!("NO_SIGNAL: {}", reason),
+                    });
+                    if break_log.len() > 100 { break_log.pop_back(); }
+                }
+                continue;
+            }
         };
 
         // Compute exposure for Kelly sizing from position + resting orders
@@ -185,6 +207,19 @@ pub fn evaluate_strategies(
                         (None, None, None, None)
                     };
 
+                // Determine skip reason for this market
+                let skip_reason = if fair.is_none() {
+                    Some("no fair value".to_string())
+                } else if prices.bid.is_none() || prices.ask.is_none() {
+                    Some("no book".to_string())
+                } else if edge_raw.is_none() {
+                    Some("no raw edge (bad book or fair=mid)".to_string())
+                } else if edge_after_fees.is_some_and(|e| e < 0.0) {
+                    Some(format!("fees exceed edge ({:.1}% raw)", edge_raw.unwrap_or(0.0) * 100.0))
+                } else {
+                    None // has edge — may still be filtered by min_edge or position logic
+                };
+
                 market_evals.push(BreakMarketEval {
                     ticker: market.ticker.clone(),
                     is_home: market.is_home,
@@ -196,24 +231,35 @@ pub fn evaluate_strategies(
                     edge_raw,
                     edge_after_fees,
                     side,
+                    skip_reason,
                 });
             }
         }
 
         let mut best_signal: Option<OrderSignal> = None;
+        // Track why signals were blocked (for break logging)
+        let mut blocked_reason: Option<String> = None;
 
         for strategy in &registry.strategies {
             if !strategy.can_evaluate(game) {
+                if is_break && strategy.name() == "break_ev" {
+                    if !game.is_tradeable_break() {
+                        blocked_reason = Some("not tradeable break (team timeout?)".to_string());
+                    } else if game.is_final_minutes(5.0) {
+                        blocked_reason = Some("final 5 minutes — skipped".to_string());
+                    }
+                }
                 continue;
             }
 
             if let Some(mut signal) = strategy.evaluate(game, &snapshot.risk, current_exposure, order_books) {
                 // Skip break_ev ADD orders when not enough time remains in break
-                if signal.strategy == "break_ev" && !signal.is_close && !game.break_has_time_for_order(45) {
+                if signal.strategy == "break_ev" && !signal.is_close && !game.break_has_time_for_order(30) {
                     tracing::info!(
                         "BREAK SKIP: {} v {} | break_ev ADD skipped — insufficient time remaining in break",
                         game.away_team, game.home_team,
                     );
+                    blocked_reason = Some("insufficient break time (<30s remaining)".to_string());
                     continue;
                 }
 
@@ -237,6 +283,7 @@ pub fn evaluate_strategies(
                             "BREAK SKIP: {} v {} | {} blocked by resting order (reduce={})",
                             game.away_team, game.home_team, strategy.name(), is_reduce,
                         );
+                        blocked_reason = Some(format!("blocked by resting order on {}", signal.kalshi_ticker));
                     }
                     continue;
                 }
@@ -244,6 +291,9 @@ pub fn evaluate_strategies(
                 // Apply contract cap: reduce orders use reduce_cap, regular use regular_remaining.
                 let max_contracts = if is_reduce { avail.reduce_cap } else { avail.regular_remaining };
                 if max_contracts == 0 {
+                    if is_break {
+                        blocked_reason = Some("at contract cap".to_string());
+                    }
                     continue;
                 }
 
@@ -269,6 +319,8 @@ pub fn evaluate_strategies(
                     home_team: game.home_team.clone(),
                     score: format!("{}-{}", game.away_score.unwrap_or(0), game.home_score.unwrap_or(0)),
                     status: game.status_detail.clone(),
+                    period: game.period,
+                    display_clock: game.display_clock.clone(),
                     markets: market_evals,
                     result: format!("SIGNAL: {} {:?} {}c", signal.kalshi_ticker, signal.side, signal.price_cents),
                 });
@@ -276,9 +328,40 @@ pub fn evaluate_strategies(
             }
             signals.push(signal);
         } else if is_break {
+            // Determine the most informative reason for no signal
+            let no_signal_reason = if let Some(reason) = blocked_reason {
+                reason
+            } else if market_evals.iter().all(|m| m.fair.is_none()) {
+                "no fair value from ESPN".to_string()
+            } else if market_evals.iter().all(|m| m.bid.is_none() || m.ask.is_none()) {
+                "no order book data".to_string()
+            } else if market_evals.iter().all(|m| m.edge_after_fees.is_none() || m.edge_after_fees.unwrap_or(0.0) <= 0.0) {
+                // Find the best edge across markets for context
+                let best_edge = market_evals.iter()
+                    .filter_map(|m| m.edge_after_fees)
+                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .unwrap_or(0.0);
+                let best_raw = market_evals.iter()
+                    .filter_map(|m| m.edge_raw)
+                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .unwrap_or(0.0);
+                if best_raw > 0.0 {
+                    format!("fees exceed edge (best raw {:.1}%, after fees {:.1}%)", best_raw * 100.0, best_edge * 100.0)
+                } else {
+                    "no edge (fair ≈ market price)".to_string()
+                }
+            } else {
+                // Had positive edge-after-fees but still no signal — likely below min_edge or position already at target
+                let best_net = market_evals.iter()
+                    .filter_map(|m| m.edge_after_fees)
+                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .unwrap_or(0.0);
+                format!("edge below threshold or position at target (best {:.1}%)", best_net * 100.0)
+            };
+
             tracing::info!(
-                "BREAK RESULT: {} v {} | no signal generated",
-                game.away_team, game.home_team,
+                "BREAK RESULT: {} v {} | no signal: {}",
+                game.away_team, game.home_team, no_signal_reason,
             );
             break_log.push_front(BreakEvalLog {
                 timestamp: chrono::Utc::now().to_rfc3339(),
@@ -286,8 +369,10 @@ pub fn evaluate_strategies(
                 home_team: game.home_team.clone(),
                 score: format!("{}-{}", game.away_score.unwrap_or(0), game.home_score.unwrap_or(0)),
                 status: game.status_detail.clone(),
+                period: game.period,
+                display_clock: game.display_clock.clone(),
                 markets: market_evals,
-                result: "NO_SIGNAL".to_string(),
+                result: format!("NO_SIGNAL: {}", no_signal_reason),
             });
             if break_log.len() > 100 { break_log.pop_back(); }
         }
@@ -322,13 +407,17 @@ pub struct PlacedOrder {
 }
 
 /// Execute an order signal via Kalshi REST API (or log if dry_run).
-/// Returns placement info if the order was successfully placed (for batch notifications).
+/// Returns placement info if the order was successfully placed (for batch notification).
 ///
 /// Re-checks contract limits at execution time (under lock) to prevent TOCTOU races
 /// between evaluate_strategies and the actual API call.
+///
+/// For break_ev orders, cross-checks the WS-derived orderbook against a fresh REST fetch
+/// to detect stale books and reprice if needed.
 pub async fn execute_signal(
     signal: OrderSignal,
     state: &SharedState,
+    order_books: &SharedOrderBooks,
     logger: &SharedLogger,
     kalshi_rest: &Arc<KalshiRestClient>,
     dry_run: bool,
@@ -337,7 +426,7 @@ pub async fn execute_signal(
 ) -> Option<PlacedOrder> {
     // Re-check risk AND contract limits under the lock right before building the order.
     // This closes the TOCTOU gap: state may have changed since evaluate_strategies ran.
-    let (signal, is_reduce) = {
+    let (mut signal, is_reduce) = {
         let s = state.lock().await;
 
         // Get game markets for reduce detection and cap computation.
@@ -382,7 +471,7 @@ pub async fn execute_signal(
         (signal, is_reduce)
     };
 
-    let order_req = match OrderManager::signal_to_order(&signal) {
+    let mut order_req = match OrderManager::signal_to_order(&signal) {
         Some(req) => req,
         None => {
             tracing::info!(
@@ -408,8 +497,103 @@ pub async fn execute_signal(
         );
     }
 
-    // Strategy is live only if it's in the configured live_strategies list
-    let strategy_is_live = live_strategies.iter().any(|s| s == &signal.strategy);
+    // REST orderbook cross-check for break_ev orders: fetch fresh book via REST API
+    // and compare to the WS-derived book used during evaluation. If the book has drifted
+    // significantly, re-compute edge with the fresh data and update the order price.
+    if signal.strategy == "break_ev" {
+        match kalshi_rest.get_orderbook(&signal.kalshi_ticker).await {
+            Ok(rest_snapshot) => {
+                let mut rest_book = LocalOrderBook::new(signal.kalshi_ticker.clone());
+                rest_book.apply_snapshot(&rest_snapshot);
+                let rest_prices = extract_book_prices(&rest_book);
+
+                let ws_price = order_req.yes_price.or(order_req.no_price).unwrap_or(0);
+
+                if let (Some(rest_bid), Some(rest_ask)) = (rest_prices.bid, rest_prices.ask) {
+                    let rest_bid_i = rest_bid as i64;
+                    let rest_ask_i = rest_ask as i64;
+
+                    // Compute what the ALO price would be from the REST book
+                    let rest_alo = if matches!(signal.side, crate::kalshi::types::OrderSide::Yes) {
+                        (rest_ask_i - 1).max(1)
+                    } else {
+                        ((100 - rest_bid_i) - 1).max(1)
+                    };
+
+                    let drift = (rest_alo - ws_price).abs();
+                    if drift > 0 {
+                        tracing::info!(
+                            "Book drift: {} WS_alo={}c REST_alo={}c drift={}c (REST bid/ask={}/{})",
+                            signal.kalshi_ticker, ws_price, rest_alo, drift,
+                            rest_bid_i, rest_ask_i,
+                        );
+                    }
+
+                    if drift >= 3 {
+                        // Significant drift — re-evaluate edge with fresh REST book
+                        if let Some(fair_cents) = signal.fair_value_cents {
+                            let fair = fair_cents as f64 / 100.0;
+                            match compute_edge_and_alo(rest_bid_i, rest_ask_i, fair) {
+                                Some(result) if result.edge_after_fees > 0.0 => {
+                                    tracing::info!(
+                                        "Book drift: {} repricing from {}c to {}c (REST), edge {:.4} -> {:.4}",
+                                        signal.kalshi_ticker, ws_price, result.alo_price,
+                                        signal.edge_after_fees, result.edge_after_fees,
+                                    );
+                                    signal.price_cents = result.alo_price;
+                                    signal.edge_after_fees = result.edge_after_fees;
+                                    match OrderManager::signal_to_order(&signal) {
+                                        Some(new_req) => { order_req = new_req; }
+                                        None => {
+                                            tracing::info!(
+                                                "Book drift: {} repriced order has zero contracts — skipping",
+                                                signal.kalshi_ticker,
+                                            );
+                                            return None;
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    tracing::info!(
+                                        "Book drift: {} no edge at REST prices (bid={} ask={} fair={:.4}) — skipping order",
+                                        signal.kalshi_ticker, rest_bid_i, rest_ask_i, fair_cents as f64 / 100.0,
+                                    );
+                                    let mut s = state.lock().await;
+                                    s.order_manager.mark_in_flight(&signal.kalshi_ticker);
+                                    return None;
+                                }
+                            }
+                        } else {
+                            tracing::warn!(
+                                "Book drift: {} drift={}c but no fair_value_cents — skipping REST reprice",
+                                signal.kalshi_ticker, drift,
+                            );
+                        }
+                    }
+                }
+
+                // Update SharedOrderBooks with the fresh REST snapshot
+                {
+                    let mut books = order_books.write().await;
+                    let book = books
+                        .entry(signal.kalshi_ticker.clone())
+                        .or_insert_with(|| LocalOrderBook::new(signal.kalshi_ticker.clone()));
+                    book.apply_snapshot(&rest_snapshot);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Book drift check failed for {}: {:?} — proceeding with WS book",
+                    signal.kalshi_ticker, e,
+                );
+            }
+        }
+    }
+
+    // Strategy is live only if it's in the configured live_strategies list.
+    // Close orders (risk-reducing) always bypass the live check — they don't need
+    // to be explicitly enabled since they only unwind existing exposure.
+    let strategy_is_live = signal.is_close || live_strategies.iter().any(|s| s == &signal.strategy);
     let effective_dry_run = dry_run || !strategy_is_live;
 
     if effective_dry_run {
@@ -455,9 +639,11 @@ pub async fn execute_signal(
             let side_str = format!("{:?}", order_req.side);
 
             // Collect game_info and display fields under state lock, then drop before logging
-            let (game_info, game_label, score, clock, yes_team, current_pos, target_pos) = {
+            let (game_info, game_label, score, clock, yes_team, current_pos, target_pos, dk_fair) = {
                 let s = state.lock().await;
                 let gi = crate::engine::logger::GameInfo::from_game_state(&s.game_state, &signal.kalshi_ticker);
+                let dk_fair = s.game_state.get_by_kalshi_ticker(&signal.kalshi_ticker)
+                    .and_then(|g| g.dk_home_win_prob);
                 let current = s.risk.net_position(&signal.kalshi_ticker);
                 let signed_delta = if matches!(signal.side, crate::kalshi::types::OrderSide::Yes) {
                     order_req.count
@@ -513,7 +699,7 @@ pub async fn execute_signal(
                 } else {
                     (signal.kalshi_ticker.clone(), String::new(), String::new(), String::new())
                 };
-                (gi, label, sc, cl, yes_t, current, target)
+                (gi, label, sc, cl, yes_t, current, target, dk_fair)
             };
 
             // Log under logger lock only (no state lock held)
@@ -532,6 +718,7 @@ pub async fn execute_signal(
                     signal.fair_value_cents,
                     signal.is_close,
                     game_info.as_ref(),
+                    dk_fair,
                 ) {
                     tracing::warn!("Failed to log order {}: {:?}", resp.order.order_id, e);
                 }

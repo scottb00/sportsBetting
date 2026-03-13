@@ -5,7 +5,7 @@ use axum::{
     routing::get,
 };
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::engine::bot::{SharedState, SharedOrderBooks, SharedLogger, SharedBreakLog};
 use crate::engine::market_prep::book_prices;
@@ -34,6 +34,7 @@ struct GameView {
     display_clock: Option<String>,
     period: Option<i32>,
     espn_home_win_prob: Option<f64>,
+    dk_home_win_prob: Option<f64>,
     /// Game start time as unix seconds (from ESPN).
     start_time_ts: Option<i64>,
     /// Net game risk: positive = long home team winning, negative = long away team winning.
@@ -188,6 +189,7 @@ struct GameSnapshot {
     display_clock: Option<String>,
     period: Option<i32>,
     espn_home_win_prob: Option<f64>,
+    dk_home_win_prob: Option<f64>,
     start_time_ts: Option<i64>,
     net_game_contracts: i64,
     markets: Vec<MarketSnapshot>,
@@ -229,6 +231,7 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
                     display_clock: g.display_clock.clone(),
                     period: g.period,
                     espn_home_win_prob: g.espn_home_win_prob,
+                    dk_home_win_prob: g.dk_home_win_prob,
                     start_time_ts: g.start_time_ts,
                     net_game_contracts: s.risk.net_game_home_risk(&g.kalshi_markets),
                     markets,
@@ -279,6 +282,7 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
             display_clock: g.display_clock,
             period: g.period,
             espn_home_win_prob: g.espn_home_win_prob,
+            dk_home_win_prob: g.dk_home_win_prob,
             start_time_ts: g.start_time_ts,
             net_game_contracts: g.net_game_contracts,
             markets,
@@ -547,6 +551,7 @@ fn query_fills(db_path: &str) -> anyhow::Result<Vec<FillRow>> {
     let mut stmt = conn.prepare(
         "SELECT f.trade_id, f.order_id, f.ticker, f.side, f.action, f.price_cents, f.count, COALESCE(f.fee_cents,0), f.filled_at, COALESCE(o.strategy,''), o.edge_bps, o.game_name, o.home_team, o.away_team, o.is_home, o.fair_value_cents, o.is_close, f.fill_pnl
          FROM fills f LEFT JOIN orders o ON f.order_id = o.order_id
+         WHERE COALESCE(f.excluded, 0) = 0
          ORDER BY f.filled_at DESC LIMIT 200"
     )?;
     let rows = stmt.query_map([], |row| {
@@ -584,7 +589,7 @@ fn query_edge_summary(db_path: &str) -> anyhow::Result<(f64, i64, f64)> {
                 COUNT(*)
          FROM fills f
          JOIN orders o ON f.order_id = o.order_id
-         WHERE o.edge_bps IS NOT NULL",
+         WHERE o.edge_bps IS NOT NULL AND COALESCE(f.excluded, 0) = 0",
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
@@ -603,7 +608,7 @@ fn query_edge_summary_today(db_path: &str) -> anyhow::Result<(f64, i64)> {
                 COUNT(*)
          FROM fills f
          JOIN orders o ON f.order_id = o.order_id
-         WHERE o.edge_bps IS NOT NULL AND date(f.filled_at) = date('now')",
+         WHERE o.edge_bps IS NOT NULL AND date(f.filled_at, '-8 hours') = date('now', '-8 hours') AND COALESCE(f.excluded, 0) = 0",
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
@@ -616,7 +621,7 @@ fn query_daily_realized_pnl(db_path: &str) -> f64 {
         Err(_) => return 0.0,
     };
     conn.query_row(
-        "SELECT COALESCE(SUM(fill_pnl), 0.0) FROM fills WHERE date(filled_at) = date('now') AND fill_pnl IS NOT NULL",
+        "SELECT COALESCE(SUM(fill_pnl), 0.0) FROM fills WHERE date(filled_at, '-8 hours') = date('now', '-8 hours') AND fill_pnl IS NOT NULL AND COALESCE(excluded, 0) = 0",
         [],
         |row| row.get(0),
     ).unwrap_or(0.0)
@@ -632,10 +637,11 @@ fn query_daily_chart(db_path: &str, lookback_hours: Option<i64>) -> anyhow::Resu
                 o.edge_bps
          FROM fills f
          LEFT JOIN orders o ON f.order_id = o.order_id";
+    let excl = "COALESCE(f.excluded, 0) = 0";
     let sql = match lookback_hours {
-        None | Some(0) => format!("{base_select} WHERE date(f.filled_at) = date('now') ORDER BY f.filled_at ASC"),
-        Some(-1) => format!("{base_select} ORDER BY f.filled_at ASC"),
-        Some(h) => format!("{base_select} WHERE f.filled_at >= datetime('now', '-{h} hours') ORDER BY f.filled_at ASC"),
+        None | Some(0) => format!("{base_select} WHERE date(f.filled_at, '-8 hours') = date('now', '-8 hours') AND {excl} ORDER BY f.filled_at ASC"),
+        Some(-1) => format!("{base_select} WHERE {excl} ORDER BY f.filled_at ASC"),
+        Some(h) => format!("{base_select} WHERE f.filled_at >= datetime('now', '-{h} hours') AND {excl} ORDER BY f.filled_at ASC"),
     };
     let mut stmt = conn.prepare(&sql)?;
     let points = stmt.query_map([], |row| {
@@ -649,6 +655,169 @@ fn query_daily_chart(db_path: &str, lookback_hours: Option<i64>) -> anyhow::Resu
         })
     })?.filter_map(|r| r.ok()).collect();
     Ok(points)
+}
+
+// --- Variance Analysis ---
+
+#[derive(Serialize)]
+struct VarianceDayRow {
+    date: String,
+    fills: i64,
+    contracts: i64,
+    expected_pnl: f64,
+    realized_pnl: f64,
+    total_fees: f64,
+    sigma_edge_real: f64,
+    sigma_zero_edge: f64,
+    z_edge_real: Option<f64>,
+    z_zero_edge: Option<f64>,
+    p_edge_real: Option<f64>,
+    p_zero_edge: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct VarianceAnalysis {
+    days: Vec<VarianceDayRow>,
+    totals: VarianceDayRow,
+}
+
+/// Standard normal CDF approximation (Abramowitz & Stegun).
+fn norm_cdf(x: f64) -> f64 {
+    let a1 = 0.254829592;
+    let a2 = -0.284496736;
+    let a3 = 1.421413741;
+    let a4 = -1.453152027;
+    let a5 = 1.061405429;
+    let p = 0.3275911;
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs() / std::f64::consts::SQRT_2;
+    let t = 1.0 / (1.0 + p * x);
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
+    0.5 * (1.0 + sign * y)
+}
+
+fn compute_day_row(date: &str, fills: &[(i64, i64, Option<f64>, Option<f64>, f64)]) -> VarianceDayRow {
+    // Each fill: (count, price_cents, edge_bps, fill_pnl, fee_cents)
+    let total_fills = fills.len() as i64;
+    let total_contracts: i64 = fills.iter().map(|f| f.0).sum();
+    let total_fees: f64 = fills.iter().map(|f| f.4).sum();
+    let expected_pnl: f64 = fills.iter()
+        .filter_map(|f| f.2.map(|e| e / 10000.0 * f.0 as f64))
+        .sum();
+    let realized_pnl: f64 = fills.iter()
+        .filter_map(|f| f.3)
+        .sum();
+
+    // Bernoulli variance if edge is real: q = price/100 + edge/10000
+    let mut var_edge = 0.0_f64;
+    let mut var_zero = 0.0_f64;
+    for &(count, price_cents, edge_bps, _, _) in fills {
+        let p0 = (price_cents as f64 / 100.0).clamp(0.01, 0.99);
+        let q = if let Some(e) = edge_bps {
+            (p0 + e / 10000.0).clamp(0.01, 0.99)
+        } else {
+            p0
+        };
+        let n = count as f64;
+        var_edge += n * n * q * (1.0 - q);
+        var_zero += n * n * p0 * (1.0 - p0);
+    }
+    let sigma_edge = var_edge.sqrt();
+    let sigma_zero = var_zero.sqrt();
+
+    let z_edge = if sigma_edge > 0.0 { Some((realized_pnl - expected_pnl) / sigma_edge) } else { None };
+    let z_zero = if sigma_zero > 0.0 { Some((realized_pnl + total_fees) / sigma_zero) } else { None };
+
+    VarianceDayRow {
+        date: date.to_string(),
+        fills: total_fills,
+        contracts: total_contracts,
+        expected_pnl,
+        realized_pnl,
+        total_fees,
+        sigma_edge_real: sigma_edge,
+        sigma_zero_edge: sigma_zero,
+        z_edge_real: z_edge,
+        z_zero_edge: z_zero,
+        p_edge_real: z_edge.map(norm_cdf),
+        p_zero_edge: z_zero.map(norm_cdf),
+    }
+}
+
+fn query_variance_analysis(db_path: &str) -> anyhow::Result<VarianceAnalysis> {
+    let conn = open_read_only(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT date(f.filled_at) as day, f.count, f.price_cents, o.edge_bps, f.fill_pnl, COALESCE(f.fee_cents, 0)
+         FROM fills f
+         LEFT JOIN orders o ON f.order_id = o.order_id
+         WHERE f.fill_pnl IS NOT NULL AND COALESCE(f.excluded, 0) = 0
+         ORDER BY f.filled_at ASC"
+    )?;
+
+    let mut by_day: std::collections::BTreeMap<String, Vec<(i64, i64, Option<f64>, Option<f64>, f64)>> = std::collections::BTreeMap::new();
+    let mut all_fills = Vec::new();
+
+    let rows = stmt.query_map([], |row| {
+        let day: String = row.get(0)?;
+        let count: i64 = row.get(1)?;
+        let price_cents: i64 = row.get(2)?;
+        let edge_bps: Option<f64> = row.get(3)?;
+        let fill_pnl: Option<f64> = row.get(4)?;
+        let fee: f64 = row.get(5)?;
+        Ok((day, count, price_cents, edge_bps, fill_pnl, fee))
+    })?;
+
+    for row in rows {
+        let (day, count, price_cents, edge_bps, fill_pnl, fee) = row?;
+        let entry = (count, price_cents, edge_bps, fill_pnl, fee);
+        by_day.entry(day).or_default().push(entry);
+        all_fills.push(entry);
+    }
+
+    let days: Vec<VarianceDayRow> = by_day.iter()
+        .map(|(date, fills)| compute_day_row(date, fills))
+        .collect();
+
+    let totals = compute_day_row("All Time", &all_fills);
+
+    Ok(VarianceAnalysis { days, totals })
+}
+
+async fn api_variance_analysis(State(state): State<DashboardState>) -> impl IntoResponse {
+    match query_variance_analysis(&state.db_path) {
+        Ok(analysis) => Json(analysis),
+        Err(e) => {
+            tracing::warn!("Dashboard: variance analysis query failed: {:?}", e);
+            Json(VarianceAnalysis { days: vec![], totals: compute_day_row("All Time", &[]) })
+        }
+    }
+}
+
+// --- Exclude fills ---
+
+#[derive(Deserialize)]
+struct ExcludeQuery {
+    ticker: String,
+}
+
+async fn api_exclude_fills(State(state): State<DashboardState>, Query(q): Query<ExcludeQuery>) -> impl IntoResponse {
+    let conn = match open_read_only(&state.db_path) {
+        Ok(_) => {
+            // Need a writable connection for UPDATE
+            match rusqlite::Connection::open(&state.db_path) {
+                Ok(c) => c,
+                Err(e) => return Json(serde_json::json!({"error": format!("{e}")})),
+            }
+        }
+        Err(e) => return Json(serde_json::json!({"error": format!("{e}")})),
+    };
+    match conn.execute(
+        "UPDATE fills SET excluded = 1 WHERE ticker = ?1",
+        rusqlite::params![q.ticker],
+    ) {
+        Ok(n) => Json(serde_json::json!({"excluded": n, "ticker": q.ticker})),
+        Err(e) => Json(serde_json::json!({"error": format!("{e}")})),
+    }
 }
 
 // --- Server ---
@@ -671,7 +840,9 @@ pub async fn serve(bot_state: SharedState, order_books: SharedOrderBooks, _logge
         .route("/api/edge", get(api_edge))
         .route("/api/break_evals", get(api_break_evals))
         .route("/api/daily_chart", get(api_daily_chart))
+        .route("/api/variance_analysis", get(api_variance_analysis))
         .route("/api/health", get(api_health))
+        .route("/api/exclude_fills", axum::routing::post(api_exclude_fills))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");

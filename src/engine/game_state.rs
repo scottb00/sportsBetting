@@ -37,8 +37,10 @@ pub struct GameState {
     pub away_score: Option<i32>,
     pub phase: GamePhase,
 
-    // Reference price — ESPN only
+    // Reference prices
     pub espn_home_win_prob: Option<f64>,
+    /// DraftKings-implied home win probability (from ESPN pickcenter, devigged).
+    pub dk_home_win_prob: Option<f64>,
 
     /// Game start time as unix timestamp (seconds), from ESPN.
     pub start_time_ts: Option<i64>,
@@ -73,6 +75,7 @@ impl GameState {
             away_score: None,
             phase: GamePhase::Unknown,
             espn_home_win_prob: None,
+            dk_home_win_prob: None,
             start_time_ts: None,
             status_detail: String::new(),
             display_clock: None,

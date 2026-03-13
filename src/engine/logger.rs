@@ -107,6 +107,8 @@ impl TradeLogger {
         );
         let _ = conn.execute_batch("ALTER TABLE fills ADD COLUMN fill_pnl REAL");
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN is_close INTEGER");
+        let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN dk_fair REAL");
+        let _ = conn.execute_batch("ALTER TABLE fills ADD COLUMN excluded INTEGER DEFAULT 0");
 
         Ok(Self { conn })
     }
@@ -126,10 +128,11 @@ impl TradeLogger {
         fair_value_cents: Option<i64>,
         is_close: bool,
         game_info: Option<&GameInfo>,
+        dk_fair: Option<f64>,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps, fair_value_cents, is_close, game_name, home_team, away_team, is_home, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?15, ?11, ?12, ?13, ?14, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            "INSERT INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps, fair_value_cents, is_close, game_name, home_team, away_team, is_home, dk_fair, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?15, ?11, ?12, ?13, ?14, ?16, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
              ON CONFLICT(order_id) DO UPDATE SET
                strategy = ?3,
                action = ?4,
@@ -143,7 +146,8 @@ impl TradeLogger {
                game_name = COALESCE(?11, game_name),
                home_team = COALESCE(?12, home_team),
                away_team = COALESCE(?13, away_team),
-               is_home = COALESCE(?14, is_home)",
+               is_home = COALESCE(?14, is_home),
+               dk_fair = COALESCE(?16, dk_fair)",
             rusqlite::params![
                 order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps,
                 fair_value_cents,
@@ -152,6 +156,7 @@ impl TradeLogger {
                 game_info.map(|g| g.away_team.as_str()),
                 game_info.map(|g| g.is_home as i32),
                 is_close as i32,
+                dk_fair,
             ],
         )?;
         Ok(())
@@ -192,18 +197,38 @@ impl TradeLogger {
         let rows = self.conn.execute(
             "UPDATE fills SET fill_pnl =
                CASE
-                 WHEN action = 'Buy' THEN
-                   (CASE WHEN (side = 'Yes' AND ?2 = 'yes') OR (side = 'No' AND ?2 = 'no') THEN 100 ELSE 0 END
+                 WHEN LOWER(action) = 'buy' THEN
+                   (CASE WHEN (LOWER(side) = 'yes' AND ?2 = 'yes') OR (LOWER(side) = 'no' AND ?2 = 'no') THEN 100 ELSE 0 END
                     - price_cents) * count / 100.0 - COALESCE(fee_cents, 0)
                  ELSE
                    (price_cents -
-                    CASE WHEN (side = 'Yes' AND ?2 = 'yes') OR (side = 'No' AND ?2 = 'no') THEN 100 ELSE 0 END
+                    CASE WHEN (LOWER(side) = 'yes' AND ?2 = 'yes') OR (LOWER(side) = 'no' AND ?2 = 'no') THEN 100 ELSE 0 END
                    ) * count / 100.0 - COALESCE(fee_cents, 0)
                END
              WHERE ticker = ?1 AND fill_pnl IS NULL",
             rusqlite::params![ticker, result],
         )?;
         Ok(rows)
+    }
+
+    /// Reset all fill_pnl values to NULL so they can be re-computed with the corrected formula.
+    pub fn reset_all_fill_pnl(&self) -> Result<usize> {
+        let rows = self.conn.execute(
+            "UPDATE fills SET fill_pnl = NULL WHERE fill_pnl IS NOT NULL",
+            [],
+        )?;
+        Ok(rows)
+    }
+
+    /// Get all distinct tickers that have unsettled fills (fill_pnl IS NULL).
+    pub fn unsettled_tickers(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT ticker FROM fills WHERE fill_pnl IS NULL"
+        )?;
+        let tickers = stmt.query_map([], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(tickers)
     }
 
     pub fn log_pnl_snapshot(
@@ -326,7 +351,7 @@ impl TradeLogger {
                     COUNT(*)
              FROM fills f
              JOIN orders o ON f.order_id = o.order_id
-             WHERE o.edge_bps IS NOT NULL AND date(f.filled_at) = date('now')",
+             WHERE o.edge_bps IS NOT NULL AND date(f.filled_at, '-8 hours') = date('now', '-8 hours')",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
@@ -342,10 +367,19 @@ impl TradeLogger {
                      ELSE price_cents * count / 100.0
                 END - COALESCE(fee_cents, 0)
             ), 0.0)
-            FROM fills WHERE date(filled_at) = date('now')",
+            FROM fills WHERE date(filled_at, '-8 hours') = date('now', '-8 hours') AND COALESCE(excluded, 0) = 0",
             [],
             |row| row.get(0),
         )?;
         Ok(pnl)
+    }
+
+    /// Exclude all fills for a given ticker from PnL analysis.
+    pub fn exclude_fills_by_ticker(&self, ticker: &str) -> Result<usize> {
+        let rows = self.conn.execute(
+            "UPDATE fills SET excluded = 1 WHERE ticker = ?1",
+            rusqlite::params![ticker],
+        )?;
+        Ok(rows)
     }
 }

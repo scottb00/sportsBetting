@@ -17,11 +17,12 @@ pub struct BreakEvQuoter {
     pub min_edge: f64,
     pub contracts_per_pct_edge: f64,
     pub min_trade_contracts: i64,
+    pub max_contracts_per_order: i64,
 }
 
 impl BreakEvQuoter {
-    pub fn new(min_edge: f64, contracts_per_pct_edge: f64, min_trade_contracts: i64) -> Self {
-        Self { min_edge, contracts_per_pct_edge, min_trade_contracts }
+    pub fn new(min_edge: f64, contracts_per_pct_edge: f64, min_trade_contracts: i64, max_contracts_per_order: i64) -> Self {
+        Self { min_edge, contracts_per_pct_edge, min_trade_contracts, max_contracts_per_order }
     }
 }
 
@@ -43,7 +44,7 @@ impl Strategy for BreakEvQuoter {
     ) -> Option<OrderSignal> {
         let mut signal = evaluate_edge(
             game, risk, current_game_exposure, self.min_edge, self.name(), order_books,
-            self.contracts_per_pct_edge, self.min_trade_contracts,
+            self.contracts_per_pct_edge, self.min_trade_contracts, self.max_contracts_per_order,
         )?;
         // Set expiration tied to estimated break end.
         // 45s safety buffer: TV timeout orders get ~90s TTL (135-45), team timeout

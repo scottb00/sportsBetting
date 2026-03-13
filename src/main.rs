@@ -141,9 +141,70 @@ async fn main() -> Result<()> {
         s.order_manager.seed_committed_from_resting();
     }
 
+    // --- Re-settle all historical fills with corrected PnL formula ---
+    {
+        let log = logger.lock().unwrap();
+        let reset_count = log.reset_all_fill_pnl().unwrap_or(0);
+        if reset_count > 0 {
+            tracing::info!("Reset {} fill PnL values for re-settlement", reset_count);
+        }
+        let unsettled = log.unsettled_tickers().unwrap_or_default();
+        drop(log);
+
+        let mut settled_total = 0usize;
+        for ticker in &unsettled {
+            match kalshi_rest.get_market(ticker).await {
+                Ok(market) => {
+                    let result = market.result.as_deref().unwrap_or("");
+                    if result == "yes" || result == "no" {
+                        let log = logger.lock().unwrap();
+                        match log.settle_fills(ticker, result) {
+                            Ok(n) => settled_total += n,
+                            Err(e) => tracing::warn!("Re-settle failed for {}: {}", ticker, e),
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("Could not fetch market {} for re-settlement: {}", ticker, e),
+            }
+        }
+        if settled_total > 0 {
+            tracing::info!("Re-settled {} fills across {} tickers at startup", settled_total, unsettled.len());
+        }
+    }
+
     // --- Connect WebSockets ---
     let (mut kalshi_rx, kalshi_ws_handle) = connect_kalshi_ws(&auth, &config, &mapper).await?;
     let mut poly_rx = connect_poly_ws(&state).await?;
+
+    // --- Seed orderbooks via REST for all initial tickers ---
+    // WS snapshots may be delayed; REST provides an immediate baseline.
+    {
+        let tickers: Vec<String> = {
+            let s = state.lock().await;
+            s.game_state.games.values()
+                .flat_map(|g| g.kalshi_markets.iter().map(|m| m.ticker.clone()))
+                .collect()
+        };
+        let mut seeded = 0usize;
+        for ticker in &tickers {
+            match kalshi_rest.get_orderbook(ticker).await {
+                Ok(snapshot) => {
+                    let mut books = order_books.write().await;
+                    let book = books
+                        .entry(ticker.clone())
+                        .or_insert_with(|| sports_betting::kalshi::orderbook::LocalOrderBook::new(ticker.clone()));
+                    book.apply_snapshot(&snapshot);
+                    seeded += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to seed orderbook for {}: {:?}", ticker, e);
+                }
+            }
+        }
+        if seeded > 0 {
+            tracing::info!("Seeded {} orderbooks via REST at startup", seeded);
+        }
+    }
 
     // --- Main event loop ---
     let mut game_tracker = GameTracker::new();

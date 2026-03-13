@@ -7,7 +7,7 @@ mod polymarket_ws;
 mod position_sync;
 mod scoreboard;
 
-pub use cleanup::cleanup_finished_games;
+pub use cleanup::{cleanup_finished_games, settle_unsettled_fills};
 pub use discovery::discover_new_markets;
 pub use fill_sync::sync_fills;
 pub use kalshi_ws::handle_kalshi_event;
@@ -41,6 +41,7 @@ pub async fn handle_maintenance_tick(
     sync_orders(state, logger, kalshi_rest).await;
     sync_fills(state, logger, kalshi_rest).await;
     reconcile_positions(state, kalshi_rest, notifier).await;
+    settle_unsettled_fills(state, logger, kalshi_rest).await;
 }
 
 /// Re-fetch ESPN summaries for games that have Kalshi markets but no win probability.

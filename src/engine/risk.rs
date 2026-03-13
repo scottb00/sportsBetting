@@ -29,10 +29,10 @@ impl RiskManager {
         Self::kalshi_fee(0.0175, contracts, price_cents)
     }
 
-    /// Kalshi fee formula: ceil(rate * contracts * price * (1 - price))
+    /// Kalshi fee formula in cents: ceil(rate * contracts * price_cents * (100 - price_cents) / 100)
     fn kalshi_fee(rate: f64, contracts: i64, price_cents: i64) -> f64 {
-        let p = price_cents as f64 / 100.0;
-        (rate * contracts as f64 * p * (1.0 - p)).ceil()
+        let p = price_cents as f64;
+        (rate * contracts as f64 * p * (100.0 - p) / 100.0).ceil()
     }
 
     /// Record a fill — track entry price for P&L computation.
@@ -211,11 +211,17 @@ mod tests {
 
     #[test]
     fn test_maker_fee() {
-        // 10 contracts at 50 cents: ceil(0.0175 * 10 * 0.5 * 0.5) = ceil(0.04375) = 1
-        assert_eq!(RiskManager::maker_fee(10, 50), 1.0);
+        // 1 contract at 50c: ceil(0.0175 * 1 * 50 * 50 / 100) = ceil(0.4375) = 1
+        assert_eq!(RiskManager::maker_fee(1, 50), 1.0);
 
-        // 100 contracts at 50 cents: ceil(0.0175 * 100 * 0.5 * 0.5) = ceil(0.4375) = 1
-        assert_eq!(RiskManager::maker_fee(100, 50), 1.0);
+        // 10 contracts at 50c: ceil(0.0175 * 10 * 50 * 50 / 100) = ceil(4.375) = 5
+        assert_eq!(RiskManager::maker_fee(10, 50), 5.0);
+
+        // 100 contracts at 50c: ceil(0.0175 * 100 * 50 * 50 / 100) = ceil(43.75) = 44
+        assert_eq!(RiskManager::maker_fee(100, 50), 44.0);
+
+        // 1 contract at 10c: ceil(0.0175 * 1 * 10 * 90 / 100) = ceil(0.1575) = 1
+        assert_eq!(RiskManager::maker_fee(1, 10), 1.0);
     }
 
     #[test]
