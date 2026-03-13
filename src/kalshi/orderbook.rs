@@ -2,6 +2,14 @@ use std::collections::BTreeMap;
 
 use super::types::{OrderBookDelta, OrderBookSnapshot, PriceLevel};
 
+/// Result of applying a delta to the order book.
+#[derive(Debug)]
+pub enum DeltaResult {
+    Ok,
+    /// Book needs a fresh REST snapshot (reason provided for logging).
+    NeedsResnapshot(String),
+}
+
 /// Local order book replica maintained from WebSocket deltas.
 /// Kalshi books are bids only — a YES bid at price X implies a NO ask at (100 - X).
 #[derive(Debug, Clone)]
@@ -12,6 +20,9 @@ pub struct LocalOrderBook {
     /// NO side: price (cents) -> quantity
     pub no_levels: BTreeMap<i64, i64>,
     pub last_seq: Option<i64>,
+    /// Throttle REST resnapshots to avoid storms.
+    #[allow(dead_code)]
+    pub last_resnapshot_at: Option<std::time::Instant>,
 }
 
 impl LocalOrderBook {
@@ -21,11 +32,12 @@ impl LocalOrderBook {
             yes_levels: BTreeMap::new(),
             no_levels: BTreeMap::new(),
             last_seq: None,
+            last_resnapshot_at: None,
         }
     }
 
     /// Initialize from a full snapshot.
-    pub fn apply_snapshot(&mut self, snapshot: &OrderBookSnapshot) {
+    pub fn apply_snapshot(&mut self, snapshot: &OrderBookSnapshot, seq: Option<i64>) {
         self.yes_levels.clear();
         self.no_levels.clear();
 
@@ -39,14 +51,27 @@ impl LocalOrderBook {
                 self.no_levels.insert(level.price, level.quantity);
             }
         }
+        self.last_seq = seq;
     }
 
-    /// Apply a single delta update.
-    pub fn apply_delta(&mut self, delta: &OrderBookDelta) {
+    /// Apply a single delta update. Returns whether the book needs a REST resnapshot.
+    pub fn apply_delta(&mut self, delta: &OrderBookDelta) -> DeltaResult {
+        // Sequence gap detection
+        if let (Some(last), Some(current)) = (self.last_seq, delta.seq) {
+            if current > last + 1 {
+                return DeltaResult::NeedsResnapshot(
+                    format!("seq gap: expected {} got {} (missed {})", last + 1, current, current - last - 1)
+                );
+            }
+        }
+        if let Some(s) = delta.seq {
+            self.last_seq = Some(s);
+        }
+
         let levels = match delta.side.as_str() {
             "yes" => &mut self.yes_levels,
             "no" => &mut self.no_levels,
-            _ => return,
+            _ => return DeltaResult::Ok,
         };
 
         let new_qty = levels.get(&delta.price).unwrap_or(&0) + delta.delta;
@@ -54,6 +79,21 @@ impl LocalOrderBook {
             levels.remove(&delta.price);
         } else {
             levels.insert(delta.price, new_qty);
+        }
+
+        // Crossed book detection (after applying delta)
+        if self.is_crossed() {
+            return DeltaResult::NeedsResnapshot("crossed book".to_string());
+        }
+
+        DeltaResult::Ok
+    }
+
+    /// Check if the book is crossed (best YES bid >= best YES ask).
+    pub fn is_crossed(&self) -> bool {
+        match (self.best_yes_bid(), self.best_yes_ask()) {
+            (Some(bid), Some(ask)) => bid.price >= ask.price,
+            _ => false,
         }
     }
 
@@ -147,7 +187,7 @@ mod tests {
             ],
         };
 
-        book.apply_snapshot(&snapshot);
+        book.apply_snapshot(&snapshot, Some(1));
 
         assert_eq!(book.best_yes_bid().unwrap().price, 45);
         assert_eq!(book.best_no_bid().unwrap().price, 58);
@@ -161,6 +201,7 @@ mod tests {
             delta: 20,
             side: "yes".to_string(),
             ts: None,
+            seq: Some(2),
         });
 
         assert_eq!(book.best_yes_bid().unwrap().price, 46);
@@ -173,9 +214,54 @@ mod tests {
             delta: -20,
             side: "yes".to_string(),
             ts: None,
+            seq: Some(3),
         });
 
         assert_eq!(book.best_yes_bid().unwrap().price, 45);
+    }
+
+    #[test]
+    fn test_seq_gap_detection() {
+        let mut book = LocalOrderBook::new("TEST".to_string());
+        // Non-crossed book: YES bid=40, NO bid=55 → YES ask=45. 40 < 45 = not crossed.
+        book.apply_snapshot(&OrderBookSnapshot {
+            yes: vec![PriceLevel { price: 40, quantity: 100 }],
+            no: vec![PriceLevel { price: 55, quantity: 80 }],
+        }, Some(10));
+
+        // Sequential delta — should be Ok
+        let result = book.apply_delta(&OrderBookDelta {
+            market_ticker: "TEST".to_string(),
+            price: 39, delta: 50, side: "yes".to_string(), ts: None, seq: Some(11),
+        });
+        assert!(matches!(result, DeltaResult::Ok));
+
+        // Gap delta (skipped 12) — should need resnapshot
+        let result = book.apply_delta(&OrderBookDelta {
+            market_ticker: "TEST".to_string(),
+            price: 43, delta: 30, side: "yes".to_string(), ts: None, seq: Some(13),
+        });
+        assert!(matches!(result, DeltaResult::NeedsResnapshot(_)));
+    }
+
+    #[test]
+    fn test_crossed_book_detection() {
+        let mut book = LocalOrderBook::new("TEST".to_string());
+        // YES bid=60, NO bid=50 → YES ask=50. bid(60) >= ask(50) = crossed!
+        book.apply_snapshot(&OrderBookSnapshot {
+            yes: vec![PriceLevel { price: 60, quantity: 100 }],
+            no: vec![PriceLevel { price: 50, quantity: 100 }],
+        }, None);
+        assert!(book.is_crossed());
+
+        // Normal book: YES bid=45, NO bid=58 → YES ask=42. 45 < 42? No, 45 > 42... wait
+        // YES bid=45, YES ask=42 — that's crossed too. Let's use a non-crossed example.
+        // YES bid=40, NO bid=55 → YES ask=45. 40 < 45 = not crossed.
+        book.apply_snapshot(&OrderBookSnapshot {
+            yes: vec![PriceLevel { price: 40, quantity: 100 }],
+            no: vec![PriceLevel { price: 55, quantity: 100 }],
+        }, None);
+        assert!(!book.is_crossed());
     }
 
     #[test]
@@ -184,7 +270,7 @@ mod tests {
         book.apply_snapshot(&OrderBookSnapshot {
             yes: vec![PriceLevel { price: 45, quantity: 100 }],
             no: vec![PriceLevel { price: 52, quantity: 100 }],
-        });
+        }, None);
 
         // YES bid = 45, YES ask = 100 - 52 = 48
         assert_eq!(book.spread(), Some(3));

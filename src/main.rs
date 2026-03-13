@@ -183,7 +183,7 @@ async fn main() -> Result<()> {
                     let book = books
                         .entry(ticker.clone())
                         .or_insert_with(|| sports_betting::kalshi::orderbook::LocalOrderBook::new(ticker.clone()));
-                    book.apply_snapshot(&snapshot);
+                    book.apply_snapshot(&snapshot, None);
                     seeded += 1;
                 }
                 Err(e) => {
@@ -236,7 +236,7 @@ async fn main() -> Result<()> {
                     None => std::future::pending().await,
                 }
             } => {
-                handlers::handle_kalshi_event(event, &state, &order_books, &logger).await;
+                handlers::handle_kalshi_event(event, &state, &order_books, &logger, &kalshi_rest).await;
             }
             Some(event) = async {
                 match &mut poly_rx {
@@ -272,6 +272,9 @@ async fn fetch_initial_markets(
     let (_, tomorrow, date_tags) = today_and_tomorrow_tags();
     let mut kalshi_events = market_prep::fetch_all_kalshi_cbb_events(kalshi_rest).await;
     let before = kalshi_events.events.len();
+    // Build volume map BEFORE filtering so cached mapper entries from yesterday
+    // (still-live games) also get volume populated.
+    let kalshi_volume = build_kalshi_volume(&kalshi_events);
     filter_events_for_dates(&mut kalshi_events, &date_tags);
     tracing::info!(
         "Found {} Kalshi CBB events ({} total, filtered to {:?} + conference tournaments)",
@@ -280,7 +283,6 @@ async fn fetch_initial_markets(
 
     let espn_for_matching = build_espn_for_matching(&espn_games);
     let kalshi_for_matching = build_kalshi_for_matching(&kalshi_events);
-    let kalshi_volume = build_kalshi_volume(&kalshi_events);
 
     let is_today_or_tomorrow = |s: &str| s.starts_with(today) || s.starts_with(&tomorrow);
     let poly_for_matching: Vec<(String, String)> = poly_events

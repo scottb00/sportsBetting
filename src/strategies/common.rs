@@ -107,9 +107,6 @@ fn evaluate_market(
     // Accounts for equivalent exposure on other markets (YES-DUKE and NO-UNC are the same bet).
     let net_game_aligned = risk.effective_net_for_market(&game.kalshi_markets, &market.ticker);
 
-    // Step 2b: ticker-specific position for close logic (Case B only).
-    let net_ticker = risk.net_position(&market.ticker);
-
     // Step 3: decide action
     if target_signed != 0 {
         // Case A: we have a target — only ADD toward it, never trim.
@@ -171,54 +168,44 @@ fn evaluate_market(
             is_close: false,
             max_contracts: None,
         })
-    } else if net_ticker != 0 {
-        // Case B: no edge in position direction, but we have a ticker-specific position — close it.
-        // Uses ticker-specific net (not game-aligned) since we can only close what we hold on this ticker.
-        //
-        // Close sizing is scaled by edge in the CLOSE direction:
-        // - More edge to close (market moved against position) → close more aggressively
-        // - No edge to close → drip at min_trade_contracts
-        // - Final 5 minutes → uncap to avoid riding to settlement
-        let (side, action, alo) = if net_ticker > 0 {
-            // Long YES → close by buying NO
+    } else if net_game_aligned != 0 {
+        // Case B: no edge in position direction, but game-level exposure exists — close it.
+        // Uses game-aligned net (not ticker-specific) so we can close via ANY ticker in the game.
+        // e.g., hold YES-DUKE → can close by buying NO-DUKE or buying YES-UNC (whichever has better edge).
+        // evaluate_edge picks the best signal across all markets, so the best close price wins.
+        let (side, action, alo) = if net_game_aligned > 0 {
+            // Effectively long YES on this market → close by buying NO
             let alo = (100 - yes_bid - 1).max(1);
             (OrderSide::No, OrderAction::Buy, alo)
         } else {
-            // Long NO (short YES) → close by buying YES
+            // Effectively long NO on this market → close by buying YES
             let alo = (yes_ask - 1).max(1);
             (OrderSide::Yes, OrderAction::Buy, alo)
         };
 
-        let position_abs = net_ticker.unsigned_abs() as i64;
+        let exposure_abs = net_game_aligned.unsigned_abs() as i64;
 
         // Compute edge in the close direction
         let close_edge = compute_edge_and_alo(yes_bid, yes_ask, fair_value)
             .filter(|r| {
-                // Edge must be in the close direction (buying opposite of position)
-                (net_ticker > 0 && !r.buying_yes) || (net_ticker < 0 && r.buying_yes)
+                // Edge must be in the close direction (buying opposite of game-level exposure)
+                (net_game_aligned > 0 && !r.buying_yes) || (net_game_aligned < 0 && r.buying_yes)
             })
             .map(|r| r.edge_after_fees.max(0.0))
             .unwrap_or(0.0);
 
-        // Scale close size by edge, uncap in final minutes
-        let contracts = if game.is_final_minutes(5.0) {
-            // Final minutes: close full position to avoid settlement risk
-            position_abs
-        } else if close_edge > 0.0 {
-            // Edge exists in close direction: scale by contracts_per_pct_edge, cap per order
-            let scaled = (close_edge * 100.0 * contracts_per_pct_edge).floor().max(min_trade_contracts as f64) as i64;
-            scaled.min(max_contracts_per_order).min(position_abs)
-        } else {
-            // No edge to close: drip at minimum
-            (min_trade_contracts).min(position_abs)
-        };
+        // Close as much as possible when +EV — only gate is positive close edge
+        if close_edge <= 0.0 {
+            return None;
+        }
 
+        let contracts = exposure_abs.min(max_contracts_per_order);
         let size_dollars = contracts as f64 * alo as f64 / 100.0;
 
         tracing::info!(
-            "{} CLOSE signal: {} {:?} at {}c, {} contracts (net_ticker={}, position={}, close_edge={:.4}, final_mins={}), fair {:.4}",
-            strategy_name, market.ticker, side, alo, contracts, net_ticker, position_abs,
-            close_edge, game.is_final_minutes(5.0), fair_value
+            "{} CLOSE signal: {} {:?} at {}c, {} contracts (net_game_aligned={}, exposure={}, close_edge={:.4}), fair {:.4}",
+            strategy_name, market.ticker, side, alo, contracts, net_game_aligned, exposure_abs,
+            close_edge, fair_value
         );
 
         Some(OrderSignal {

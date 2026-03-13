@@ -15,8 +15,7 @@ use sports_betting::engine::risk::RiskManager;
 use sports_betting::espn::types::GamePhase;
 use sports_betting::kalshi::orderbook::LocalOrderBook;
 use sports_betting::kalshi::types::{Order, OrderAction, OrderBookSnapshot, OrderSide, PriceLevel};
-use sports_betting::strategies::break_ev::BreakEvQuoter;
-use sports_betting::strategies::clv_hunter::ClvHunter;
+use sports_betting::strategies::passive_espn::PassiveEspn;
 use sports_betting::strategies::Strategy;
 
 // ============================================================
@@ -52,10 +51,9 @@ fn test_risk() -> RiskManager {
 fn make_registry(max_contracts_per_game: i64) -> StrategyRegistry {
     StrategyRegistry {
         strategies: vec![
-            Box::new(BreakEvQuoter::new(0.01, 20.0, 1, 1000)),
-            Box::new(ClvHunter::new(0.01, 20.0, 1, 1000)),
+            Box::new(PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000)),
         ],
-        live_strategies: vec!["break_ev".into(), "clv_hunter".into()],
+        live_strategies: vec!["break_ev".into(), "pregame".into()],
         min_volume: 1000,
         min_price_cents: 5.0,
         max_price_cents: 95.0,
@@ -440,7 +438,7 @@ fn extreme_price_games_produce_no_signals() {
 #[test]
 fn no_signal_when_edge_below_threshold() {
     let risk = test_risk(); // min_edge = 0.01
-    let quoter = BreakEvQuoter::new(0.05, 20.0, 1, 1000); // strategy needs 5% edge
+    let quoter = PassiveEspn::new(0.05, 0.05, 20.0, 1, 1000); // strategy needs 5% edge
 
     // Fair = 54%, market mid = 50c → edge ~3c after ALO pricing
     // This should be below the 5% threshold
@@ -812,7 +810,7 @@ fn make_book_with_yes_bid(ticker: &str, yes_bid_price: i64) -> LocalOrderBook {
     book.apply_snapshot(&OrderBookSnapshot {
         yes: vec![PriceLevel { price: yes_bid_price, quantity: 100 }],
         no: vec![],
-    });
+    }, None);
     book
 }
 
@@ -822,7 +820,7 @@ fn make_book_with_no_bid(ticker: &str, no_bid_price: i64) -> LocalOrderBook {
     book.apply_snapshot(&OrderBookSnapshot {
         yes: vec![],
         no: vec![PriceLevel { price: no_bid_price, quantity: 100 }],
-    });
+    }, None);
     book
 }
 
@@ -938,11 +936,11 @@ fn all_clv_orders_excludes_non_clv() {
 
 #[test]
 fn recover_clv_from_resting_basic() {
-    // Resting order with strategy="clv_hunter" in order_strategies → recovered into clv_orders
+    // Resting order with strategy="pregame" in order_strategies → recovered into clv_orders
     let mut om = OrderManager::new();
 
     let order = make_clv_resting_order("o-clv-1", "CLV-GAME", OrderSide::Yes, 35);
-    om.record_placed_order(order, 5, "clv_hunter");
+    om.record_placed_order(order, 5, "pregame");
 
     // record_placed_order populates resting_orders and order_strategies but NOT clv_orders.
     // This simulates the post-restart state where clv_orders is empty.
@@ -982,7 +980,7 @@ fn recover_clv_from_resting_skips_already_present() {
     let mut om = OrderManager::new();
 
     let order = make_clv_resting_order("o-clv-2", "CLV-GAME", OrderSide::Yes, 42);
-    om.record_placed_order(order, 5, "clv_hunter");
+    om.record_placed_order(order, 5, "pregame");
 
     // Manually populate clv_orders (simulates order placed in-session, not via restart)
     om.record_clv_order("o-clv-2", "CLV-GAME", "Yes", 42);
@@ -1024,7 +1022,7 @@ fn recover_clv_from_resting_mixed_strategies() {
     let mut om = OrderManager::new();
 
     let clv_order = make_clv_resting_order("o-clv-3", "CLV-GAME", OrderSide::Yes, 28);
-    om.record_placed_order(clv_order, 3, "clv_hunter");
+    om.record_placed_order(clv_order, 3, "pregame");
 
     let break_order = make_clv_resting_order("o-break-2", "BREAK-GAME", OrderSide::No, 55);
     om.record_placed_order(break_order, 4, "break_ev");
@@ -1042,7 +1040,7 @@ fn recover_clv_no_side_correct_for_no_order() {
     let mut om = OrderManager::new();
 
     let order = make_clv_resting_order("o-clv-no", "CLV-GAME-NO", OrderSide::No, 72);
-    om.record_placed_order(order, 5, "clv_hunter");
+    om.record_placed_order(order, 5, "pregame");
 
     om.recover_clv_from_resting();
 

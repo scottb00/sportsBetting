@@ -53,11 +53,9 @@ src/
 │       ├── fill_sync.rs     — Sync fills from Kalshi REST
 │       └── position_sync.rs — Reconcile positions with Kalshi REST
 ├── strategies/
-│   ├── mod.rs           — Strategy trait + StrategyRegistry
+│   ├── mod.rs           — Strategy trait
 │   ├── common.rs        — evaluate_market(), compute_edge_and_alo(), ALO price calc
-│   ├── break_ev.rs      — Break-based +EV quoter (halftime/TV timeout)
-│   ├── clv_hunter.rs    — Pre-game CLV hunting
-│   └── position_closer.rs — Passive close of orphaned positions during live play
+│   └── passive_espn.rs  — Unified strategy: CLV hunting (pre-game), break quoting, live closing
 ├── kalshi/              — Auth (RSA-PSS), REST, WebSocket, orderbook, types
 ├── espn/                — Scoreboard poller, game info types
 └── polymarket/          — REST + WS client, event types
@@ -73,7 +71,7 @@ src/
 - `GameState` — per-game: ESPN probs, Kalshi markets, Polymarket price, phase, scores
 - `OrderSignal` — output of strategy evaluation, fed to executor
 - `LocalOrderBook` — per-ticker bid/ask from Kalshi WS snapshots + deltas
-- `StrategyRegistry` — holds all strategy instances, created at startup via `create_strategies()`
+- `StrategyRegistry` — holds single `MarketMaker` strategy instance, created at startup via `create_strategies()`
 
 ### Lock Ordering
 When multiple locks are needed, acquire in this order to prevent deadlocks: **mapper → state → order_books → break_log → logger**
@@ -117,24 +115,16 @@ This is the #1 source of bugs. Each venue defines "YES" differently:
 Key settings: `kalshi.dry_run = true` for paper trading. Risk params are at 0.1x for testing.
 
 ### Strategy Config Fields
-Required: `break_ev_min_edge`, `clv_hunter_min_edge`
-Optional (with defaults): `live_strategies` (["clv_hunter"]), `min_volume` (20000), `min_price_cents` (10.0), `max_price_cents` (90.0), `order_ttl_secs` (60), `max_contracts_per_game` (20), `contracts_per_pct_edge` (20.0), `min_trade_contracts` (5), `max_contracts_per_order` (30)
+Required: `break_ev_min_edge`, `clv_hunter_min_edge` (used as pregame_min_edge)
+Optional (with defaults): `live_strategies` (["pregame", "break_ev"]), `min_volume` (20000), `min_price_cents` (10.0), `max_price_cents` (90.0), `order_ttl_secs` (60), `max_contracts_per_game` (20), `contracts_per_pct_edge` (20.0), `min_trade_contracts` (5), `max_contracts_per_order` (30)
 
 **Note**: There is NO `arb_scanner_min_edge` field. The arb_scanner strategy was planned but never implemented.
 **Note**: The `summary_on_break_only` polling config field was removed (was parsed but never used).
 
-### Sizing Model (Target Position)
-Strategies use a **target-position model** (not Kelly). For each market:
-- `target = floor((edge_pct - min_edge) * contracts_per_pct_edge)` in the edge direction (0 if edge < min_edge)
-- `net = risk.effective_net_for_market(markets, ticker)` (game-level net aligned to this market's YES — accounts for cross-ticker exposure)
-- If `target > 0` and `delta = target - net >= min_trade_contracts`: add contracts toward target, capped at `max_contracts_per_order`
-- If `target == 0` and `net != 0`: close position with edge-scaled sizing (see below)
-- No partial trims — only close when edge disappears entirely to avoid negative-EV trades
-- **Per-order size cap**: All orders (add and close) are capped at `max_contracts_per_order` (default 30). Combined with `has_resting_order()` dedup, this creates TWAP-like drip behavior — one clip at a time, re-evaluated each tick.
-- **Edge-scaled close sizing**: Close orders scale with edge in the close direction:
-  - Close edge > 0: `contracts = min(floor(close_edge * 100 * contracts_per_pct_edge), max_contracts_per_order, position)` — close more aggressively when the market gives a good exit
-  - Close edge <= 0: `contracts = min(min_trade_contracts, position)` — drip at minimum when no favorable exit price
-  - Final 5 minutes (`is_final_minutes(5.0)`): uncapped — close full position to avoid settlement risk
+### Sizing Model & Trading Rules
+See [TRADING_RULES.md](TRADING_RULES.md) for the complete trading rules and strategy logic.
+
+Summary: target-position model. ADD orders sized by edge above threshold. CLOSE orders fire when edge disappears but close-direction edge is positive — closes as much as possible (`min(exposure, max_contracts_per_order)`). No live trading. No forced unwinds. No negative-edge closes. Cross-ticker closing allowed (same-game tickers are equivalent).
 
 ## Deployment
 
@@ -186,12 +176,12 @@ ssh root@165.227.117.108 'chown bot:bot /home/bot/app/config.toml && chmod 600 /
 
 ## Common Patterns
 
-- Strategies implement the `Strategy` trait; registered in `StrategyRegistry` at startup
-- Close orders (`is_close: true`) bypass the `live_strategies` config check — they're always live since they only reduce existing exposure
-- `PositionCloser` strategy evaluates during `GamePhase::Live` with min_edge=1.0 (impossible), so only Case B close signals fire — never opens new positions
+- Single `PassiveEspn` strategy trades during PreGame and Breaks only — never during live play, never in final 5 minutes. Signals tagged `"pregame"` or `"break_ev"` by phase. Position closing is not a separate strategy — it's the `is_close` flag on OrderSignal, emitted when `target == 0` and game-level exposure exists with +EV close opportunity.
+- Close orders use game-level `net_game_aligned` (not ticker-specific net), allowing closing via ANY ticker in the game (best close price wins). See [TRADING_RULES.md](TRADING_RULES.md).
+- Close orders (`is_close: true`) bypass the `live_strategies` config check — they're always allowed since they only reduce existing exposure
 - Strategies return `Vec<OrderSignal>`, deduped to best-per-ticker in `scoreboard.rs` handler
 - `has_resting_order()` on OrderManager prevents duplicate orders per-ticker across ticks (same-ticker only — orders on different tickers in the same game are allowed)
-- `evaluate_market()` in `strategies/common.rs` is the shared edge calculation used by both strategies
+- `evaluate_market()` in `strategies/common.rs` is the shared edge calculation
 - `compute_edge_and_alo()` in `strategies/common.rs` is the shared edge/ALO helper used by strategies, executor, and dashboard
 - The executor checks `can_evaluate()` before calling `evaluate()` — strategies do NOT self-guard
 - Error handling uses `anyhow::Result` throughout

@@ -47,7 +47,7 @@ impl Default for IntervalConfig {
 }
 
 fn default_live_strategies() -> Vec<String> {
-    vec!["clv_hunter".to_string()]
+    vec!["pregame".to_string(), "break_ev".to_string()]
 }
 fn default_min_volume() -> i64 { 20_000 }
 fn default_min_price_cents() -> f64 { 10.0 }
@@ -61,9 +61,9 @@ fn default_max_contracts_per_order() -> i64 { 30 }
 #[derive(Debug, Deserialize)]
 pub struct StrategyConfig {
     pub break_ev_min_edge: f64,
-    pub clv_hunter_min_edge: f64,
+    pub clv_hunter_min_edge: f64, // used as pregame_min_edge
     /// Which strategies are allowed to place real orders (when dry_run = false).
-    /// Others will log as DRY RUN. Default: ["clv_hunter"]
+    /// Others will log as DRY RUN. Default: ["pregame", "break_ev"]
     #[serde(default = "default_live_strategies")]
     pub live_strategies: Vec<String>,
     #[serde(default = "default_min_volume")]

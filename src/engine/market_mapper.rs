@@ -286,9 +286,28 @@ impl MarketMapper {
         fwd || rev
     }
 
-    /// Normalize abbreviations in team names for matching.
+    /// Strip diacritics/accents from Latin characters (é→e, ñ→n, etc.).
+    fn strip_diacritics(s: &str) -> String {
+        s.chars()
+            .map(|c| match c {
+                'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' => 'a',
+                'é' | 'è' | 'ê' | 'ë' => 'e',
+                'í' | 'ì' | 'î' | 'ï' => 'i',
+                'ó' | 'ò' | 'ô' | 'ö' | 'õ' => 'o',
+                'ú' | 'ù' | 'û' | 'ü' => 'u',
+                'ñ' => 'n',
+                'ç' => 'c',
+                _ => c,
+            })
+            .collect()
+    }
+
+    /// Normalize team names for matching: strip accents, expand abbreviations,
+    /// remove punctuation, collapse whitespace.
     fn normalize_team_name(name: &str) -> String {
-        name.replace("st.", "state")
+        let s = Self::strip_diacritics(name);
+        let s = s
+            .replace("st.", "state")
             .replace("miss.", "mississippi")
             .replace("n.c.", "north carolina")
             .replace("s.c.", "south carolina")
@@ -298,10 +317,13 @@ impl MarketMapper {
             // so "Miami (FL)" matches "Miami Hurricanes" and
             // "Miami (OH)" stays distinct as "Miami Ohio"
             .replace("(fl)", "hurricanes")
-            .replace("(oh)", "ohio")
-            // Strip remaining parentheses
-            .replace('(', "")
-            .replace(')', "")
+            .replace("(oh)", "ohio");
+        // Strip punctuation and parentheses, collapse whitespace
+        let s: String = s
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == ' ' { c } else { ' ' })
+            .collect();
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
     /// Check if a market's YES side is for the home team by comparing
@@ -338,11 +360,25 @@ impl MarketMapper {
             return true;
         }
 
-        let skip = ["state", "university", "the", "of", "college",
+        let skip = [
+            // Generic words
+            "state", "university", "the", "of", "college",
+            // Mascots — the more we skip, the more matching relies on school/city name
             "tigers", "eagles", "bulldogs", "wildcats", "bears", "panthers",
             "hawks", "knights", "cougars", "warriors", "raiders", "lions",
             "huskies", "broncos", "owls", "trojans", "rebels", "colonels",
             "saints", "vikings", "bobcats", "bison", "aggies", "demons",
+            "spartans", "lobos", "mountaineers", "terrapins", "jayhawks",
+            "longhorns", "sooners", "hoosiers", "boilermakers", "commodores",
+            "razorbacks", "crimson", "tide", "tar", "heels", "blue", "devils",
+            "fighting", "illini", "golden", "gophers", "badgers", "hawkeyes",
+            "cyclones", "red", "scarlet", "nittany", "minutemen", "gaels",
+            "friars", "musketeers", "peacocks", "cardinals", "wolfpack",
+            "seminoles", "cavaliers", "hokies", "demon", "deacons",
+            "yellow", "jackets", "gamecocks", "volunteers", "commodores",
+            "buckeyes", "wolverines", "spartans", "cornhuskers", "terriers",
+            "rams", "falcons", "bearcats", "flyers", "dukes", "paladins",
+            "buccaneers", "catamounts", "chanticleers", "redhawks",
         ];
         let full_words: Vec<&str> = full_norm.split_whitespace()
             .filter(|w| !skip.contains(w))
@@ -526,5 +562,39 @@ mod tests {
             "Duke at UNC Winner?",
             "Duke"
         ));
+    }
+
+    // --- accent/diacritic stripping ---
+
+    #[test]
+    fn san_jose_state_accent_match() {
+        // ESPN: "San José State Spartans", Kalshi: "San Jose St."
+        assert!(MarketMapper::team_name_matches("san josé state spartans", "san jose st."));
+        assert!(MarketMapper::fuzzy_game_match(
+            "San José State Spartans @ New Mexico Lobos",
+            "San Jose St. at New Mexico Winner?",
+            " at ", " Winner?"
+        ));
+    }
+
+    #[test]
+    fn accent_stripping_common_chars() {
+        assert_eq!(MarketMapper::strip_diacritics("josé"), "jose");
+        assert_eq!(MarketMapper::strip_diacritics("são"), "sao");
+        assert_eq!(MarketMapper::strip_diacritics("naïve"), "naive");
+        assert_eq!(MarketMapper::strip_diacritics("señor"), "senor");
+        assert_eq!(MarketMapper::strip_diacritics("résumé"), "resume");
+        // ASCII unchanged
+        assert_eq!(MarketMapper::strip_diacritics("duke"), "duke");
+    }
+
+    #[test]
+    fn punctuation_stripping_in_normalize() {
+        // normalize_team_name is always called on lowercased input
+        let norm = MarketMapper::normalize_team_name("st. john's red storm");
+        assert!(!norm.contains('\''));
+        assert!(!norm.contains('.'));
+        // "st." → "state" then punctuation stripped
+        assert!(norm.contains("state"));
     }
 }

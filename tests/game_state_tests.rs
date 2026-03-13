@@ -176,10 +176,10 @@ fn manager_find_by_kalshi_ticker() {
 
 #[test]
 fn clv_hunter_no_signal_without_espn() {
-    use sports_betting::strategies::clv_hunter::ClvHunter;
+    use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let hunter = ClvHunter::new(0.015, 20.0, 1, 1000);
+    let hunter = PassiveEspn::new(0.015, 0.015, 20.0, 1, 1000);
     let risk = RiskManager::new();
 
     let (mut gs, books) = make_game_with_markets(None);
@@ -191,10 +191,10 @@ fn clv_hunter_no_signal_without_espn() {
 
 #[test]
 fn clv_hunter_signal_with_espn() {
-    use sports_betting::strategies::clv_hunter::ClvHunter;
+    use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let hunter = ClvHunter::new(0.01, 20.0, 1, 1000);
+    let hunter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000);
     let risk = RiskManager::new();
 
     // ESPN says 65% home, Kalshi mid is 50c → big edge
@@ -204,16 +204,16 @@ fn clv_hunter_signal_with_espn() {
     let signal = hunter.evaluate(&gs, &risk, 0.0, &books);
     assert!(signal.is_some());
     let sig = signal.unwrap();
-    assert_eq!(sig.strategy, "clv_hunter");
+    assert_eq!(sig.strategy, "pregame");
 }
 
 #[test]
 fn break_ev_no_signal_when_not_on_break() {
-    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::strategies::Strategy;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = BreakEvQuoter::new(0.015, 20.0, 1, 1000);
+    let quoter = PassiveEspn::new(0.015, 0.015, 20.0, 1, 1000);
     let risk = RiskManager::new();
 
     let (mut gs, books) = make_game_with_markets(Some(0.70));
@@ -224,10 +224,10 @@ fn break_ev_no_signal_when_not_on_break() {
 
 #[test]
 fn break_ev_signals_on_halftime() {
-    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = BreakEvQuoter::new(0.01, 20.0, 1, 1000);
+    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000);
     let risk = RiskManager::new();
 
     let (mut gs, books) = make_game_with_markets(Some(0.70));
@@ -239,10 +239,10 @@ fn break_ev_signals_on_halftime() {
 
 #[test]
 fn strategy_picks_best_market() {
-    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = BreakEvQuoter::new(0.01, 20.0, 1, 1000);
+    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000);
     let risk = RiskManager::new();
 
     let mut gs = make_game();
@@ -266,10 +266,10 @@ fn strategy_picks_best_market() {
 
 #[test]
 fn alo_buy_yes_prices_at_ask_minus_one() {
-    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = BreakEvQuoter::new(0.01, 20.0, 1, 1000);
+    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000);
     let risk = RiskManager::new();
 
     let mut gs = make_game();
@@ -290,10 +290,10 @@ fn alo_buy_yes_prices_at_ask_minus_one() {
 
 #[test]
 fn alo_buy_no_prices_correctly() {
-    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = BreakEvQuoter::new(0.01, 20.0, 1, 1000);
+    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000);
     let risk = RiskManager::new();
 
     let mut gs = make_game();
@@ -318,10 +318,10 @@ fn alo_buy_no_prices_correctly() {
 
 #[test]
 fn clv_signal_sets_expiration_to_game_start() {
-    use sports_betting::strategies::clv_hunter::ClvHunter;
+    use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let hunter = ClvHunter::new(0.01, 20.0, 1, 1000);
+    let hunter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000);
     let risk = RiskManager::new();
 
     let (mut gs, books) = make_game_with_markets(Some(0.65));
@@ -336,10 +336,10 @@ fn clv_signal_sets_expiration_to_game_start() {
 
 #[test]
 fn clv_signal_no_expiration_without_start_time() {
-    use sports_betting::strategies::clv_hunter::ClvHunter;
+    use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let hunter = ClvHunter::new(0.01, 20.0, 1, 1000);
+    let hunter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000);
     let risk = RiskManager::new();
 
     let (mut gs, books) = make_game_with_markets(Some(0.65));
@@ -362,7 +362,7 @@ fn signal_to_order_passes_expiration_in_seconds() {
     use sports_betting::kalshi::types::{OrderSide, OrderAction};
 
     let signal = OrderSignal {
-        strategy: "clv_hunter".to_string(),
+        strategy: "pregame".to_string(),
         kalshi_ticker: "TEST-TICKER".to_string(),
         side: OrderSide::Yes,
         action: OrderAction::Buy,
@@ -387,7 +387,7 @@ fn signal_to_order_none_expiration() {
     use sports_betting::kalshi::types::{OrderSide, OrderAction};
 
     let signal = OrderSignal {
-        strategy: "clv_hunter".to_string(),
+        strategy: "pregame".to_string(),
         kalshi_ticker: "TEST-TICKER".to_string(),
         side: OrderSide::Yes,
         action: OrderAction::Buy,
@@ -482,10 +482,10 @@ fn in_flight_blocks_resting_check() {
 
 #[test]
 fn edge_calculated_from_order_price() {
-    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = BreakEvQuoter::new(0.01, 20.0, 1, 1000);
+    let quoter = PassiveEspn::new(0.01, 0.01, 20.0, 1, 1000);
     let risk = RiskManager::new();
 
     // Fair=0.60, ask=58 → order price=57c → edge=0.60-0.57=0.03 (before fees)
@@ -526,10 +526,10 @@ fn make_halftime_game(espn_hp: f64) -> (GameState, HashMap<String, LocalOrderBoo
 /// With N=1, min_edge=0.01: target = floor((0.1799 - 0.01) * 100 * 1) = floor(16.99) = 16 contracts.
 #[test]
 fn target_sizing_linear_from_edge() {
-    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = BreakEvQuoter::new(0.01, 1.0, 1, 1000);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1.0, 1, 1000);
     let risk = RiskManager::new();
 
     let (gs, books) = make_halftime_game(0.70);
@@ -542,11 +542,11 @@ fn target_sizing_linear_from_edge() {
 /// Fair=0.70 → target=16. Seed 5 YES → delta=11 → add 11 YES.
 #[test]
 fn target_adds_toward_target_when_below() {
-    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
     use sports_betting::kalshi::types::OrderSide;
 
-    let quoter = BreakEvQuoter::new(0.01, 1.0, 1, 1000);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1.0, 1, 1000);
     let mut risk = RiskManager::new();
     risk.seed_positions("TEST-HOME", "yes", 51, 5); // hold 5 YES
 
@@ -561,10 +561,10 @@ fn target_adds_toward_target_when_below() {
 /// Fair=0.70 → target=16. Seed 16 YES → delta=0 < min_trade_contracts=5 → None.
 #[test]
 fn target_no_signal_when_delta_below_min_trade() {
-    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = BreakEvQuoter::new(0.01, 1.0, 5, 1000); // min_trade_contracts=5
+    let quoter = PassiveEspn::new(0.01, 0.01, 1.0, 5, 1000); // min_trade_contracts=5
     let mut risk = RiskManager::new();
     risk.seed_positions("TEST-HOME", "yes", 51, 16); // hold 16, target=16, delta=0 < 5
 
@@ -577,10 +577,10 @@ fn target_no_signal_when_delta_below_min_trade() {
 /// Fair=0.70 → target=16. Seed 30 YES (above target) → no signal emitted.
 #[test]
 fn target_no_trim_when_above_target() {
-    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = BreakEvQuoter::new(0.01, 1.0, 1, 1000);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1.0, 1, 1000);
     let mut risk = RiskManager::new();
     risk.seed_positions("TEST-HOME", "yes", 51, 30); // hold 30, target=16, delta=-14 (above target)
 
@@ -593,31 +593,27 @@ fn target_no_trim_when_above_target() {
 /// Seed 10 YES. When fair=0.50 and mid=0.50, no edge → target=0 → close signal emitted.
 #[test]
 fn target_closes_position_when_edge_gone() {
-    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
-    use sports_betting::kalshi::types::OrderSide;
 
-    let quoter = BreakEvQuoter::new(0.01, 1.0, 1, 1000);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1.0, 1, 1000);
     let mut risk = RiskManager::new();
     risk.seed_positions("TEST-HOME", "yes", 51, 10); // hold 10 YES
 
     // fair=0.50 exactly at mid → compute_edge_and_alo returns None → target=0
-    // With edge-scaled closing: no close-direction edge → drip at min_trade_contracts (1)
+    // No close-direction edge → skip (don't send negative-edge orders)
     let (gs, books) = make_halftime_game(0.50);
-    let signal = quoter.evaluate(&gs, &risk, 0.0, &books).unwrap();
-    assert!(matches!(signal.side, OrderSide::No), "close YES by buying NO");
-    let order = sports_betting::engine::order_manager::OrderManager::signal_to_order(&signal).unwrap();
-    assert_eq!(order.count, 1, "drip close: min_trade_contracts when no close-direction edge");
-    assert_eq!(signal.edge_after_fees, 0.0, "close signal has no edge in close direction");
+    let signal = quoter.evaluate(&gs, &risk, 0.0, &books);
+    assert!(signal.is_none(), "no close signal when no edge in close direction");
 }
 
 /// No signal when flat position and no edge.
 #[test]
 fn target_no_signal_when_flat_and_no_edge() {
-    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
 
-    let quoter = BreakEvQuoter::new(0.01, 1.0, 1, 1000);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1.0, 1, 1000);
     let risk = RiskManager::new();
 
     let (gs, books) = make_halftime_game(0.50); // no edge, no position
@@ -630,11 +626,11 @@ fn target_no_signal_when_flat_and_no_edge() {
 /// From flat → add NO 16.
 #[test]
 fn target_sizes_correctly_for_no_side() {
-    use sports_betting::strategies::break_ev::BreakEvQuoter;
+    use sports_betting::strategies::passive_espn::PassiveEspn;
     use sports_betting::engine::risk::RiskManager;
     use sports_betting::kalshi::types::OrderSide;
 
-    let quoter = BreakEvQuoter::new(0.01, 1.0, 1, 1000);
+    let quoter = PassiveEspn::new(0.01, 0.01, 1.0, 1, 1000);
     let risk = RiskManager::new();
 
     let (gs, books) = make_halftime_game(0.30); // edge favors NO
@@ -642,4 +638,133 @@ fn target_sizes_correctly_for_no_side() {
     assert!(matches!(signal.side, OrderSide::No), "should buy NO");
     let order = sports_betting::engine::order_manager::OrderManager::signal_to_order(&signal).unwrap();
     assert_eq!(order.count, 16, "16 NO contracts with N=1 and ~17% above-threshold edge");
+}
+
+// ============================================================
+// Negative-edge close protection
+// ============================================================
+
+/// Helper: create a live game with given fair value and book prices.
+fn make_live_game_with_book(espn_hp: f64, yes_bid: i64, yes_ask: i64) -> (GameState, HashMap<String, LocalOrderBook>) {
+    let mut gs = GameState::new("evt_close".into(), "Duke".into(), "UNC".into());
+    gs.espn_home_win_prob = Some(espn_hp);
+    gs.phase = GamePhase::Live;
+    gs.period = Some(2);
+    gs.display_clock = Some("10:00".to_string());
+    let mut mkt = KalshiMarketState::new("TEST-HOME".into(), true);
+    mkt.volume = Some(50000);
+    gs.kalshi_markets.push(mkt);
+    let mut books = HashMap::new();
+    books.insert("TEST-HOME".to_string(), make_book("TEST-HOME", yes_bid, yes_ask));
+    (gs, books)
+}
+
+/// Close signal must NOT fire when fair value is worse than order price.
+/// Long YES at 50c, fair=0.45 → buying NO to close, but NO ALO = (100-48-1) = 51c,
+/// fair NO = 0.55. edge_raw = 0.55 - 0.51 = 0.04 > 0 → this is GOOD close edge.
+/// But if fair=0.55 → fair NO = 0.45, NO ALO = 51c → edge_raw = 0.45 - 0.51 = -0.06 → must NOT close.
+#[test]
+fn no_close_when_edge_is_negative() {
+    use sports_betting::strategies::passive_espn::PassiveEspn;
+    use sports_betting::engine::risk::RiskManager;
+
+    let closer = PassiveEspn::new(0.01, 0.01, 20.0, 5, 30);
+    let mut risk = RiskManager::new();
+    risk.seed_positions("TEST-HOME", "yes", 50, 10); // hold 10 YES
+
+    // fair=0.55 for home (YES). Closing means buying NO.
+    // NO ALO = 100 - 48 - 1 = 51c. fair NO = 0.45. edge = 0.45 - 0.51 = -0.06 → negative
+    let (gs, books) = make_live_game_with_book(0.55, 48, 52);
+    let signal = closer.evaluate(&gs, &risk, 0.0, &books);
+    assert!(signal.is_none(), "must not close with negative edge");
+}
+
+/// Close signal must NOT fire when fair value equals mid (no edge in either direction).
+#[test]
+fn no_close_when_edge_is_zero() {
+    use sports_betting::strategies::passive_espn::PassiveEspn;
+    use sports_betting::engine::risk::RiskManager;
+
+    let closer = PassiveEspn::new(0.01, 0.01, 20.0, 5, 30);
+    let mut risk = RiskManager::new();
+    risk.seed_positions("TEST-HOME", "yes", 50, 10);
+
+    // fair=0.50, mid=0.50 → compute_edge_and_alo returns None → close_edge=0
+    let (gs, books) = make_live_game_with_book(0.50, 48, 52);
+    let signal = closer.evaluate(&gs, &risk, 0.0, &books);
+    assert!(signal.is_none(), "must not close with zero edge");
+}
+
+/// Close signal SHOULD fire when there's positive edge in the close direction.
+#[test]
+fn close_fires_with_positive_close_edge() {
+    use sports_betting::strategies::passive_espn::PassiveEspn;
+    use sports_betting::engine::risk::RiskManager;
+    use sports_betting::kalshi::types::OrderSide;
+
+    let closer = PassiveEspn::new(0.01, 0.01, 20.0, 5, 30);
+    let mut risk = RiskManager::new();
+    risk.seed_positions("TEST-HOME", "yes", 50, 10); // hold 10 YES
+
+    // fair=0.40 → fair NO = 0.60. NO ALO = 100-48-1 = 51c. edge = 0.60 - 0.51 = 0.09 → positive
+    let (gs, books) = make_live_game_with_book(0.40, 48, 52);
+    let signal = closer.evaluate(&gs, &risk, 0.0, &books);
+    assert!(signal.is_some(), "should close with positive edge");
+    let s = signal.unwrap();
+    assert!(s.is_close, "must be a close signal");
+    assert!(matches!(s.side, OrderSide::No), "close YES by buying NO");
+    assert!(s.edge_after_fees > 0.0, "edge must be positive");
+}
+
+/// Close signal edge must match: fair_in_close_direction - alo_price, not fair - mid.
+#[test]
+fn close_edge_computed_from_alo_not_mid() {
+    use sports_betting::strategies::passive_espn::PassiveEspn;
+    use sports_betting::engine::risk::RiskManager;
+
+    let closer = PassiveEspn::new(0.01, 0.01, 20.0, 5, 30);
+    let mut risk = RiskManager::new();
+    risk.seed_positions("TEST-HOME", "yes", 50, 10);
+
+    // fair=0.35 → fair NO = 0.65. Book: bid=40, ask=60. NO ALO = 100-40-1 = 59c.
+    // edge_raw = 0.65 - 0.59 = 0.06, NOT 0.65 - 0.50 = 0.15
+    let (gs, books) = make_live_game_with_book(0.35, 40, 60);
+    let signal = closer.evaluate(&gs, &risk, 0.0, &books).unwrap();
+    assert!(signal.edge_after_fees < 0.06, "edge should be from ALO price, not mid");
+    assert!(signal.edge_after_fees > 0.03, "edge should be positive after fees");
+}
+
+/// Final minutes: do NOT close when edge is negative. No forced unwinds — closing is purely +EV.
+#[test]
+fn final_minutes_no_close_without_edge() {
+    use sports_betting::strategies::passive_espn::PassiveEspn;
+    use sports_betting::engine::risk::RiskManager;
+
+    let closer = PassiveEspn::new(0.01, 0.01, 20.0, 5, 30);
+    let mut risk = RiskManager::new();
+    risk.seed_positions("TEST-HOME", "yes", 50, 10);
+
+    // fair=0.55 → negative close edge. Even in final minutes, should NOT close.
+    let (mut gs, books) = make_live_game_with_book(0.55, 48, 52);
+    gs.display_clock = Some("3:00".to_string()); // < 5 minutes remaining
+    gs.period = Some(2);
+
+    let signal = closer.evaluate(&gs, &risk, 0.0, &books);
+    assert!(signal.is_none(), "must not close in final minutes when edge is negative");
+}
+
+/// Long NO position: should not close when buying YES has negative edge.
+#[test]
+fn no_close_long_no_when_buying_yes_negative_edge() {
+    use sports_betting::strategies::passive_espn::PassiveEspn;
+    use sports_betting::engine::risk::RiskManager;
+
+    let closer = PassiveEspn::new(0.01, 0.01, 20.0, 5, 30);
+    let mut risk = RiskManager::new();
+    risk.seed_positions("TEST-HOME", "no", 50, 10); // hold 10 NO
+
+    // fair=0.45 → fair YES = 0.45. YES ALO = 52-1 = 51c. edge = 0.45 - 0.51 = -0.06 → negative
+    let (gs, books) = make_live_game_with_book(0.45, 48, 52);
+    let signal = closer.evaluate(&gs, &risk, 0.0, &books);
+    assert!(signal.is_none(), "must not close NO position when YES edge is negative");
 }

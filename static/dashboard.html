@@ -902,7 +902,7 @@ async function refresh() {
           <td>${fmtPosition(o)}</td>
           <td class="num">${o.count}</td>
           <td class="num">${o.price_cents}¢</td>
-          <td class="num">${o.fair_value_cents != null ? o.fair_value_cents.toFixed(1) + '¢' : '-'}</td>
+          <td class="num">${o.fair_value_cents != null ? ((o.side && o.side.toLowerCase() === 'no') ? (100 - o.fair_value_cents).toFixed(1) : o.fair_value_cents.toFixed(1)) + '¢' : '-'}</td>
           <td class="num">${o.edge_bps != null ? fmtEdgeBps(o.edge_bps, o.count) : fmtEdgeWithDollars(o.edge, o.count)}</td>
           <td class="num">$${cost}</td>
           <td><span class="${statusCls}">${o.status}</span></td>
@@ -960,7 +960,7 @@ async function refresh() {
           <td>${fmtPosition(f)}</td>
           <td class="num">${f.count}</td>
           <td class="num">${f.price_cents}¢</td>
-          <td class="num">${f.fair_value_cents != null ? f.fair_value_cents.toFixed(1) + '¢' : '-'}</td>
+          <td class="num">${f.fair_value_cents != null ? ((f.side && f.side.toLowerCase() === 'no') ? (100 - f.fair_value_cents).toFixed(1) : f.fair_value_cents.toFixed(1)) + '¢' : '-'}</td>
           <td class="num">${fmtEdgeBps(f.edge_bps, f.count)}</td>
           <td class="num">$${cost}</td>
           <td class="num">$${f.fee_dollars.toFixed(2)}</td>

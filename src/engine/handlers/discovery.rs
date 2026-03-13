@@ -21,10 +21,11 @@ pub async fn discover_new_markets(
 ) {
     let (today, _, date_tags) = today_and_tomorrow_tags();
     let mut kalshi_events = fetch_all_kalshi_cbb_events(kalshi_rest).await;
+    // Build volume map BEFORE filtering so cached mapper entries from yesterday get volume.
+    let kalshi_volume = build_kalshi_volume(&kalshi_events);
     filter_events_for_dates(&mut kalshi_events, &date_tags);
 
     let kalshi_for_matching = build_kalshi_for_matching(&kalshi_events);
-    let kalshi_volume = build_kalshi_volume(&kalshi_events);
 
     // Snapshot already-mapped tickers before acquiring the mapper write lock
     let already_mapped: std::collections::HashSet<String> = {
@@ -35,6 +36,18 @@ pub async fn discover_new_markets(
     let has_new = kalshi_for_matching
         .iter()
         .any(|(_, _, markets)| markets.iter().any(|(ticker, _)| !already_mapped.contains(ticker)));
+
+    // Refresh volume for all existing markets (data already fetched)
+    {
+        let mut s = state.lock().await;
+        for game in s.game_state.games.values_mut() {
+            for market in &mut game.kalshi_markets {
+                if let Some(&vol) = kalshi_volume.get(&market.ticker) {
+                    market.volume = Some(vol);
+                }
+            }
+        }
+    }
 
     if !has_new {
         return;
@@ -114,7 +127,7 @@ pub async fn discover_new_markets(
                 let book = books
                     .entry(ticker.clone())
                     .or_insert_with(|| crate::kalshi::orderbook::LocalOrderBook::new(ticker.clone()));
-                book.apply_snapshot(&snapshot);
+                book.apply_snapshot(&snapshot, None);
                 tracing::info!("Discovery: seeded orderbook for {} via REST", ticker);
             }
             Err(e) => {

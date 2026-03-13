@@ -479,6 +479,9 @@ pub struct OrderBookDelta {
     /// Kalshi sends "ts" as ISO-8601 string, not "timestamp" as integer.
     #[serde(default)]
     pub ts: Option<String>,
+    /// Sequence number from the WS envelope (set by WS handler after deserialization).
+    #[serde(skip)]
+    pub seq: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

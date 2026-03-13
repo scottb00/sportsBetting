@@ -15,6 +15,7 @@ pub enum KalshiWsEvent {
     OrderBookSnapshot {
         market_ticker: String,
         snapshot: OrderBookSnapshot,
+        seq: Option<i64>,
     },
     OrderBookDelta(OrderBookDelta),
     Trade(Trade),
@@ -237,6 +238,7 @@ impl KalshiWsClient {
                             let _ = tx.send(KalshiWsEvent::OrderBookSnapshot {
                                 market_ticker: ticker,
                                 snapshot,
+                                seq: msg.seq,
                             });
                         }
                     }
@@ -247,7 +249,8 @@ impl KalshiWsClient {
             }
             "orderbook_delta" => {
                 match serde_json::from_value::<OrderBookDelta>(data) {
-                    Ok(delta) => {
+                    Ok(mut delta) => {
+                        delta.seq = msg.seq;
                         let _ = tx.send(KalshiWsEvent::OrderBookDelta(delta));
                     }
                     Err(e) => {

@@ -142,24 +142,12 @@ pub fn create_bot_state(config: &Config) -> Result<(BotState, TradeLogger, Marke
 
 /// Build the strategy registry from config.
 pub fn create_strategies(config: &Config) -> StrategyRegistry {
-    use crate::strategies::break_ev::BreakEvQuoter;
-    use crate::strategies::clv_hunter::ClvHunter;
-    use crate::strategies::position_closer::PositionCloser;
+    use crate::strategies::passive_espn::PassiveEspn;
 
     let strategies: Vec<Box<dyn Strategy>> = vec![
-        Box::new(BreakEvQuoter::new(
-            config.strategy.break_ev_min_edge,
-            config.strategy.contracts_per_pct_edge,
-            config.strategy.min_trade_contracts,
-            config.strategy.max_contracts_per_order,
-        )),
-        Box::new(ClvHunter::new(
+        Box::new(PassiveEspn::new(
             config.strategy.clv_hunter_min_edge,
-            config.strategy.contracts_per_pct_edge,
-            config.strategy.min_trade_contracts,
-            config.strategy.max_contracts_per_order,
-        )),
-        Box::new(PositionCloser::new(
+            config.strategy.break_ev_min_edge,
             config.strategy.contracts_per_pct_edge,
             config.strategy.min_trade_contracts,
             config.strategy.max_contracts_per_order,

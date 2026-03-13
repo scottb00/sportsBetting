@@ -1,7 +1,13 @@
+use std::sync::Arc;
 use crate::engine::bot::{SharedState, SharedOrderBooks, SharedLogger};
 use crate::engine::logger::GameInfo;
 use crate::engine::risk::RiskManager;
+use crate::kalshi::orderbook::DeltaResult;
+use crate::kalshi::rest::KalshiRestClient;
 use crate::kalshi::websocket::KalshiWsEvent;
+
+/// Minimum interval between REST resnapshots for the same ticker.
+const RESNAPSHOT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Handle a Kalshi WebSocket event.
 pub async fn handle_kalshi_event(
@@ -9,21 +15,61 @@ pub async fn handle_kalshi_event(
     state: &SharedState,
     order_books: &SharedOrderBooks,
     logger: &SharedLogger,
+    kalshi_rest: &Arc<KalshiRestClient>,
 ) {
     match event {
-        KalshiWsEvent::OrderBookSnapshot { market_ticker, snapshot } => {
+        KalshiWsEvent::OrderBookSnapshot { market_ticker, snapshot, seq } => {
             let mut books = order_books.write().await;
             let book = books
                 .entry(market_ticker.clone())
                 .or_insert_with(|| crate::kalshi::orderbook::LocalOrderBook::new(market_ticker.clone()));
-            book.apply_snapshot(&snapshot);
+            book.apply_snapshot(&snapshot, seq);
             tracing::debug!("Book snapshot for {}", market_ticker);
         }
         KalshiWsEvent::OrderBookDelta(delta) => {
             let ticker = delta.market_ticker.clone();
-            let mut books = order_books.write().await;
-            if let Some(book) = books.get_mut(&ticker) {
-                book.apply_delta(&delta);
+            let needs_resnapshot = {
+                let mut books = order_books.write().await;
+                if let Some(book) = books.get_mut(&ticker) {
+                    match book.apply_delta(&delta) {
+                        DeltaResult::NeedsResnapshot(reason) => {
+                            // Check cooldown to avoid resnapshot storms
+                            let should = book.last_resnapshot_at
+                                .is_none_or(|t| t.elapsed() > RESNAPSHOT_COOLDOWN);
+                            if should {
+                                book.last_resnapshot_at = Some(std::time::Instant::now());
+                                Some(reason)
+                            } else {
+                                tracing::debug!("Resnapshot cooldown active for {}, skipping", ticker);
+                                None
+                            }
+                        }
+                        DeltaResult::Ok => None,
+                    }
+                } else {
+                    None
+                }
+            };
+
+            if let Some(reason) = needs_resnapshot {
+                tracing::warn!("Book resnapshot needed for {}: {}", ticker, reason);
+                let rest = kalshi_rest.clone();
+                let books = order_books.clone();
+                let t = ticker.clone();
+                tokio::spawn(async move {
+                    match rest.get_orderbook(&t).await {
+                        Ok(snapshot) => {
+                            let mut books = books.write().await;
+                            if let Some(book) = books.get_mut(&t) {
+                                book.apply_snapshot(&snapshot, None);
+                                tracing::info!("Book resnapshot applied for {} (reason: {})", t, reason);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to resnapshot {}: {:?}", t, e);
+                        }
+                    }
+                });
             }
         }
         KalshiWsEvent::Fill(fill) => {

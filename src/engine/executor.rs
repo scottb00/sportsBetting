@@ -242,7 +242,7 @@ pub fn evaluate_strategies(
 
         for strategy in &registry.strategies {
             if !strategy.can_evaluate(game) {
-                if is_break && strategy.name() == "break_ev" {
+                if is_break {
                     if !game.is_tradeable_break() {
                         blocked_reason = Some("not tradeable break (team timeout?)".to_string());
                     } else if game.is_final_minutes(5.0) {
@@ -477,19 +477,21 @@ pub async fn execute_signal(
         }
     };
 
-    // Sanity checks — warn but do not block (validate in prod before circuit-breaking)
+    // Sanity checks — block orders that should never be placed
     let price = order_req.yes_price.or(order_req.no_price).unwrap_or(0);
     if !(1..=99).contains(&price) {
         tracing::warn!(
-            "ORDER ANOMALY: {} {} price={}c outside [1,99]",
+            "ORDER BLOCKED: {} {} price={}c outside [1,99]",
             signal.kalshi_ticker, signal.strategy, price,
         );
+        return None;
     }
-    if matches!(order_req.action, crate::kalshi::types::OrderAction::Buy) && signal.edge_after_fees < -0.001 {
+    if signal.edge_after_fees < 0.0 {
         tracing::warn!(
-            "ORDER ANOMALY: {} {} BUY with negative edge ({:.4}) — direction may be flipped",
+            "ORDER BLOCKED: {} {} negative edge ({:.4}) — refusing to place",
             signal.kalshi_ticker, signal.strategy, signal.edge_after_fees,
         );
+        return None;
     }
 
     // REST orderbook cross-check for break_ev orders: fetch fresh book via REST API
@@ -499,7 +501,7 @@ pub async fn execute_signal(
         match kalshi_rest.get_orderbook(&signal.kalshi_ticker).await {
             Ok(rest_snapshot) => {
                 let mut rest_book = LocalOrderBook::new(signal.kalshi_ticker.clone());
-                rest_book.apply_snapshot(&rest_snapshot);
+                rest_book.apply_snapshot(&rest_snapshot, None);
                 let rest_prices = extract_book_prices(&rest_book);
 
                 let ws_price = order_req.yes_price.or(order_req.no_price).unwrap_or(0);
@@ -573,7 +575,7 @@ pub async fn execute_signal(
                     let book = books
                         .entry(signal.kalshi_ticker.clone())
                         .or_insert_with(|| LocalOrderBook::new(signal.kalshi_ticker.clone()));
-                    book.apply_snapshot(&rest_snapshot);
+                    book.apply_snapshot(&rest_snapshot, None);
                 }
             }
             Err(e) => {
@@ -724,7 +726,7 @@ pub async fn execute_signal(
                 let mut s = state.lock().await;
 
                 // Track CLV orders for closing-line validation
-                if signal.strategy == "clv_hunter" {
+                if signal.strategy == "pregame" {
                     s.order_manager.record_clv_order(
                         &resp.order.order_id,
                         &signal.kalshi_ticker,

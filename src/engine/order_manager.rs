@@ -291,8 +291,8 @@ impl OrderManager {
             if self.clv_orders.contains_key(order_id) {
                 continue;
             }
-            // Only recover CLV orders (placed by clv_hunter strategy)
-            if self.order_strategies.get(order_id).map(|s| s.as_str()) != Some("clv_hunter") {
+            // Only recover CLV orders (placed by pregame strategy)
+            if self.order_strategies.get(order_id).map(|s| s.as_str()) != Some("pregame") {
                 continue;
             }
             let price_cents = order.yes_price.or(order.no_price).unwrap_or(0);
