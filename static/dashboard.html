@@ -284,7 +284,6 @@
         <th>Pre</th>
         <th>Close</th>
         <th>Position</th>
-        <th class="num">Qty</th>
         <th class="num">Price</th>
         <th class="num">Fair</th>
         <th class="num">Edge</th>
@@ -329,7 +328,6 @@
         <th>Pre</th>
         <th>Close</th>
         <th>Position</th>
-        <th class="num">Qty</th>
         <th class="num">Price</th>
         <th class="num">Fair</th>
         <th class="num">Edge</th>
@@ -503,9 +501,22 @@ function fmtPosition(o) {
   // Buy YES or Sell NO = long the YES team; Buy NO or Sell YES = long the NO team
   const longYesTeam = (isBuy === isYes);
   const team = (longYesTeam === o.is_home) ? o.home_team : o.away_team;
-  const sideLabel = isYes ? 'YES' : 'NO';
-  const direction = isBuy ? 'Buy' : 'Sell';
-  return `<span class="pos-badge pos-neutral">${o.count} ${direction} ${sideLabel} <span style="font-size:10px;opacity:0.7">${team}</span></span>`;
+  const dir = longYesTeam ? 'Long' : 'Short';
+  const cls = longYesTeam ? 'edge-pos' : 'edge-neg';
+  return `<span class="${cls}" style="font-weight:600">${dir} ${o.count}</span> <span style="font-size:10px;opacity:0.7">${team}</span>`;
+}
+// Fair value adjusted to the order's traded side: if buying NO, show 100 - fair_value_cents.
+// This way the user can directly compare price vs fair to see if the trade has edge.
+function sideAdjustedFair(o) {
+  if (o.fair_value_cents == null) return null;
+  const isYes = o.side.toLowerCase() === 'yes';
+  return isYes ? o.fair_value_cents : (100 - o.fair_value_cents);
+}
+// Format the side-adjusted fair value for display
+function fmtSideFair(o) {
+  const fair = sideAdjustedFair(o);
+  if (fair == null) return '-';
+  return fair.toFixed(1) + '¢';
 }
 // Format strategy type badge + close tag (legacy combined)
 function fmtTypeBadge(strategy, isClose) {
@@ -1040,7 +1051,7 @@ async function refresh() {
     });
     const op = paginate(filtered, 'orders');
     if (filtered.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="13" class="empty">No orders match filters</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="12" class="empty">No orders match filters</td></tr>';
     } else {
       tbody.innerHTML = op.rows.map(o => {
         const statusCls = `status status-${o.status}`;
@@ -1052,9 +1063,8 @@ async function refresh() {
           <td>${fmtPreBadge(o.strategy)}</td>
           <td>${fmtCloseBadge(o.is_close)}</td>
           <td>${fmtPosition(o)}</td>
-          <td class="num">${o.count}</td>
           <td class="num">${o.price_cents}¢</td>
-          <td class="num">${o.fair_value_cents != null ? o.fair_value_cents.toFixed(1) + '¢' : '-'}</td>
+          <td class="num">${fmtSideFair(o)}</td>
           <td class="num">${o.edge_bps != null ? fmtEdgeBps(o.edge_bps, o.count) : fmtEdgeWithDollars(o.edge, o.count)}</td>
           <td class="num">${fmtOrderSpread(o)}</td>
           <td class="num">${fmtConvBadge(o.conviction_score, o.conviction_details)}</td>
@@ -1080,7 +1090,7 @@ async function refresh() {
     });
     const fp = paginate(filtered, 'fills');
     if (filtered.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="15" class="empty">No fills match filters</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="14" class="empty">No fills match filters</td></tr>';
     } else {
       tbody.innerHTML = fp.rows.map(f => {
         const gameLabel = f.game_name || f.ticker;
@@ -1109,9 +1119,8 @@ async function refresh() {
           <td>${fmtPreBadge(f.strategy)}</td>
           <td>${fmtCloseBadge(f.is_close)}</td>
           <td>${fmtPosition(f)}</td>
-          <td class="num">${f.count}</td>
           <td class="num">${f.price_cents}¢</td>
-          <td class="num">${f.fair_value_cents != null ? f.fair_value_cents.toFixed(1) + '¢' : '-'}</td>
+          <td class="num">${fmtSideFair(f)}</td>
           <td class="num">${fmtEdgeBps(f.edge_bps, f.count)}</td>
           <td class="num">${fmtOrderSpread(f)}</td>
           <td class="num">${fmtConvBadge(f.conviction_score, f.conviction_details)}</td>

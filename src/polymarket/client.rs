@@ -113,15 +113,17 @@ impl PolymarketClient {
             .await
             .context("Failed to parse Polymarket book")?;
 
+        // CLOB API returns bids ascending (worst→best) and asks descending (worst→best),
+        // so best bid = last bid, best ask = last ask.
         let best_bid = resp.get("bids")
             .and_then(|v| v.as_array())
-            .and_then(|a| a.first())
+            .and_then(|a| a.last())
             .and_then(|b| b.get("price"))
             .and_then(|v| v.as_str().and_then(|s| s.parse::<f64>().ok()));
 
         let best_ask = resp.get("asks")
             .and_then(|v| v.as_array())
-            .and_then(|a| a.first())
+            .and_then(|a| a.last())
             .and_then(|b| b.get("price"))
             .and_then(|v| v.as_str().and_then(|s| s.parse::<f64>().ok()));
 

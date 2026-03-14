@@ -92,7 +92,7 @@ fn conviction_to_contracts(score: f64, tiers: &[(f64, i64)], max_contracts: i64)
 }
 
 /// Format conviction details as a JSON array string for DB logging.
-fn format_conviction_details(details: &[(String, crate::sportsbooks::types::BookConviction, f64)]) -> String {
+pub fn format_conviction_details(details: &[(String, crate::sportsbooks::types::BookConviction, f64)]) -> String {
     use crate::sportsbooks::types::BookConviction;
     let entries: Vec<String> = details.iter().map(|(book, conv, weight)| {
         let label = match conv {

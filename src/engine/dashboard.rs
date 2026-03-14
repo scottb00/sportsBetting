@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::engine::bot::{SharedState, SharedOrderBooks, SharedLogger, SharedBreakLog, SharedPolyBooks};
 use crate::engine::market_prep::book_prices;
 use crate::engine::venue::KALSHI_FEE_RATE;
-use crate::strategies::common::compute_edge_and_alo;
+use crate::strategies::common::{compute_edge_and_alo, format_conviction_details};
 use crate::sportsbooks::types::SportsbookSpread;
 
 /// Shared state for the dashboard server.
@@ -255,6 +255,8 @@ fn compute_market_conviction(
     bid: Option<f64>,
     ask: Option<f64>,
     is_home: bool,
+    short_break: bool,
+    break_started_at: Option<i64>,
 ) -> (Option<f64>, Option<String>) {
     let spread = match spread {
         Some(s) if s.fresh_count > 0 => s,
@@ -276,10 +278,10 @@ fn compute_market_conviction(
         edge_result.alo_price,
         edge_result.buying_yes,
         is_home,
-        false, // dashboard doesn't distinguish break type
-        None,  // no break filter for dashboard display
+        short_break,
+        break_started_at,
     );
-    let details = format!("{}", conv);
+    let details = format_conviction_details(&conv.details);
     (Some(conv.score), Some(details))
 }
 
@@ -292,17 +294,21 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
         s.game_state.games.values()
             .filter(|g| {
                 !g.home_team.eq_ignore_ascii_case("TBD") && !g.away_team.eq_ignore_ascii_case("TBD")
+                    && !matches!(g.phase, crate::espn::types::GamePhase::Final)
             })
             .map(|g| {
                 let markets = g.kalshi_markets.iter().map(|m| {
                     let prices = book_prices(&books, &m.ticker);
                     // Compute live conviction if we have spread data and can determine ALO/direction
+                    let short_break = matches!(g.phase, crate::espn::types::GamePhase::Break);
                     let (conv_score, conv_details) = compute_market_conviction(
                         g.sportsbook_spread.as_ref(),
                         g.fair_value_for_market(m),
                         prices.bid,
                         prices.ask,
                         m.is_home,
+                        short_break,
+                        g.break_started_at,
                     );
                     MarketSnapshot {
                         ticker: m.ticker.clone(),

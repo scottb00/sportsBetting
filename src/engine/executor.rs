@@ -229,9 +229,10 @@ pub fn evaluate_strategies(
                 let (conv_score, conv_details, has_veto) = if let (Some(spread), Some(alo)) = (game.sportsbook_spread.as_ref(), alo_price) {
                     if spread.fresh_count > 0 {
                         let buying_yes = side.as_deref() == Some("YES");
-                        let conv = spread.conviction_score(alo, buying_yes, market.is_home, false, None);
+                        let short_break = matches!(game.phase, crate::espn::types::GamePhase::Break);
+                        let conv = spread.conviction_score(alo, buying_yes, market.is_home, short_break, game.break_started_at);
                         let veto = conv.any_disagree;
-                        (Some(conv.score), Some(format!("{}", conv)), veto)
+                        (Some(conv.score), Some(crate::strategies::common::format_conviction_details(&conv.details)), veto)
                     } else {
                         (None, None, false)
                     }
