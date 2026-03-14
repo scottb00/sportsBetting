@@ -9,3 +9,4 @@ pub mod market_prep;
 pub mod notifier;
 pub mod order_manager;
 pub mod risk;
+pub mod venue;

@@ -6,6 +6,7 @@ use crate::engine::game_state::GameState;
 use crate::engine::market_prep::{book_prices, extract_book_prices};
 use crate::engine::order_manager::{OrderManager, OrderSignal};
 use crate::engine::risk::RiskManager;
+use crate::engine::venue::KALSHI_FEE_RATE;
 use crate::kalshi::orderbook::LocalOrderBook;
 use crate::kalshi::rest::KalshiRestClient;
 use crate::strategies::common::compute_edge_and_alo;
@@ -196,7 +197,7 @@ pub fn evaluate_strategies(
                 // Compute ALO price and edge for the eval log
                 let (alo_price, edge_raw, edge_after_fees, side) =
                     if let (Some(fv), Some(bid), Some(ask)) = (fair, prices.bid, prices.ask) {
-                        match compute_edge_and_alo(bid as i64, ask as i64, fv, 1) {
+                        match compute_edge_and_alo(bid as i64, ask as i64, fv, 1, KALSHI_FEE_RATE) {
                             Some(r) => (
                                 Some(r.alo_price),
                                 Some(r.edge_raw),
@@ -312,8 +313,9 @@ pub fn evaluate_strategies(
                     continue;
                 }
 
-                // Apply contract cap: reduce orders use reduce_cap, regular use regular_remaining.
-                let max_contracts = if is_reduce { avail.reduce_cap } else { avail.regular_remaining };
+                // Apply contract cap: reduce orders get reduce_cap + regular_remaining (allows position flips),
+                // regular orders get only regular_remaining.
+                let max_contracts = if is_reduce { avail.reduce_cap + avail.regular_remaining } else { avail.regular_remaining };
                 if max_contracts == 0 {
                     if is_break {
                         blocked_reason = Some("at contract cap".to_string());
@@ -452,6 +454,8 @@ pub struct PlacedOrder {
     pub current_pos: i64,
     /// Signed YES-position after the order (if filled)
     pub target_pos: i64,
+    /// Weighted conviction score from sportsbook consensus (if computed).
+    pub conviction_score: Option<f64>,
 }
 
 /// Execute an order signal via Kalshi REST API (or log if dry_run).
@@ -506,7 +510,7 @@ pub async fn execute_signal(
         let game_committed = net_home_committed.unsigned_abs() as i64;
         let regular_remaining = (max_contracts_per_game - game_committed).max(0);
 
-        let contracts_remaining = if is_reduce { reduce_cap } else { regular_remaining };
+        let contracts_remaining = if is_reduce { reduce_cap + regular_remaining } else { regular_remaining };
         if contracts_remaining <= 0 {
             tracing::info!(
                 "Skipping {} signal on {}: contract limit reached (reduce={}, reduce_cap={}, regular_remaining={})",
@@ -585,7 +589,7 @@ pub async fn execute_signal(
                         // Significant drift — re-evaluate edge with fresh REST book
                         if let Some(fair_cents) = signal.fair_value_cents {
                             let fair = fair_cents as f64 / 100.0;
-                            match compute_edge_and_alo(rest_bid_i, rest_ask_i, fair, 1) {
+                            match compute_edge_and_alo(rest_bid_i, rest_ask_i, fair, 1, KALSHI_FEE_RATE) {
                                 Some(result) if result.edge_after_fees > 0.0 => {
                                     tracing::info!(
                                         "Book drift: {} repricing from {}c to {}c (REST), edge {:.4} -> {:.4}",
@@ -691,7 +695,7 @@ pub async fn execute_signal(
             let side_str = format!("{:?}", order_req.side);
 
             // Collect game_info, sportsbook odds, and display fields under state lock, then drop before logging
-            let (game_info, sportsbook_odds_json, game_label, score, clock, yes_team, current_pos, target_pos) = {
+            let (game_info, sportsbook_odds_json, game_label, score, clock, yes_team, current_pos, target_pos, spread_bid, spread_offer, spread_count) = {
                 let s = state.lock().await;
                 // Snapshot fresh sportsbook odds at order time
                 let sb_json = s.game_state.get_by_kalshi_ticker(&signal.kalshi_ticker)
@@ -754,7 +758,13 @@ pub async fn execute_signal(
                 } else {
                     (signal.kalshi_ticker.clone(), String::new(), String::new(), String::new())
                 };
-                (gi, sb_json, label, sc, cl, yes_t, current, target)
+                // Snapshot sportsbook spread at order time
+                let (sb_bid, sb_offer, sb_count) = s.game_state.get_by_kalshi_ticker(&signal.kalshi_ticker)
+                    .and_then(|game| game.sportsbook_spread.as_ref().map(|spread| {
+                        (spread.best_bid_home, spread.best_offer_home, spread.fresh_count)
+                    }))
+                    .unwrap_or((None, None, 0));
+                (gi, sb_json, label, sc, cl, yes_t, current, target, sb_bid, sb_offer, sb_count)
             };
 
             // Log under logger lock only (no state lock held)
@@ -776,6 +786,9 @@ pub async fn execute_signal(
                     sportsbook_odds_json.as_deref(),
                     signal.conviction_score,
                     signal.conviction_details.as_deref(),
+                    spread_bid,
+                    spread_offer,
+                    Some(spread_count),
                 ) {
                     tracing::warn!("Failed to log order {}: {:?}", resp.order.order_id, e);
                 }
@@ -815,6 +828,7 @@ pub async fn execute_signal(
                 yes_team,
                 current_pos,
                 target_pos,
+                conviction_score: signal.conviction_score,
             })
         }
         Err(e) => {

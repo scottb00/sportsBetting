@@ -26,13 +26,15 @@ impl RiskManager {
 
     /// Calculate Kalshi maker fee in cents (1.75% rate).
     pub fn maker_fee(contracts: i64, price_cents: i64) -> f64 {
-        Self::kalshi_fee(0.0175, contracts, price_cents)
+        Self::venue_fee(0.0175, contracts, price_cents)
     }
 
-    /// Kalshi fee formula in cents: ceil(rate * contracts * price_cents * (100 - price_cents) / 100)
-    fn kalshi_fee(rate: f64, contracts: i64, price_cents: i64) -> f64 {
+    /// Fee formula in cents for a given rate: ceil(rate * contracts * price_cents * (100 - price_cents) / 100).
+    /// Negative rates (e.g. Polymarket rebate) return negative values (a rebate).
+    pub fn venue_fee(rate: f64, contracts: i64, price_cents: i64) -> f64 {
         let p = price_cents as f64;
-        (rate * contracts as f64 * p * (100.0 - p) / 100.0).ceil()
+        let raw = rate * contracts as f64 * p * (100.0 - p) / 100.0;
+        if rate >= 0.0 { raw.ceil() } else { raw.floor() }
     }
 
     /// Record a fill — track entry price for P&L computation.

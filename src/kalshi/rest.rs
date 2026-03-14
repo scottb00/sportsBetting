@@ -215,4 +215,12 @@ impl KalshiRestClient {
         let markets = resp.get("markets").cloned().unwrap_or(serde_json::Value::Array(vec![]));
         serde_json::from_value(markets).context("Failed to parse markets search result")
     }
+
+    /// Fetch all series, optionally filtered by category.
+    pub async fn get_series_list(&self, category: Option<&str>) -> Result<GetSeriesListResponse> {
+        let query = Self::build_query(&[
+            ("category", category.map(|s| s.to_string())),
+        ]);
+        self.get(&format!("/series{}", query)).await
+    }
 }

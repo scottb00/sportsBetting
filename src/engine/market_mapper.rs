@@ -179,6 +179,11 @@ impl MarketMapper {
         self.kalshi_to_espn.keys().cloned().collect()
     }
 
+    /// Return all current mappings.
+    pub fn all_mappings(&self) -> Vec<&MarketMapping> {
+        self.by_espn.values().collect()
+    }
+
     /// Match markets to ESPN games using deterministic fuzzy matching.
     #[allow(clippy::type_complexity)]
     pub fn resolve_deterministic(
@@ -223,6 +228,9 @@ impl MarketMapper {
             }
 
             if kalshi_match.is_some() || poly_match.is_some() {
+                // Preserve existing mapping data that isn't being updated
+                let existing = self.by_espn.get(espn_id.as_str());
+
                 let espn_home = espn_name.split(" @ ").nth(1).unwrap_or("");
                 let kalshi_markets = if let Some((_, _, ref markets)) = kalshi_match {
                     markets.iter().map(|(ticker, yes_sub)| {
@@ -237,17 +245,26 @@ impl MarketMapper {
                         }
                     }).collect()
                 } else {
-                    vec![]
+                    // Preserve existing Kalshi markets if we didn't match new ones
+                    existing.map(|e| e.kalshi_markets.clone()).unwrap_or_default()
                 };
+
+                // Preserve existing Polymarket data if we didn't match new ones
+                let poly_token = poly_match.as_ref().map(|(t, _)| t.clone())
+                    .or_else(|| existing.and_then(|e| e.polymarket_token_id.clone()));
+                let poly_title = poly_match.as_ref().map(|(_, t)| t.clone())
+                    .or_else(|| existing.and_then(|e| e.polymarket_title.clone()));
 
                 let mapping = MarketMapping {
                     espn_event_id: espn_id.clone(),
                     espn_name: espn_name.clone(),
-                    kalshi_event_ticker: kalshi_match.as_ref().map(|(t, _, _)| t.clone()),
-                    kalshi_title: kalshi_match.as_ref().map(|(_, t, _)| t.clone()),
+                    kalshi_event_ticker: kalshi_match.as_ref().map(|(t, _, _)| t.clone())
+                        .or_else(|| existing.and_then(|e| e.kalshi_event_ticker.clone())),
+                    kalshi_title: kalshi_match.as_ref().map(|(_, t, _)| t.clone())
+                        .or_else(|| existing.and_then(|e| e.kalshi_title.clone())),
                     kalshi_markets,
-                    polymarket_token_id: poly_match.as_ref().map(|(t, _)| t.clone()),
-                    polymarket_title: poly_match.as_ref().map(|(_, t)| t.clone()),
+                    polymarket_token_id: poly_token,
+                    polymarket_title: poly_title,
                 };
                 self.insert_mapping(mapping);
                 matched_count += 1;

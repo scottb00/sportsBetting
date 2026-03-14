@@ -4,6 +4,7 @@ use crate::engine::game_state::{GameState, KalshiMarketState};
 use crate::engine::market_prep::extract_book_prices;
 use crate::engine::order_manager::OrderSignal;
 use crate::engine::risk::RiskManager;
+use crate::engine::venue::KALSHI_FEE_RATE;
 use crate::espn::types::GamePhase;
 use crate::kalshi::orderbook::LocalOrderBook;
 use crate::kalshi::types::{OrderAction, OrderSide};
@@ -23,9 +24,10 @@ pub struct EdgeResult {
 
 /// Compute edge and ALO price given book prices (YES bid/ask) and a fair value.
 ///
+/// `fee_rate` is the maker fee rate (e.g. 0.0175 for Kalshi, -0.001 for Polymarket rebate).
 /// Returns `None` if the book is invalid or there is no positive raw edge.
 /// Does NOT apply any minimum-edge threshold — callers decide that.
-pub fn compute_edge_and_alo(yes_bid: i64, yes_ask: i64, fair_value: f64, contracts: i64) -> Option<EdgeResult> {
+pub fn compute_edge_and_alo(yes_bid: i64, yes_ask: i64, fair_value: f64, contracts: i64, fee_rate: f64) -> Option<EdgeResult> {
     if yes_bid <= 0 || yes_ask >= 100 || yes_bid >= yes_ask {
         return None;
     }
@@ -57,7 +59,7 @@ pub fn compute_edge_and_alo(yes_bid: i64, yes_ask: i64, fair_value: f64, contrac
     }
 
     let n = contracts.max(1);
-    let fee_per_contract = RiskManager::maker_fee(n, alo_price) / n as f64 / 100.0;
+    let fee_per_contract = RiskManager::venue_fee(fee_rate, n, alo_price) / n as f64 / 100.0;
     let edge_after_fees = edge_raw - fee_per_contract;
 
     Some(EdgeResult {
@@ -135,7 +137,7 @@ fn evaluate_market(
     let mut signal_conviction_score: Option<f64> = None;
     let mut signal_conviction_details: Option<String> = None;
 
-    let target_signed: i64 = if let Some(r) = compute_edge_and_alo(yes_bid, yes_ask, fair_value, 1) {
+    let target_signed: i64 = if let Some(r) = compute_edge_and_alo(yes_bid, yes_ask, fair_value, 1, KALSHI_FEE_RATE) {
         if r.edge_after_fees >= min_edge {
             // Conviction-based sizing: sportsbook consensus tiers
             let n = if let Some(spread) = &game.sportsbook_spread {
@@ -215,7 +217,7 @@ fn evaluate_market(
         let (side, action, alo, edge) = if target_signed > 0 {
             // Target is YES — buy YES
             let alo = (yes_ask - 1).max(1);
-            let edge = if let Some(r) = compute_edge_and_alo(yes_bid, yes_ask, fair_value, delta.abs()) {
+            let edge = if let Some(r) = compute_edge_and_alo(yes_bid, yes_ask, fair_value, delta.abs(), KALSHI_FEE_RATE) {
                 r.edge_after_fees
             } else {
                 return None;
@@ -224,7 +226,7 @@ fn evaluate_market(
         } else {
             // Target is NO (target_signed < 0) — buy NO
             let alo = (100 - yes_bid - 1).max(1);
-            let edge = if let Some(r) = compute_edge_and_alo(yes_bid, yes_ask, fair_value, delta.abs()) {
+            let edge = if let Some(r) = compute_edge_and_alo(yes_bid, yes_ask, fair_value, delta.abs(), KALSHI_FEE_RATE) {
                 r.edge_after_fees
             } else {
                 return None;
@@ -278,7 +280,7 @@ fn evaluate_market(
         let exposure_abs = net_game_aligned.unsigned_abs() as i64;
 
         // Compute edge in the close direction
-        let close_edge = compute_edge_and_alo(yes_bid, yes_ask, fair_value, exposure_abs)
+        let close_edge = compute_edge_and_alo(yes_bid, yes_ask, fair_value, exposure_abs, KALSHI_FEE_RATE)
             .filter(|r| {
                 // Edge must be in the close direction (buying opposite of game-level exposure)
                 (net_game_aligned > 0 && !r.buying_yes) || (net_game_aligned < 0 && r.buying_yes)

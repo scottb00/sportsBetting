@@ -194,6 +194,7 @@
       <dt>ESPN %</dt><dd> &mdash; ESPN's implied home-team win probability</dd>
       <dt>Book Spread</dt><dd> &mdash; Composite sportsbook bid/offer on home-team win prob (best across Pinnacle, DK, FD, etc.)</dd>
       <dt>Kalshi Bid/Ask</dt><dd> &mdash; Kalshi orderbook YES bid/ask, aligned to the home team</dd>
+      <dt>Poly Bid/Ask</dt><dd> &mdash; Polymarket best bid/ask, aligned to the home team (converted from decimal to cents)</dd>
       <dt>Edge</dt><dd> &mdash; Fair value minus Kalshi mid; shows which side (team name) has +EV</dd>
       <dt>Conv</dt><dd> &mdash; Sportsbook conviction score; weighted agreement across books. Click to expand per-book breakdown. Red=veto/0, Yellow=low(&lt;3), Green=strong(3+)</dd>
       <dt>Volume</dt><dd> &mdash; Total Kalshi contract volume across all tickers for this game</dd>
@@ -211,6 +212,7 @@
         <th class="num">ESPN %</th>
         <th class="num">Book Spread</th>
         <th class="num">Kalshi Bid/Ask</th>
+        <th class="num">Poly Bid/Ask</th>
         <th class="num">Edge</th>
         <th class="num">Conv</th>
         <th class="num">Volume</th>
@@ -920,7 +922,7 @@ async function refresh() {
 
     const gp = paginate(enriched, 'games');
     if (enriched.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="11" class="empty">No games match filters</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="12" class="empty">No games match filters</td></tr>';
     } else {
       tbody.innerHTML = gp.rows.map(g => {
         const score = g.home_score != null ? `${g.away_score}-${g.home_score}` : '-';
@@ -932,6 +934,7 @@ async function refresh() {
           <td class="num">${fmtPct(g.espn_home_win_prob)}</td>
           <td class="num">${fmtSpread(g)}</td>
           <td class="num">${g._bid != null || g._ask != null ? (g._bid != null ? g._bid.toFixed(0) : '-') + ' / ' + (g._ask != null ? g._ask.toFixed(0) : '-') : '-'}</td>
+          <td class="num">${g.poly_bid != null || g.poly_ask != null ? (g.poly_bid != null ? g.poly_bid : '-') + ' / ' + (g.poly_ask != null ? g.poly_ask : '-') : '<span style="color:#484f58">-</span>'}</td>
           <td class="num">${fmtEdgeWithDollars(g._edge, 1)}${(g.phase === 'Break' || g.phase === 'Halftime' || g.phase === 'Live') && g._evalResult ? '<br>' + fmtEvalBadge(g._evalResult, g._evalEdgeAfterFees, g._evalAloPrice) : ''}</td>
           <td class="num">${fmtConvBadge(g._convScore, g._convDetails)}</td>
           <td class="num">${g._vol > 0 ? g._vol.toLocaleString() : '-'}</td>

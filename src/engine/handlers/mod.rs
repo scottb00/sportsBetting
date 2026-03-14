@@ -17,7 +17,7 @@ pub use position_sync::reconcile_positions;
 pub use scoreboard::handle_scoreboard_tick;
 
 use std::sync::Arc;
-use crate::engine::bot::{SharedState, SharedOrderBooks, SharedMapper, SharedLogger, fetch_and_apply_summary};
+use crate::engine::bot::{SharedState, SharedOrderBooks, SharedPolyBooks, SharedMapper, SharedLogger, fetch_and_apply_summary};
 use crate::engine::notifier::Notifier;
 use crate::espn::poller::EspnPoller;
 use crate::kalshi::rest::KalshiRestClient;
@@ -29,6 +29,7 @@ use crate::sportsbooks::odds_api::OddsApiClient;
 pub async fn handle_maintenance_tick(
     state: &SharedState,
     order_books: &SharedOrderBooks,
+    poly_books: &SharedPolyBooks,
     logger: &SharedLogger,
     kalshi_rest: &Arc<KalshiRestClient>,
     espn_poller: &EspnPoller,
@@ -38,7 +39,7 @@ pub async fn handle_maintenance_tick(
     odds_api_client: Option<&OddsApiClient>,
 ) {
     cleanup_finished_games(state, order_books, logger, kalshi_rest).await;
-    discover_new_markets(kalshi_rest, espn_poller, state, order_books, mapper, ws_handle).await;
+    discover_new_markets(kalshi_rest, espn_poller, state, order_books, poly_books, mapper, ws_handle).await;
     refresh_missing_espn_probs(espn_poller, state).await;
     if let Some(odds_api) = odds_api_client {
         refresh_odds_api(odds_api, state).await;

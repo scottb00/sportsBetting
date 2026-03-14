@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::engine::bot::{SharedState, SharedOrderBooks, SharedMapper, populate_game_states, fetch_and_apply_summary};
+use crate::engine::bot::{SharedState, SharedOrderBooks, SharedPolyBooks, SharedMapper, PolymarketBook, populate_game_states, fetch_and_apply_summary};
 use crate::engine::market_prep::{
     build_espn_for_matching, build_kalshi_for_matching,
     build_kalshi_volume, filter_events_for_dates, fetch_all_kalshi_cbb_events,
@@ -9,6 +9,7 @@ use crate::engine::market_prep::{
 use crate::espn::poller::EspnPoller;
 use crate::kalshi::rest::KalshiRestClient;
 use crate::kalshi::websocket::KalshiWsHandle;
+use crate::polymarket::client::PolymarketClient;
 
 /// Discover new Kalshi markets that appeared after startup.
 pub async fn discover_new_markets(
@@ -16,6 +17,7 @@ pub async fn discover_new_markets(
     espn_poller: &EspnPoller,
     state: &SharedState,
     order_books: &SharedOrderBooks,
+    poly_books: &SharedPolyBooks,
     mapper: &SharedMapper,
     ws_handle: Option<&KalshiWsHandle>,
 ) {
@@ -49,11 +51,21 @@ pub async fn discover_new_markets(
         }
     }
 
-    if !has_new {
+    // Check if any games with Kalshi markets are missing Polymarket data.
+    // Only consider games that already have Kalshi coverage — games without
+    // either venue aren't actionable and shouldn't trigger re-fetching.
+    let has_missing_poly = {
+        let s = state.lock().await;
+        s.game_state.games.values().any(|g| g.has_kalshi() && g.polymarket_token_id.is_none())
+    };
+
+    if !has_new && !has_missing_poly {
         return;
     }
 
-    tracing::info!("Discovery: found new Kalshi events to map");
+    if has_new {
+        tracing::info!("Discovery: found new Kalshi events to map");
+    }
 
     let espn_games = match espn_poller.fetch_scoreboard().await {
         Ok(g) => g,
@@ -65,13 +77,42 @@ pub async fn discover_new_markets(
 
     let espn_for_matching = build_espn_for_matching(&espn_games);
 
+    // Fetch Polymarket events for matching (covers newly-created markets)
+    let poly_client = PolymarketClient::new();
+    let (_, tomorrow, _) = today_and_tomorrow_tags();
+    let is_today_or_tomorrow = |s: &str| s.starts_with(&today) || s.starts_with(&tomorrow);
+    let poly_for_matching: Vec<(String, String)> = match poly_client.fetch_cbb_events().await {
+        Ok(poly_events) => {
+            poly_events
+                .iter()
+                .filter(|e| {
+                    e.event_date.as_deref().map_or_else(
+                        || e.markets.iter().any(|m| m.game_start_time.as_deref().is_some_and(&is_today_or_tomorrow)),
+                        &is_today_or_tomorrow,
+                    )
+                })
+                .flat_map(|e| {
+                    e.markets.iter().filter_map(|m| {
+                        if m.sports_market_type.as_deref() != Some("moneyline") { return None; }
+                        let token_id = m.parsed_token_ids().map(|(yes, _)| yes)?;
+                        Some((token_id, m.question.clone()))
+                    })
+                })
+                .collect()
+        }
+        Err(e) => {
+            tracing::warn!("Discovery: Polymarket fetch failed: {:?}", e);
+            vec![]
+        }
+    };
+
     // Lock mapper first, then state (consistent ordering to prevent deadlocks)
     let mut m = mapper.lock().await;
 
     if let Err(e) = m.resolve_deterministic(
         &espn_for_matching,
         &kalshi_for_matching,
-        &[],
+        &poly_for_matching,
         &today,
     ) {
         tracing::warn!("Discovery: mapping failed: {:?}", e);
@@ -132,6 +173,43 @@ pub async fn discover_new_markets(
             }
             Err(e) => {
                 tracing::warn!("Discovery: failed to fetch orderbook for {}: {:?}", ticker, e);
+            }
+        }
+    }
+
+    // Seed Polymarket books via REST for new tokens
+    let new_poly_tokens: Vec<String> = {
+        let s = state.lock().await;
+        new_event_ids.iter()
+            .filter_map(|eid| {
+                s.game_state.get(eid)
+                    .and_then(|g| g.polymarket_token_id.clone())
+            })
+            .collect()
+    };
+    if !new_poly_tokens.is_empty() {
+        let poly_client = PolymarketClient::new();
+        for token_id in &new_poly_tokens {
+            match poly_client.fetch_book(token_id).await {
+                Ok((best_bid, best_ask)) => {
+                    let bid_cents = best_bid.filter(|&p| p > 0.0 && p < 1.0).map(|p| (p * 100.0).round() as i64);
+                    let ask_cents = best_ask.filter(|&p| p > 0.0 && p < 1.0).map(|p| (p * 100.0).round() as i64);
+                    if bid_cents.is_some() || ask_cents.is_some() {
+                        let mut books = poly_books.write().await;
+                        let book = books.entry(token_id.clone()).or_insert_with(|| PolymarketBook {
+                            best_bid: None,
+                            best_ask: None,
+                            last_updated: std::time::Instant::now(),
+                        });
+                        book.best_bid = bid_cents;
+                        book.best_ask = ask_cents;
+                        book.last_updated = std::time::Instant::now();
+                        tracing::info!("Discovery: seeded Polymarket book for {}", token_id);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Discovery: failed to fetch Polymarket book for {}: {:?}", token_id, e);
+                }
             }
         }
     }

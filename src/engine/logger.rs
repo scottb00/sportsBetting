@@ -113,6 +113,15 @@ impl TradeLogger {
         let _ = conn.execute_batch("ALTER TABLE fills ADD COLUMN excluded INTEGER DEFAULT 0");
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN conviction_score REAL");
         let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN conviction_details TEXT");
+        // Venue support: track which venue each order/fill was placed on.
+        let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN venue TEXT DEFAULT 'kalshi'");
+        let _ = conn.execute_batch("ALTER TABLE fills ADD COLUMN venue TEXT DEFAULT 'kalshi'");
+        // Venue comparison: JSON blob with both venues' bid/ask/edge at order time.
+        let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN venue_comparison TEXT");
+        // Sportsbook spread at order placement time (snapshot, not live).
+        let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN spread_bid_home REAL");
+        let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN spread_offer_home REAL");
+        let _ = conn.execute_batch("ALTER TABLE orders ADD COLUMN spread_books_count INTEGER");
 
         Ok(Self { conn })
     }
@@ -135,10 +144,13 @@ impl TradeLogger {
         sportsbook_odds: Option<&str>,
         conviction_score: Option<f64>,
         conviction_details: Option<&str>,
+        spread_bid_home: Option<f64>,
+        spread_offer_home: Option<f64>,
+        spread_books_count: Option<usize>,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps, fair_value_cents, is_close, game_name, home_team, away_team, is_home, sportsbook_odds, conviction_score, conviction_details, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?15, ?11, ?12, ?13, ?14, ?16, ?17, ?18, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            "INSERT INTO orders (order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps, fair_value_cents, is_close, game_name, home_team, away_team, is_home, sportsbook_odds, conviction_score, conviction_details, spread_bid_home, spread_offer_home, spread_books_count, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?15, ?11, ?12, ?13, ?14, ?16, ?17, ?18, ?19, ?20, ?21, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
              ON CONFLICT(order_id) DO UPDATE SET
                strategy = ?3,
                action = ?4,
@@ -155,7 +167,10 @@ impl TradeLogger {
                is_home = COALESCE(?14, is_home),
                sportsbook_odds = COALESCE(?16, sportsbook_odds),
                conviction_score = COALESCE(?17, conviction_score),
-               conviction_details = COALESCE(?18, conviction_details)",
+               conviction_details = COALESCE(?18, conviction_details),
+               spread_bid_home = COALESCE(?19, spread_bid_home),
+               spread_offer_home = COALESCE(?20, spread_offer_home),
+               spread_books_count = COALESCE(?21, spread_books_count)",
             rusqlite::params![
                 order_id, ticker, strategy, action, side, price_cents, count, status, edge_bps,
                 fair_value_cents,
@@ -167,6 +182,9 @@ impl TradeLogger {
                 sportsbook_odds,
                 conviction_score,
                 conviction_details,
+                spread_bid_home,
+                spread_offer_home,
+                spread_books_count.map(|c| c as i64),
             ],
         )?;
         Ok(())

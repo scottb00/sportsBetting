@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::engine::bot::{SharedState, SharedLogger};
-use crate::engine::notifier::{FillInfo, Notifier};
+use crate::engine::notifier::Notifier;
 use crate::kalshi::rest::KalshiRestClient;
 
 /// Sync fills from Kalshi REST API into the local SQLite database.
@@ -151,28 +151,7 @@ pub async fn sync_fills(state: &SharedState, logger: &SharedLogger, kalshi_rest:
 
     // Send Telegram notification for genuinely new fills (not already seen via WS)
     if let Some(notifier) = notifier && !new_fill_indices.is_empty() {
-        let daily_pnl = {
-            let log = logger.lock().unwrap();
-            log.daily_realized_pnl().unwrap_or(0.0)
-        };
-        let fill_infos: Vec<FillInfo> = new_fill_indices.iter().map(|&i| {
-            let fill = &fills[i];
-            let price_cents = if fill.side == "yes" { fill.yes_price } else { fill.no_price };
-            let fee_dollars = fill.fee_cost.unwrap_or(0.0);
-            let game_name = fill_data.iter()
-                .find(|(idx, ..)| *idx == i)
-                .and_then(|(_, _, _, gi, _)| gi.as_ref())
-                .map(|gi| gi.game_name.clone());
-            FillInfo {
-                ticker: fill.ticker.clone(),
-                side: fill.side.clone(),
-                action: fill.action.clone(),
-                price_cents,
-                count: fill.count,
-                fee_dollars,
-                game_name,
-            }
-        }).collect();
-        notifier.notify_fills(&fill_infos, daily_pnl).await;
+        // Fill notifications disabled — only max-conviction order placements notify via Telegram
+        let _ = notifier;
     }
 }

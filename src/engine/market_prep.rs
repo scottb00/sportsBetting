@@ -5,36 +5,15 @@ use crate::kalshi::orderbook::LocalOrderBook;
 use crate::kalshi::rest::KalshiRestClient;
 use crate::kalshi::types::{Event, GetEventsResponse};
 
-/// All KXNCAAMB* series we want to fetch from Kalshi.
-/// KXNCAAMBGAME = individual game markets, the rest are conference tournament series
-/// where the championship game markets serve as game-winner markets.
-const CBB_SERIES: &[&str] = &[
-    "KXNCAAMBGAME",
-    "KXNCAAMBSOCON",
-    "KXNCAAMBSBELT",
-    "KXNCAAMBACC",
-    "KXNCAAMBSEC",
-    "KXNCAAMBSWAC",
-    "KXNCAAMBWCC",
-    "KXNCAAMBCAA",
-    "KXNCAAMBBSKY",
-    "KXNCAAMBNEC",
-    "KXNCAAMBAE",
-    "KXNCAAMBWAC",
-    "KXNCAAMBMEAC",
-    "KXNCAAMBPAT",
-    "KXNCAAMBB12",
-    "KXNCAAMBBTEN",
-    "KXNCAAMBBE",
-    "KXNCAAMBHL",
-    "KXNCAAMBMWC",
-    "KXNCAAMBAAC",
-    "KXNCAAMBSLAND",
-    "KXNCAAMBOVC",
-    "KXNCAAMBMAAC",
-    "KXNCAAMBASUN",
-    "KXNCAAMBCUSA",
-    "KXNCAAMBMVC",
+/// CBB series prefix — all men's college basketball series start with this.
+const CBB_SERIES_PREFIX: &str = "KXNCAAMB";
+
+/// Series suffixes to EXCLUDE — these are not game-winner markets.
+/// Spreads, totals, first-half props, awards, season props, championship futures.
+const EXCLUDED_SERIES_SUFFIXES: &[&str] = &[
+    "SPREAD", "TOTAL", "1HSPREAD", "1HTOTAL", "1HWINNER",
+    "APRANK", "NAISMITH", "COTY", "MOP",
+    "UNDEFEATED", "FIRST10", "ACHAMP",
 ];
 
 /// Extracted book prices with named fields (replaces raw tuple).
@@ -61,26 +40,34 @@ pub fn today_and_tomorrow_tags() -> (String, String, Vec<String>) {
     (today, tomorrow, tags)
 }
 
-/// Fetch all CBB events from Kalshi across multiple series (concurrent).
+/// Discover all KXNCAAMB* series dynamically via the Kalshi /series endpoint,
+/// then fetch open events for each series concurrently.
 pub async fn fetch_all_kalshi_cbb_events(
     kalshi_rest: &KalshiRestClient,
 ) -> GetEventsResponse {
-    let futs: Vec<_> = CBB_SERIES
+    // Step 1: Discover all CBB series dynamically
+    let series_list = discover_cbb_series(kalshi_rest).await;
+
+    // Step 2: Fetch events for each series concurrently
+    let futs: Vec<_> = series_list
         .iter()
-        .map(|series| async move {
-            match kalshi_rest
-                .get_events_with_series(None, Some(series), Some("open"), None, Some(200))
-                .await
-            {
-                Ok(resp) => {
-                    if !resp.events.is_empty() {
-                        tracing::debug!("Fetched {} events from series {}", resp.events.len(), series);
+        .map(|series| {
+            let series = series.clone();
+            async move {
+                match kalshi_rest
+                    .get_events_with_series(None, Some(&series), Some("open"), None, Some(200))
+                    .await
+                {
+                    Ok(resp) => {
+                        if !resp.events.is_empty() {
+                            tracing::debug!("Fetched {} events from series {}", resp.events.len(), series);
+                        }
+                        resp.events
                     }
-                    resp.events
-                }
-                Err(e) => {
-                    tracing::debug!("Failed to fetch series {}: {:?}", series, e);
-                    vec![]
+                    Err(e) => {
+                        tracing::debug!("Failed to fetch series {}: {:?}", series, e);
+                        vec![]
+                    }
                 }
             }
         })
@@ -92,6 +79,35 @@ pub async fn fetch_all_kalshi_cbb_events(
     GetEventsResponse {
         events: all_events,
         cursor: None,
+    }
+}
+
+/// Discover all KXNCAAMB* series from the Kalshi /series API.
+/// Falls back to just KXNCAAMBGAME if the API call fails.
+async fn discover_cbb_series(kalshi_rest: &KalshiRestClient) -> Vec<String> {
+    match kalshi_rest.get_series_list(None).await {
+        Ok(resp) => {
+            let cbb: Vec<String> = resp.series.iter()
+                .filter(|s| {
+                    s.ticker.starts_with(CBB_SERIES_PREFIX)
+                        && !EXCLUDED_SERIES_SUFFIXES.iter().any(|suffix| {
+                            s.ticker.ends_with(suffix)
+                        })
+                })
+                .map(|s| s.ticker.clone())
+                .collect();
+            if cbb.is_empty() {
+                tracing::warn!("No {} series found in API, using fallback", CBB_SERIES_PREFIX);
+                vec!["KXNCAAMBGAME".to_string()]
+            } else {
+                tracing::info!("Discovered {} CBB series: {:?}", cbb.len(), cbb);
+                cbb
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Series discovery failed ({:?}), using fallback", e);
+            vec!["KXNCAAMBGAME".to_string()]
+        }
     }
 }
 

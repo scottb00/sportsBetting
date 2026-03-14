@@ -7,6 +7,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use super::types::*;
 
 const GAMMA_URL: &str = "https://gamma-api.polymarket.com";
+const CLOB_URL: &str = "https://clob.polymarket.com";
 const WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 
 #[derive(Debug, Clone)]
@@ -95,6 +96,36 @@ impl PolymarketClient {
         all_events.dedup_by(|a, b| a.id == b.id);
 
         Ok(all_events)
+    }
+
+    // --- CLOB REST API ---
+
+    /// Fetch the current order book for a token, returning best bid/ask as decimals (0.0–1.0).
+    pub async fn fetch_book(&self, token_id: &str) -> Result<(Option<f64>, Option<f64>)> {
+        let url = format!("{}/book?token_id={}", CLOB_URL, token_id);
+        let resp: serde_json::Value = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .context("Failed to fetch Polymarket book")?
+            .json()
+            .await
+            .context("Failed to parse Polymarket book")?;
+
+        let best_bid = resp.get("bids")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|b| b.get("price"))
+            .and_then(|v| v.as_str().and_then(|s| s.parse::<f64>().ok()));
+
+        let best_ask = resp.get("asks")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|b| b.get("price"))
+            .and_then(|v| v.as_str().and_then(|s| s.parse::<f64>().ok()));
+
+        Ok((best_bid, best_ask))
     }
 
     // --- WebSocket ---

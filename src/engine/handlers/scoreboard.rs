@@ -90,11 +90,11 @@ pub async fn handle_scoreboard_tick(
     // Cancel ALL resting orders on games transitioning from break -> live.
     // Cancels all orders (not just break_ev tagged) so orders surviving a bot restart
     // (where order_strategies is lost) are also cleaned up.
-    cancel_break_orders(state, &breaks_ended, kalshi_rest, dry_run).await;
+    cancel_break_orders(state, &breaks_ended, kalshi_rest, logger, dry_run).await;
 
     // Cancel CLV orders that are no longer at the top of book (market moved away).
     // Runs before snapshot so the re-evaluation below can re-place at the new price.
-    refresh_stale_clv_orders(state, order_books, kalshi_rest, dry_run).await;
+    refresh_stale_clv_orders(state, order_books, kalshi_rest, logger, dry_run).await;
 
     // Re-acquire lock for mutable pre-work, then snapshot and release before evaluation.
     // This minimizes lock hold time: WS fill processing isn't blocked during strategy evaluation.
@@ -124,10 +124,10 @@ pub async fn handle_scoreboard_tick(
         }
     }
 
-    // Send notifications for break_ev trades and any risk-reducing trades
+    // Send notifications only for max-conviction entries (score >= 5.0) or risk-reducing trades
     if let Some(n) = notifier {
         let notify_orders: Vec<_> = placed.into_iter()
-            .filter(|o| o.strategy == "break_ev" || o.reduce_only)
+            .filter(|o| o.conviction_score.is_some_and(|s| s >= 5.0) || o.reduce_only)
             .collect();
         n.notify_orders_batch(&notify_orders).await;
     }
@@ -142,6 +142,7 @@ async fn cancel_break_orders(
     state: &SharedState,
     ended_event_ids: &[String],
     kalshi_rest: &Arc<KalshiRestClient>,
+    logger: &SharedLogger,
     dry_run: bool,
 ) {
     if ended_event_ids.is_empty() {
@@ -184,6 +185,9 @@ async fn cancel_break_orders(
             Ok(()) => {
                 let mut s = state.lock().await;
                 s.order_manager.remove_order(order_id);
+                let log = logger.lock().unwrap();
+                let _ = log.update_order_status(order_id, "canceled");
+                drop(log);
                 tracing::info!("Break ended: cancelled {} on {}", order_id, ticker);
             }
             Err(e) => {
@@ -205,6 +209,7 @@ async fn refresh_stale_clv_orders(
     state: &SharedState,
     order_books: &SharedOrderBooks,
     kalshi_rest: &Arc<KalshiRestClient>,
+    logger: &SharedLogger,
     dry_run: bool,
 ) {
     // Collect stale CLV orders under locks (no async work inside)
@@ -255,6 +260,9 @@ async fn refresh_stale_clv_orders(
                 // Mark in-flight after cancel so the strategy cannot immediately re-place
                 // on the same tick. The 60s prune window acts as a cooldown.
                 s.order_manager.mark_in_flight(ticker);
+                let log = logger.lock().unwrap();
+                let _ = log.update_order_status(order_id, "canceled");
+                drop(log);
                 tracing::info!("CLV stale: cancelled {} on {}, will re-evaluate", order_id, ticker);
             }
             Err(e) => {

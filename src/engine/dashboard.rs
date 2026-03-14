@@ -7,8 +7,9 @@ use axum::{
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-use crate::engine::bot::{SharedState, SharedOrderBooks, SharedLogger, SharedBreakLog};
+use crate::engine::bot::{SharedState, SharedOrderBooks, SharedLogger, SharedBreakLog, SharedPolyBooks};
 use crate::engine::market_prep::book_prices;
+use crate::engine::venue::KALSHI_FEE_RATE;
 use crate::strategies::common::compute_edge_and_alo;
 use crate::sportsbooks::types::SportsbookSpread;
 
@@ -17,6 +18,7 @@ use crate::sportsbooks::types::SportsbookSpread;
 struct DashboardState {
     bot: SharedState,
     order_books: SharedOrderBooks,
+    poly_books: SharedPolyBooks,
     break_log: SharedBreakLog,
     db_path: String,
     dry_run: bool,
@@ -53,6 +55,10 @@ struct GameView {
     net_game_contracts: i64,
     /// Total resting contracts across all markets in this game.
     total_resting_contracts: i64,
+    /// Polymarket YES bid in cents (home-aligned).
+    poly_bid: Option<i64>,
+    /// Polymarket YES ask in cents (home-aligned).
+    poly_ask: Option<i64>,
     markets: Vec<MarketView>,
 }
 
@@ -234,6 +240,10 @@ struct GameSnapshot {
     espn_age_secs: u64,
     start_time_ts: Option<i64>,
     net_game_contracts: i64,
+    /// Polymarket YES bid in cents (home-aligned).
+    poly_bid: Option<i64>,
+    /// Polymarket YES ask in cents (home-aligned).
+    poly_ask: Option<i64>,
     markets: Vec<MarketSnapshot>,
 }
 
@@ -258,7 +268,7 @@ fn compute_market_conviction(
         (Some(b), Some(a)) => (b as i64, a as i64),
         _ => return (None, None),
     };
-    let edge_result = match compute_edge_and_alo(b, a, fv, 1) {
+    let edge_result = match compute_edge_and_alo(b, a, fv, 1, KALSHI_FEE_RATE) {
         Some(r) => r,
         None => return (None, None),
     };
@@ -277,6 +287,7 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
     // Phase 1: Snapshot all data under locks (O(1) lookups only, no string formatting).
     let snapshots: Vec<GameSnapshot> = {
         let books = state.order_books.read().await;
+        let pbooks = state.poly_books.read().await;
         let s = state.bot.lock().await;
         s.game_state.games.values()
             .filter(|g| {
@@ -308,6 +319,21 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
                         conviction_details: conv_details,
                     }
                 }).collect();
+
+                // Polymarket bid/ask: look up by token_id, flip if polymarket_is_home = false
+                let (poly_bid, poly_ask) = g.polymarket_token_id.as_ref()
+                    .and_then(|tid| pbooks.get(tid))
+                    .map(|pb| {
+                        if g.polymarket_is_home {
+                            // YES token = home team, prices are already home-aligned
+                            (pb.best_bid, pb.best_ask)
+                        } else {
+                            // YES token = away team, flip: home_bid = 100 - away_ask, home_ask = 100 - away_bid
+                            (pb.best_ask.map(|a| 100 - a), pb.best_bid.map(|b| 100 - b))
+                        }
+                    })
+                    .unwrap_or((None, None));
+
                 GameSnapshot {
                     espn_event_id: g.espn_event_id.clone(),
                     home_team: g.home_team.clone(),
@@ -325,11 +351,13 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
                     espn_age_secs: g.last_updated.elapsed().as_secs(),
                     start_time_ts: g.start_time_ts,
                     net_game_contracts: s.risk.net_game_home_risk(&g.kalshi_markets),
+                    poly_bid,
+                    poly_ask,
                     markets,
                 }
             })
             .collect()
-        // books and s (both locks) drop here
+        // books, pbooks, and s (all locks) drop here
     };
 
     // Phase 2: Build view structs and sort — no locks held.
@@ -389,6 +417,8 @@ async fn api_games(State(state): State<DashboardState>) -> impl IntoResponse {
             start_time_ts: g.start_time_ts,
             net_game_contracts: g.net_game_contracts,
             total_resting_contracts: total_resting,
+            poly_bid: g.poly_bid,
+            poly_ask: g.poly_ask,
             markets,
         }
     }).collect();
@@ -478,9 +508,16 @@ async fn api_orders(State(state): State<DashboardState>) -> impl IntoResponse {
             row.home_team = Some(e.home_team.clone());
             row.away_team = Some(e.away_team.clone());
             row.is_home = Some(e.is_home);
-            row.spread_bid_home = e.spread_bid_home;
-            row.spread_offer_home = e.spread_offer_home;
-            row.spread_books_count = e.spread_books_count;
+            // Only fill spread from live state when not persisted in DB
+            if row.spread_bid_home.is_none() {
+                row.spread_bid_home = e.spread_bid_home;
+            }
+            if row.spread_offer_home.is_none() {
+                row.spread_offer_home = e.spread_offer_home;
+            }
+            if row.spread_books_count == 0 {
+                row.spread_books_count = e.spread_books_count;
+            }
         }
         // Use stored edge_bps from DB as the canonical edge; only fall back to live
         // fair value for old orders that predate edge_bps logging.
@@ -633,7 +670,7 @@ fn compute_order_edge(fair_value: f64, price_cents: i64, side: &str, action: &st
 fn query_orders(db_path: &str) -> anyhow::Result<Vec<OrderRow>> {
     let conn = open_read_only(db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT order_id, ticker, COALESCE(strategy,''), action, side, price_cents, count, status, created_at, game_name, home_team, away_team, is_home, edge_bps, fair_value_cents, is_close, conviction_score, conviction_details
+        "SELECT order_id, ticker, COALESCE(strategy,''), action, side, price_cents, count, status, created_at, game_name, home_team, away_team, is_home, edge_bps, fair_value_cents, is_close, conviction_score, conviction_details, spread_bid_home, spread_offer_home, spread_books_count
          FROM orders ORDER BY datetime(created_at) DESC LIMIT 50"
     )?;
     let rows = stmt.query_map([], |row| {
@@ -659,9 +696,12 @@ fn query_orders(db_path: &str) -> anyhow::Result<Vec<OrderRow>> {
             edge: None,
             conviction_score: row.get(16)?,
             conviction_details: row.get(17)?,
-            spread_bid_home: None,
-            spread_offer_home: None,
-            spread_books_count: 0,
+            spread_bid_home: row.get(18)?,
+            spread_offer_home: row.get(19)?,
+            spread_books_count: {
+                let v: Option<i64> = row.get(20)?;
+                v.unwrap_or(0) as usize
+            },
         })
     })?.filter_map(|r| r.ok()).collect();
     Ok(rows)
@@ -1032,10 +1072,11 @@ async fn api_exclude_fills(State(state): State<DashboardState>, Query(q): Query<
 
 // --- Server ---
 
-pub async fn serve(bot_state: SharedState, order_books: SharedOrderBooks, _logger: SharedLogger, break_log: SharedBreakLog, db_path: &str, port: u16, dry_run: bool) -> anyhow::Result<()> {
+pub async fn serve(bot_state: SharedState, order_books: SharedOrderBooks, poly_books: SharedPolyBooks, _logger: SharedLogger, break_log: SharedBreakLog, db_path: &str, port: u16, dry_run: bool) -> anyhow::Result<()> {
     let state = DashboardState {
         bot: bot_state,
         order_books,
+        poly_books,
         break_log,
         db_path: db_path.to_string(),
         dry_run,

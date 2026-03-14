@@ -699,8 +699,8 @@ fn same_ticker_reduce_signal_fires() {
 
 #[test]
 fn reduce_signal_capped_at_net_position_not_regular_remaining() {
-    // 7 YES on home. Regular cap=20 → regular_remaining=13.
-    // Reduce signal should be capped at 7 (reduce_cap = net position), not 13.
+    // 7 YES on home. Regular cap=20 → regular_remaining=13, reduce_cap=7.
+    // Reduce signal gets reduce_cap + regular_remaining = 20 (allows position flips).
     let mut risk = test_risk();
     risk.seed_positions("T0-HOME", "yes", 70, 7);
 
@@ -719,8 +719,8 @@ fn reduce_signal_capped_at_net_position_not_regular_remaining() {
         );
         if is_reduce {
             assert_eq!(
-                signal.max_contracts.unwrap_or(0), 7,
-                "Reduce max_contracts should be 7 (net position), not regular_remaining=13"
+                signal.max_contracts.unwrap_or(0), 20,
+                "Reduce max_contracts should be reduce_cap(7) + regular_remaining(13) = 20"
             );
         }
     }
@@ -784,8 +784,8 @@ fn cross_ticker_reduce_bypasses_resting_on_other_market() {
     assert_eq!(signal.kalshi_ticker, "T0-AWAY", "Should be a T0-AWAY signal");
     assert!(matches!(signal.side, OrderSide::Yes), "Should be YES on T0-AWAY (away team)");
     assert_eq!(
-        signal.max_contracts.unwrap_or(0), 7,
-        "Reduce cap should be 7 (net game home risk)"
+        signal.max_contracts.unwrap_or(0), 15,
+        "Reduce cap should be reduce_cap(7) + regular_remaining(8) = 15"
     );
 }
 

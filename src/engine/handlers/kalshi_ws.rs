@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use crate::engine::bot::{SharedState, SharedOrderBooks, SharedLogger};
 use crate::engine::logger::GameInfo;
-use crate::engine::notifier::{FillInfo, Notifier};
+use crate::engine::notifier::Notifier;
 use crate::engine::risk::RiskManager;
 use crate::kalshi::orderbook::DeltaResult;
 use crate::kalshi::rest::KalshiRestClient;
@@ -121,24 +121,8 @@ pub async fn handle_kalshi_event(
                     None, // WS fills don't include timestamp; use current time
                 );
             }
-            // Send Telegram fill notification
-            if let Some(notifier) = notifier {
-                let game_name = game_info.as_ref().map(|gi| gi.game_name.clone());
-                let daily_pnl = {
-                    let log = logger.lock().unwrap();
-                    log.daily_realized_pnl().unwrap_or(0.0)
-                };
-                let fill_info = FillInfo {
-                    ticker: fill.market_ticker.clone(),
-                    side: fill.side.clone(),
-                    action: fill.action.clone(),
-                    price_cents,
-                    count: fill.count,
-                    fee_dollars,
-                    game_name,
-                };
-                notifier.notify_fills(&[fill_info], daily_pnl).await;
-            }
+            // Fill notifications disabled — only max-conviction order placements notify via Telegram
+            let _ = notifier;
         }
         KalshiWsEvent::Trade(trade) => {
             tracing::debug!(

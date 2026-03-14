@@ -94,6 +94,20 @@ pub type SharedState = Arc<Mutex<BotState>>;
 /// Separated from BotState so orderbook updates (highest frequency) don't block strategy evaluation.
 pub type SharedOrderBooks = Arc<tokio::sync::RwLock<HashMap<String, LocalOrderBook>>>;
 
+/// Polymarket top-of-book data (best bid/ask in cents), keyed by token_id.
+#[derive(Debug, Clone)]
+pub struct PolymarketBook {
+    /// Best bid in cents (1–99), converted from Polymarket's 0.0–1.0 decimal.
+    pub best_bid: Option<i64>,
+    /// Best ask in cents (1–99), converted from Polymarket's 0.0–1.0 decimal.
+    pub best_ask: Option<i64>,
+    /// When this data was last updated.
+    pub last_updated: std::time::Instant,
+}
+
+/// Polymarket top-of-book data, keyed by token_id.
+pub type SharedPolyBooks = Arc<tokio::sync::RwLock<HashMap<String, PolymarketBook>>>;
+
 /// Break evaluation log for the dashboard. Separated from BotState since it's dashboard-only.
 pub type SharedBreakLog = Arc<std::sync::Mutex<VecDeque<BreakEvalLog>>>;
 
@@ -231,8 +245,11 @@ pub fn populate_game_states(
             }
         }
 
-        gs.polymarket_token_id = poly_token;
-        gs.polymarket_is_home = poly_is_home;
+        // Only update Polymarket data if we have new data — don't overwrite with None
+        if poly_token.is_some() {
+            gs.polymarket_token_id = poly_token;
+            gs.polymarket_is_home = poly_is_home;
+        }
 
         // Register tickers in reverse index for O(1) lookups
         for info in &kalshi_market_infos {

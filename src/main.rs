@@ -75,18 +75,20 @@ async fn main() -> Result<()> {
     let state: SharedState = Arc::new(Mutex::new(bot_state));
     let mapper: SharedMapper = Arc::new(Mutex::new(market_mapper));
     let order_books: SharedOrderBooks = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    let poly_books: sports_betting::engine::bot::SharedPolyBooks = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
     let break_log: SharedBreakLog = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
 
     // Start dashboard web server
     {
         let dashboard_state = state.clone();
         let dashboard_books = order_books.clone();
+        let dashboard_poly_books = poly_books.clone();
         let dashboard_logger = logger.clone();
         let dashboard_break_log = break_log.clone();
         let db_path = config.logging.db_path.clone();
         let dashboard_dry_run = config.kalshi.dry_run;
         tokio::spawn(async move {
-            if let Err(e) = dashboard::serve(dashboard_state, dashboard_books, dashboard_logger, dashboard_break_log, &db_path, 3030, dashboard_dry_run).await {
+            if let Err(e) = dashboard::serve(dashboard_state, dashboard_books, dashboard_poly_books, dashboard_logger, dashboard_break_log, &db_path, 3030, dashboard_dry_run).await {
                 tracing::error!("Dashboard server failed: {:?}", e);
             }
         });
@@ -201,6 +203,49 @@ async fn main() -> Result<()> {
         }
     }
 
+    // --- Seed Polymarket books via REST ---
+    // WS only sends updates on trades/order changes; REST gives immediate baseline prices.
+    {
+        let poly_tokens: Vec<String> = {
+            let s = state.lock().await;
+            s.game_state.games.values()
+                .filter_map(|g| g.polymarket_token_id.clone())
+                .collect()
+        };
+        if !poly_tokens.is_empty() {
+            let poly_client = sports_betting::polymarket::client::PolymarketClient::new();
+            let mut seeded = 0usize;
+            for token_id in &poly_tokens {
+                match poly_client.fetch_book(token_id).await {
+                    Ok((best_bid, best_ask)) => {
+                        let bid_cents = best_bid.filter(|&p| p > 0.0 && p < 1.0).map(|p| (p * 100.0).round() as i64);
+                        let ask_cents = best_ask.filter(|&p| p > 0.0 && p < 1.0).map(|p| (p * 100.0).round() as i64);
+                        if bid_cents.is_some() || ask_cents.is_some() {
+                            let mut books = poly_books.write().await;
+                            let book = books.entry(token_id.clone()).or_insert_with(|| {
+                                sports_betting::engine::bot::PolymarketBook {
+                                    best_bid: None,
+                                    best_ask: None,
+                                    last_updated: std::time::Instant::now(),
+                                }
+                            });
+                            book.best_bid = bid_cents;
+                            book.best_ask = ask_cents;
+                            book.last_updated = std::time::Instant::now();
+                            seeded += 1;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to seed Polymarket book for {}: {:?}", token_id, e);
+                    }
+                }
+            }
+            if seeded > 0 {
+                tracing::info!("Seeded {} Polymarket books via REST at startup", seeded);
+            }
+        }
+    }
+
     // --- Main event loop ---
     let mut game_tracker = GameTracker::new();
     let mut scoreboard_interval =
@@ -231,7 +276,7 @@ async fn main() -> Result<()> {
             }
             _ = maintenance_interval.tick() => {
                 handlers::handle_maintenance_tick(
-                    &state, &order_books, &logger, &kalshi_rest, &espn_poller,
+                    &state, &order_books, &poly_books, &logger, &kalshi_rest, &espn_poller,
                     &mapper, kalshi_ws_handle.as_ref(), notifier.as_ref(),
                     odds_api_client.as_ref(),
                 ).await;
@@ -250,7 +295,7 @@ async fn main() -> Result<()> {
                     None => std::future::pending().await,
                 }
             } => {
-                handlers::handle_polymarket_event(event, &state).await;
+                handlers::handle_polymarket_event(event, &poly_books).await;
             }
         }
     }
